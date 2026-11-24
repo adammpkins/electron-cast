@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",
     "check": "npm run typecheck && npm run lint && npm test"
   },
