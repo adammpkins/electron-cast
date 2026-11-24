@@ -101,7 +101,41 @@ namespace messages; `chrome.cast.media` comes after.
 
 ## Electron layer (`src/electron/`)
 
-- `main.ts`: `createCastManager({ selectDevice, allowOrigin })` registers IPC handlers. `selectDevice(devices,
-  request)` returns the user's choice or `null` (maps to `chrome.cast.ErrorCode.CANCEL`). `allowOrigin(origin)` gates
-  every request by the sender frame's origin.
-- `preload.ts`: exposes the bridge and installs the polyfill in the main world before page scripts run.
+No Electron import: both modules take the Electron objects they need as parameters, typed by small structural
+interfaces, so the library has no Electron dependency and runs in plain Node.
+
+- `main.ts`: `createCastManager({ ipcMain, selectDevice, allowOrigin?, discovery?, createClient?, channel? })`
+  returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events go back to the
+  page on `<channel>:event`. `selectDevice(devices, request)` returns the user's choice or `null` (maps to
+  `chrome.cast.ErrorCode.CANCEL`); `allowOrigin(origin)` gates every call by the sender frame's origin. A sender is
+  one webContents, which leaves its sessions when it is destroyed or navigates (`did-navigate`).
+- `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, bridgeKey? })` exposes the bridge
+  (`call`, `onEvent`) and installs the polyfill in the main world before page scripts run.
+
+Main process:
+
+```ts
+import { ipcMain, BrowserWindow } from "electron";
+import { createCastManager } from "electron-cast/main";
+
+const manager = createCastManager({
+  ipcMain,
+  selectDevice: async (devices, request) => {
+    const win = new BrowserWindow(); // your picker UI
+    await win.loadFile("picker.html");
+    return pickFromUI(devices, request); // or null for CANCEL
+  },
+  allowOrigin: (origin) => origin === "https://music.youtube.com",
+});
+await manager.start();
+```
+
+Preload script:
+
+```ts
+import { contextBridge, ipcRenderer } from "electron";
+import { installCastBridge } from "electron-cast/preload"; // not the root: it loads node:tls, which a sandboxed preload cannot
+
+installCastBridge({ contextBridge, ipcRenderer });
+// the page now has chrome.cast; the bridge key defaults to "__electronCastBridge"
+```
