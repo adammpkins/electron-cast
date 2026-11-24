@@ -64,6 +64,8 @@ export class FakeClient extends EventEmitter<{
   transports = new Set<string>();
   calls: string[] = [];
   closed = false;
+  /** Like CastClient: every reply that carries a status is also emitted as receiverStatus before the call resolves. */
+  echoReplies = false;
   private n = 0;
 
   constructor(device: CastDevice) {
@@ -102,8 +104,13 @@ export class FakeClient extends EventEmitter<{
     this.sent.push({ namespace, destinationId, payload });
   }
 
+  private echo(): void {
+    if (this.echoReplies) this.emit("receiverStatus", this.status());
+  }
+
   async launch(appId: string): Promise<ReceiverApplication> {
     this.calls.push(`launch ${appId}`);
+    if (!this.connected) throw new CastConnectionError("not connected");
     if (this.launchDelayMs) await new Promise((r) => setTimeout(r, this.launchDelayMs));
     if (this.launchError) throw this.launchError;
     const k = ++this.n;
@@ -117,22 +124,26 @@ export class FakeClient extends EventEmitter<{
       iconUrl: "https://example.test/yt.png",
     };
     this.apps = [app];
+    this.echo();
     return { ...app };
   }
 
   async stop(sessionId: string): Promise<ReceiverStatus> {
     this.calls.push(`stop ${sessionId}`);
     this.apps = this.apps.filter((a) => a.sessionId !== sessionId);
+    this.echo();
     return this.status();
   }
 
   async setVolume(v: { level: number } | { muted: boolean }): Promise<ReceiverStatus> {
     this.calls.push(`volume ${JSON.stringify(v)}`);
     Object.assign(this.volume, v);
+    this.echo();
     return this.status();
   }
 
   async getStatus(): Promise<ReceiverStatus> {
+    this.echo();
     return this.status();
   }
 

@@ -363,3 +363,91 @@ test("dispose closes every client and stops listening for devices", async () => 
   assert.deepEqual(log.events, []);
   assert.equal(devices.listenerCount("deviceUp") + devices.listenerCount("deviceDown") + devices.listenerCount("deviceChanged"), 0);
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// Against a client that behaves like CastClient: replies that carry a status are also emitted as receiverStatus
+// (synchronously, before the call resolves), and launch() rejects until connect() has finished.
+
+const echo = (c: FakeClient) => (c.echoReplies = true);
+
+test("echoing client: requestSession succeeds and the client stays open", async () => {
+  const { service, clients } = setup({ tweak: echo });
+  const s = await session(service);
+  assert.equal(s.sessionId, `${TV.id}-session-1`);
+  assert.equal(clients.length, 1);
+  assert.equal(clients[0]?.closed, false);
+  assert.ok(!clients[0]?.calls.includes("close"));
+  const r = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "{}" });
+  assert.deepEqual(r, { ok: true, value: undefined });
+});
+
+test("echoing client: stopSession ends the session once, never for the caller, and closes the client once", async () => {
+  const { service, clients, log } = setup({ tweak: echo });
+  const s = await session(service, PAGE);
+  await init(service, PAGE2); // origin_scoped: auto-joins
+  log.clear();
+  const r = await service.handle(PAGE, "stopSession", { sessionId: s.sessionId });
+  assert.deepEqual(r, { ok: true, value: undefined });
+  assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+  assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [{ type: "sessionEnded", sessionId: s.sessionId, status: "stopped" }]);
+  assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 1);
+});
+
+test("echoing client: a volume change is pushed as sessionUpdated", async () => {
+  const { service, log } = setup({ tweak: echo });
+  const s = await session(service);
+  log.clear();
+  await service.handle(PAGE, "setReceiverVolume", { sessionId: s.sessionId, level: 0.25 });
+  const updates = log.of(PAGE.id, "sessionUpdated") as { type: "sessionUpdated"; session: SessionSnapshot }[];
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0]?.session.receiver.volume.level, 0.25);
+});
+
+test("two requests for the same device share one client and one connect", async () => {
+  const { service, clients } = setup({ tweak: (c) => ((c.connectDelayMs = 20), echo(c)) });
+  await init(service, PAGE, { autoJoinPolicy: "page_scoped" });
+  await init(service, PAGE2, { autoJoinPolicy: "page_scoped" });
+  const req = { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 };
+  const [a, b] = await Promise.all([service.handle(PAGE, "requestSession", req), service.handle(PAGE2, "requestSession", req)]);
+  assert.equal(a.ok, true, JSON.stringify(a));
+  assert.equal(b.ok, true, JSON.stringify(b));
+  assert.equal(clients.length, 1);
+  assert.equal(clients[0]?.calls.filter((c) => c === "connect").length, 1);
+  assert.equal(clients[0]?.closed, false);
+});
+
+test("a connect failure fails every request waiting on it, and the next request makes a new client", async () => {
+  let made = 0;
+  const { service, clients } = setup({
+    tweak: (c) => {
+      c.connectDelayMs = 20;
+      if (made++ === 0) c.connectError = new Error("ECONNREFUSED");
+    },
+  });
+  await init(service, PAGE);
+  await init(service, PAGE2);
+  const req = { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 };
+  const [a, b] = await Promise.all([service.handle(PAGE, "requestSession", req), service.handle(PAGE2, "requestSession", req)]);
+  assert.equal(!a.ok && a.code, "receiver_unavailable");
+  assert.equal(!b.ok && b.code, "receiver_unavailable");
+  assert.equal(clients.length, 1);
+  const c = await service.handle(PAGE, "requestSession", req);
+  assert.equal(c.ok, true, JSON.stringify(c));
+  assert.equal(clients.length, 2);
+});
+
+test("senderGone while its request is launching: the late session is torn down", async () => {
+  const { service, clients, log } = setup({ tweak: (c) => ((c.launchDelayMs = 20), echo(c)) });
+  await init(service, PAGE);
+  const pending = service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  await tick(5);
+  service.senderGone(PAGE.id);
+  const r = await pending;
+  assert.equal(!r.ok && r.code, "cancel");
+  assert.ok(clients[0]?.calls.includes(`closeTransport ${TV.id}-transport-1`));
+  assert.equal(clients[0]?.closed, true);
+  await init(service, PAGE2);
+  const join = await service.handle(PAGE2, "joinSession", { sessionId: `${TV.id}-session-1` });
+  assert.equal(!join.ok && join.code, "session_error");
+  assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+});
