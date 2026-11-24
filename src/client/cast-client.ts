@@ -60,7 +60,7 @@ function buildMessage(sourceId: string, namespace: string, destinationId: string
     sourceId,
     destinationId,
     namespace,
-    payloadType: typeof payload === "string" || payload instanceof Uint8Array ? (typeof payload === "string" ? PayloadType.STRING : PayloadType.BINARY) : PayloadType.STRING,
+    payloadType: payload instanceof Uint8Array ? PayloadType.BINARY : PayloadType.STRING,
   };
   if (typeof payload === "string") msg.payloadUtf8 = payload;
   else if (payload instanceof Uint8Array) msg.payloadBinary = Buffer.from(payload);
