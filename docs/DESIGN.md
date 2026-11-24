@@ -112,6 +112,12 @@ interfaces, so the library has no Electron dependency and runs in plain Node.
   picking that session's device returns it without relaunching). `allowOrigin(origin)` gates every call by the
   sender frame's origin. A sender is one webContents, which leaves its sessions when it is destroyed or navigates
   (`did-navigate`).
+  `sessionStore` (optional, `{ get, set }`) makes sessions outlive the process. The service saves the session a
+  sender starts and clears it only when the session is over on the device (stopped, or replaced by another app), not
+  when the sender leaves or the connection drops. On `initialize`, a sender with the saved app and origin gets the
+  session back as a `sessionJoined` event (the page's `sessionListener`), but only if the device still reports the
+  saved `sessionId`: a session someone else started on that device since is never joined. The rejoin waits up to
+  15 s for discovery to find the device and stands down if the sender asks for a session itself meanwhile.
 - `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, bridgeKey? })` exposes the bridge
   (`call`, `onEvent`) and installs the polyfill in the main world before page scripts run.
 

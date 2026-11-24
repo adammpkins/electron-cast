@@ -384,6 +384,7 @@ export function installChromeCast(bridgeKey: string): boolean {
   let pendingRequest = false;
   let lastAvailability: string | null = null;
   const receiverActionListeners: any[] = [];
+  const joinedEarly: any[] = [];
 
   function notifyUpdate(sess: any, alive: boolean): void {
     for (const fn of [...sess.updateListeners]) safe(fn, alive);
@@ -396,6 +397,12 @@ export function installChromeCast(bridgeKey: string): boolean {
         if (value === lastAvailability) return;
         lastAvailability = value;
         if (apiConfig) safe(apiConfig.receiverListener, value);
+        return;
+      }
+      case "sessionJoined": {
+        // The main process may rejoin before the initialize reply has been handled here.
+        if (apiConfig) safe(apiConfig.sessionListener, upsertSession(event.session));
+        else joinedEarly.push(event.session);
         return;
       }
       case "sessionUpdated": {
@@ -446,7 +453,7 @@ export function installChromeCast(bridgeKey: string): boolean {
       lastAvailability = availability;
       safe(success);
       safe(apiCfg.receiverListener, availability);
-      for (const snap of value.sessions ?? []) safe(apiCfg.sessionListener, upsertSession(snap));
+      for (const snap of [...(value.sessions ?? []), ...joinedEarly.splice(0)]) safe(apiCfg.sessionListener, upsertSession(snap));
     }).catch((e: unknown) => fail(error, "session_error", String(e)));
   }
 

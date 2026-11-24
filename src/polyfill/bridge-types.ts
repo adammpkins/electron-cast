@@ -18,6 +18,7 @@ export interface SessionSnapshot {
 }
 export type BridgeEvent =
   | { type: "receiverAvailability"; available: boolean }
+  | { type: "sessionJoined"; session: SessionSnapshot }
   | { type: "sessionUpdated"; session: SessionSnapshot }
   | { type: "sessionEnded"; sessionId: string; status: "stopped" | "disconnected" }
   | { type: "message"; sessionId: string; namespace: string; message: string };

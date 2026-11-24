@@ -60,6 +60,18 @@ export interface CastRequestInfo {
   session?: { sessionId: string; deviceId: string };
 }
 
+/** A session worth rejoining later: enough to find it again and to check it is still the same one. */
+export interface SavedSession { deviceId: string; sessionId: string; appId: string; origin: string }
+
+/**
+ * Where the service keeps the session it started last, so a later run can rejoin it. `set(null)` means the
+ * session is over. A session that is merely left (the page or the app went away) stays saved.
+ */
+export interface SessionStore {
+  get(): SavedSession | null | Promise<SavedSession | null>;
+  set(session: SavedSession | null): void;
+}
+
 /** The picker's answer: a device to cast to, `null` (cancel) or `"stop"` (stop the sender's current session). */
 export type DeviceChoice = CastDevice | null | "stop";
 
@@ -73,6 +85,11 @@ export interface CastSessionServiceOptions {
    */
   selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
+  /**
+   * When given, a sender that initializes for the saved session's app and origin rejoins that session if its
+   * device still runs it, and learns about it through its sessionListener.
+   */
+  sessionStore?: SessionStore;
   emit(senderId: number, event: BridgeEvent): void;
 }
 
@@ -113,6 +130,8 @@ const CAPABILITY_BITS: Record<string, number> = {
 };
 
 const DEFAULT_TIMEOUT_MS = 60000;
+/** How long a restore waits for discovery to find the saved session's device. */
+const RESTORE_DISCOVERY_TIMEOUT_MS = 15000;
 
 /** A request that must be reported as a specific chrome.cast error code. */
 class MappedError extends Error {
@@ -234,6 +253,8 @@ export class CastSessionService {
   private readonly pendingRequests = new Map<number, { discard: { value: boolean }; cancelled: { value: boolean } }>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
   private disposed = false;
+  /** The session the store currently holds, so only its end clears the store. */
+  private savedSessionId: string | undefined;
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
@@ -306,7 +327,8 @@ export class CastSessionService {
     const p = parseInitialize(params);
     if (p === null) return bad("invalid_parameter");
     const available = this.options.devices.devices().some((d) => deviceMatches(d, p.capabilities));
-    this.senders.set(sender.id, { appId: p.appId, capabilities: p.capabilities, lastAvailable: available });
+    const record: SenderRecord = { appId: p.appId, capabilities: p.capabilities, lastAvailable: available };
+    this.senders.set(sender.id, record);
     const joined: SessionSnapshot[] = [];
     for (const rec of this.sessions.values()) {
       if (rec.appId !== p.appId || rec.origin !== sender.origin) continue;
@@ -317,7 +339,113 @@ export class CastSessionService {
         joined.push(this.snapshotOf(rec));
       }
     }
+    // A page_scoped sender never joins a session it did not start.
+    if (joined.length === 0 && p.autoJoinPolicy !== "page_scoped") void this.restoreSession(sender, record);
     return good({ available, sessions: joined });
+  }
+
+  /** Rejoin the saved session for a sender that just initialized, if its device still runs it. */
+  private async restoreSession(sender: SenderInfo, record: SenderRecord): Promise<void> {
+    const store = this.options.sessionStore;
+    if (store === undefined) return;
+    // The sender re-initialized, went away or asked for a session itself while this was in flight.
+    const superseded = (): boolean =>
+      this.disposed || this.senders.get(sender.id) !== record || this.pendingRequests.has(sender.id) || this.currentSessionFor(sender.id, record.appId) !== undefined;
+    let entry: ClientEntry | undefined;
+    let registered = false;
+    try {
+      const saved = await store.get();
+      if (!saved || saved.appId !== record.appId || saved.origin !== sender.origin) return;
+      const device = await this.waitForDevice(saved.deviceId);
+      if (device === undefined || superseded() || this.sessions.has(saved.sessionId)) return;
+      entry = this.clientFor(device);
+      entry.opening += 1;
+      await entry.ready;
+      const status = await entry.client.getStatus();
+      if (superseded() || this.sessions.has(saved.sessionId)) return;
+      const app = status.applications.find((a) => a.sessionId === saved.sessionId && a.appId === saved.appId);
+      if (app === undefined) {
+        store.set(null);
+        return;
+      }
+      entry.client.connectTransport(app.transportId);
+      const rec: SessionRecord = {
+        device,
+        client: entry.client,
+        app,
+        origin: saved.origin,
+        appId: saved.appId,
+        members: new Set([sender.id]),
+        lastVolume: status.volume,
+        lastSnapshot: null,
+      };
+      rec.lastSnapshot = this.snapshotOf(rec);
+      this.sessions.set(app.sessionId, rec);
+      this.savedSessionId = app.sessionId;
+      registered = true;
+      this.emitTo(sender.id, { type: "sessionJoined", session: rec.lastSnapshot });
+    } catch {
+      // The device could not be reached: the session stays saved for the next initialize.
+    } finally {
+      if (entry !== undefined) {
+        entry.opening -= 1;
+        if (!registered) this.cleanupIdle(entry.device.id, entry.client);
+      }
+    }
+  }
+
+  /** The device with this id, waiting for discovery to find it when it is not known yet. */
+  private waitForDevice(deviceId: string): Promise<CastDevice | undefined> {
+    const devices = this.options.devices;
+    const known = devices.devices().find((d) => d.id === deviceId);
+    if (known !== undefined) return Promise.resolve(known);
+    return new Promise((resolve) => {
+      const finish = (device?: CastDevice): void => {
+        clearTimeout(timer);
+        devices.off("deviceUp", onUp);
+        resolve(device);
+      };
+      const onUp = (device: CastDevice): void => {
+        if (device.id === deviceId) finish(device);
+      };
+      const timer = setTimeout(finish, RESTORE_DISCOVERY_TIMEOUT_MS);
+      timer.unref();
+      devices.on("deviceUp", onUp);
+    });
+  }
+
+  private remember(rec: SessionRecord): void {
+    this.savedSessionId = rec.app.sessionId;
+    this.options.sessionStore?.set({ deviceId: rec.device.id, sessionId: rec.app.sessionId, appId: rec.appId, origin: rec.origin });
+  }
+
+  /** The session is over on the device (not merely left), so there is nothing to rejoin. */
+  private forget(sessionId: string): void {
+    if (this.savedSessionId !== sessionId) return;
+    this.savedSessionId = undefined;
+    this.options.sessionStore?.set(null);
+  }
+
+  /** The device's client entry, created and connecting on first use. */
+  private clientFor(device: CastDevice): ClientEntry {
+    const existing = this.clients.get(device.id);
+    if (existing !== undefined) return existing;
+    const client = this.options.createClient(device);
+    this.bindClient(client, device);
+    const entry: ClientEntry = {
+      client,
+      device,
+      ready: client.connect().catch((err: unknown) => {
+        // Remove the entry and close the client once so the next request starts fresh.
+        this.dropClient(device.id, client);
+        throw err;
+      }),
+      opening: 0,
+    };
+    // A restore may never await this; openSession still sees the rejection.
+    entry.ready.catch(() => {});
+    this.clients.set(device.id, entry);
+    return entry;
   }
 
   private async handleRequestSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
@@ -424,6 +552,7 @@ export class CastSessionService {
       rec.stoppingBy = undefined;
       return bad("session_error", describe(err));
     }
+    this.forget(rec.app.sessionId);
     // An echoed receiverStatus may have already ended the session (and notified the others).
     const current = this.sessions.get(rec.app.sessionId);
     if (current !== undefined) {
@@ -490,23 +619,7 @@ export class CastSessionService {
     discard: { value: boolean },
     cancelled: { value: boolean },
   ): Promise<SessionSnapshot> {
-    const existing = this.clients.get(device.id);
-    let entry = existing;
-    if (entry === undefined) {
-      const client = this.options.createClient(device);
-      this.bindClient(client, device);
-      entry = {
-        client,
-        device,
-        ready: client.connect().catch((err: unknown) => {
-          // Remove the entry and close the client once so the next request starts fresh.
-          this.dropClient(device.id, client);
-          throw err;
-        }),
-        opening: 0,
-      };
-      this.clients.set(device.id, entry);
-    }
+    const entry = this.clientFor(device);
     const client = entry.client;
     entry.opening += 1;
     let registered = false;
@@ -564,6 +677,7 @@ export class CastSessionService {
       rec.lastSnapshot = snapshot;
       this.sessions.set(app.sessionId, rec);
       registered = true;
+      this.remember(rec);
       return snapshot;
     } finally {
       entry.opening -= 1;
@@ -610,6 +724,7 @@ export class CastSessionService {
       const app = status.applications.find((a) => a.sessionId === rec.app.sessionId);
       if (app === undefined) {
         this.sessions.delete(rec.app.sessionId);
+        this.forget(rec.app.sessionId);
         for (const member of rec.members) {
           if (rec.stoppingBy !== undefined && member === rec.stoppingBy) continue;
           this.emitTo(member, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "stopped" });
@@ -633,6 +748,7 @@ export class CastSessionService {
     for (const rec of [...this.sessions.values()]) {
       if (rec.client !== client || rec.app.transportId !== transportId) continue;
       this.sessions.delete(rec.app.sessionId);
+      this.forget(rec.app.sessionId);
       for (const member of rec.members) {
         this.emitTo(member, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "disconnected" });
       }

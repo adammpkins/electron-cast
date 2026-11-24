@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHarness, install, tick, plain, snapshot, BRIDGE_KEY, type Harness } from "./harness.ts";
+import type { BridgeResult } from "../../src/polyfill/bridge-types.ts";
 import { installChromeCast } from "../../src/polyfill/install.ts";
 
 const MDX = "urn:x-cast:com.google.youtube.mdx";
@@ -428,4 +429,34 @@ test("a YouTube-style sender flow works end to end", async () => {
     "initialized", "receivers available", "connected to Lounge Cast TV", "sent", "mdx mdxSessionStatus", "alive false", "stopped",
   ]);
   assert.equal(BRIDGE_KEY, "__electronCastBridge");
+});
+
+test("a session the main process rejoined is handed to the sessionListener and is usable", async () => {
+  const h = createHarness();
+  await initialized(h);
+  h.emit({ type: "sessionJoined", session: snapshot({ statusText: "Rejoined" }) });
+  await tick(5);
+  assert.deepEqual(plain(h.win.__sessions.map((s: any) => [s.sessionId, s.status, s.statusText])), [["session-1", "connected", "Rejoined"]]);
+  h.run(`window.__u = []; __sessions[0].addUpdateListener((alive) => __u.push(alive));`);
+  h.emit({ type: "sessionEnded", sessionId: "session-1", status: "stopped" });
+  await tick(5);
+  assert.deepEqual(plain(h.win.__u), [false]);
+});
+
+test("a session rejoined before the initialize reply arrives is handed over once initialize succeeds", async () => {
+  const h = createHarness();
+  let reply: (r: BridgeResult) => void = () => {};
+  h.handlers.initialize = () => new Promise<BridgeResult>((resolve) => (reply = resolve));
+  h.run(`
+    window.__sessions = [];
+    const c = chrome.cast;
+    c.initialize(new c.ApiConfig(new c.SessionRequest("233637DE"), (s) => __sessions.push(s.sessionId), () => {}), () => {}, () => {});
+  `);
+  await tick(5);
+  h.emit({ type: "sessionJoined", session: snapshot() });
+  await tick(5);
+  assert.deepEqual(plain(h.win.__sessions), []);
+  reply({ ok: true, value: { available: true, sessions: [] } });
+  await tick(5);
+  assert.deepEqual(plain(h.win.__sessions), ["session-1"]);
 });

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `createCastManager` takes an optional `sessionStore`. With it, the session a page started last is saved, and a
+  page that initializes later (after an app restart, for example) rejoins it through its `sessionListener` when the
+  device still runs that same session. Stopping the session clears the store; leaving it does not.
+
 ## 0.1.1
 
 - `electron-cast/main` re-exports `CastRequestInfo`, `DeviceChoice` and `CastDevice`, so a `selectDevice` picker can be

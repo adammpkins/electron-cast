@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceChoice } from "../../src/electron/session-service.ts";
+import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceChoice, type SavedSession } from "../../src/electron/session-service.ts";
 import { CastTimeoutError } from "../../src/client/index.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
@@ -526,4 +526,195 @@ test('a failed "stop" from the picker is session_error and the session stays', a
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
   const msg = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
   assert.equal(msg.ok, true, "the session still works");
+});
+
+/** An in-memory SessionStore that records every write. */
+function memoryStore(initial: SavedSession | null = null) {
+  const writes: (SavedSession | null)[] = [];
+  let value = initial;
+  return {
+    writes,
+    current: () => value,
+    store: {
+      get: () => value,
+      set: (session: SavedSession | null) => {
+        writes.push(session);
+        value = session;
+      },
+    },
+  };
+}
+
+function setupWithStore(initial: SavedSession | null = null, opts: { tweak?: (c: FakeClient) => void; devices?: FakeDevices } = {}) {
+  const memory = memoryStore(initial);
+  const devices = opts.devices ?? new FakeDevices();
+  const log = new EventLog();
+  const clients: FakeClient[] = [];
+  const picks: CastRequestInfo[] = [];
+  const service = new CastSessionService({
+    devices,
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      opts.tweak?.(c);
+      clients.push(c);
+      return c;
+    },
+    selectDevice: async (list, req) => {
+      picks.push(req);
+      return list.find((d) => d.id === TV.id) ?? null;
+    },
+    sessionStore: memory.store,
+    emit: log.emit,
+  });
+  return { service, devices, log, clients, picks, memory };
+}
+
+/** A second run of the app: a fresh service whose device still runs the session the first run saved. */
+async function restarted(opts: { tweak?: (c: FakeClient) => void; devices?: FakeDevices } = {}) {
+  const first = setupWithStore();
+  const s = await session(first.service);
+  const saved = first.memory.current();
+  assert.deepEqual(saved, { deviceId: TV.id, sessionId: s.sessionId, appId: YT, origin: PAGE.origin });
+  const app = first.clients[0]!.apps[0]!;
+  await first.service.dispose();
+  const second = setupWithStore(saved, {
+    devices: opts.devices,
+    tweak: (c) => {
+      c.apps = [{ ...app }];
+      opts.tweak?.(c);
+    },
+  });
+  return { ...second, app, saved: saved! };
+}
+
+test("a started session is saved; leaving or disposing keeps it, stopping clears it", async () => {
+  const left = setupWithStore();
+  const s = await session(left.service);
+  left.service.senderGone(PAGE.id);
+  await left.service.dispose();
+  assert.deepEqual(left.memory.writes, [{ deviceId: TV.id, sessionId: s.sessionId, appId: YT, origin: PAGE.origin }]);
+
+  const stopped = setupWithStore();
+  const s2 = await session(stopped.service);
+  await stopped.service.handle(PAGE, "stopSession", { sessionId: s2.sessionId });
+  assert.equal(stopped.memory.current(), null);
+});
+
+test("a session the device ends (another app took over) is no longer saved", async () => {
+  const { service, clients, memory } = setupWithStore();
+  await session(service);
+  clients[0]!.apps = [];
+  clients[0]!.pushStatus();
+  assert.equal(memory.current(), null);
+});
+
+test("a lost connection keeps the saved session: the device may still be playing", async () => {
+  const { service, clients, memory } = setupWithStore();
+  const s = await session(service);
+  clients[0]!.fail();
+  assert.equal(memory.current()?.sessionId, s.sessionId);
+});
+
+test("initialize rejoins the saved session without the picker or a launch", async () => {
+  const { service, log, clients, picks, app, saved } = await restarted();
+  assert.deepEqual(await init(service), { ok: true, value: { available: true, sessions: [] } });
+  await tick(5);
+  const joined = log.of(PAGE.id, "sessionJoined") as { session: SessionSnapshot }[];
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0]!.session.sessionId, saved.sessionId);
+  assert.equal(joined[0]!.session.receiver.friendlyName, TV.name);
+  assert.equal(picks.length, 0);
+  assert.deepEqual(clients[0]!.calls, ["connect", `connectTransport ${app.transportId}`]);
+  const sent = await service.handle(PAGE, "sendMessage", { sessionId: saved.sessionId, namespace: MDX, message: "x" });
+  assert.equal(sent.ok, true, "the rejoined session works");
+});
+
+test("stopping a rejoined session clears the store", async () => {
+  const { service, memory, saved } = await restarted();
+  await init(service);
+  await tick(5);
+  await service.handle(PAGE, "stopSession", { sessionId: saved.sessionId });
+  assert.equal(memory.current(), null);
+});
+
+test("a saved session the device no longer runs is forgotten, and nothing is joined", async () => {
+  const { service, log, clients, memory } = await restarted({
+    tweak: (c) => {
+      c.apps = [{ ...c.apps[0]!, sessionId: "a-session-started-elsewhere" }];
+    },
+  });
+  await init(service);
+  await tick(5);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  assert.equal(memory.current(), null);
+  assert.equal(clients[0]!.closed, true, "the idle client is closed");
+});
+
+test("a saved session for another app or origin is left alone", async () => {
+  const { service, clients, memory, saved } = await restarted();
+  await init(service, PAGE, { appId: "CC1AD845" });
+  await init(service, EVIL);
+  await tick(5);
+  assert.equal(clients.length, 0);
+  assert.equal(memory.current()?.sessionId, saved.sessionId);
+});
+
+test("an unreachable device keeps the session saved for the next run", async () => {
+  const { service, log, memory, saved } = await restarted({
+    tweak: (c) => {
+      c.connectError = new Error("ECONNREFUSED");
+    },
+  });
+  await init(service);
+  await tick(5);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  assert.equal(memory.current()?.sessionId, saved.sessionId);
+});
+
+test("the restore waits for discovery to find the device", async () => {
+  const devices = new FakeDevices([SPEAKER]);
+  const { service, log, saved } = await restarted({ devices });
+  await init(service);
+  await tick(5);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  devices.up(TV);
+  await tick(5);
+  assert.equal((log.of(PAGE.id, "sessionJoined")[0] as { session: SessionSnapshot }).session.sessionId, saved.sessionId);
+});
+
+test("a cast started while the restore is in flight wins: the restore joins nothing", async () => {
+  const { service, log, clients } = await restarted({
+    tweak: (c) => {
+      c.connectDelayMs = 20;
+    },
+  });
+  await init(service);
+  const r = await service.handle(PAGE, "requestSession", REQ);
+  assert.equal(r.ok, true);
+  await tick(30);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  assert.equal(clients.length, 1, "both used the one client");
+  assert.equal(clients[0]!.closed, false);
+});
+
+test("a sender that goes away during the restore joins nothing and leaves no client open", async () => {
+  const { service, log, clients, memory, saved } = await restarted({
+    tweak: (c) => {
+      c.connectDelayMs = 20;
+    },
+  });
+  await init(service);
+  service.senderGone(PAGE.id);
+  await tick(30);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  assert.equal(clients[0]!.closed, true);
+  assert.equal(memory.current()?.sessionId, saved.sessionId);
+});
+
+test("a page_scoped sender does not rejoin the saved session", async () => {
+  const { service, log, clients } = await restarted();
+  await init(service, PAGE, { autoJoinPolicy: "page_scoped" });
+  await tick(5);
+  assert.deepEqual(log.of(PAGE.id, "sessionJoined"), []);
+  assert.equal(clients.length, 0);
 });

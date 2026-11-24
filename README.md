@@ -64,6 +64,8 @@ sessions through IPC to the main process.
   mute, and messages on custom namespaces (`sendMessage` and `addMessageListener`). That is all YouTube
   Music's cast button needs, and it works end to end.
 - Several pages or windows at once; a page that reloads or closes leaves its sessions without stopping playback.
+- Rejoining after a restart: pass `sessionStore` (a `get` and a `set` over wherever your app keeps its state) and the
+  page is handed the session it left playing, as long as the device still runs that same session.
 
 Not yet: `chrome.cast.media` (`loadMedia` fails with `session_error`), and the newer `cast.framework` API. Pages
 that load media through the Default Media Receiver need those.
