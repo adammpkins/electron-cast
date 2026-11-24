@@ -1,6 +1,6 @@
 {
   "name": "electron-cast",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Chromecast for Electron: the chrome.cast sender API for web pages, backed by device discovery and the Cast v2 protocol in the main process.",
   "keywords": [
     "electron",
@@ -43,7 +43,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
