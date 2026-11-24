@@ -3,6 +3,9 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 
+export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
+export type { CastDevice } from "../discovery/index.ts";
+
 /** The subset of an Electron `WebFrameMain` the manager needs. */
 export interface FrameLike { url: string; origin?: string }
 /** The subset of an Electron `WebContents` the manager needs. */
