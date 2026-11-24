@@ -34,6 +34,15 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
             exit 1
           fi
+      # v0.1.0 was published by hand (npm needs a package to exist before it trusts a workflow), so its tag only checks.
+      - name: Already on npm?
+        id: published
+        run: |
+          if npm view "electron-cast@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1; then
+            echo "::notice::electron-cast@${GITHUB_REF_NAME#v} is already on npm; checking only"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
       - run: npm ci
       - run: npm run check
-      - run: npm publish --access public
+      - if: steps.published.outputs.skip != 'true'
+        run: npm publish --access public
