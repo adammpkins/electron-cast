@@ -81,6 +81,16 @@ A/AAAA (address) → TXT (`id`, `fn` friendly name, `md` model, `ca` capability 
 group. Groups (`ca & 32`, model `Google Cast Group`) share their leader's address but have their own port and id, so
 devices are keyed by TXT `id`, never by address. TTL 0 is a goodbye.
 
+Observed on real devices (fixtures in `test/fixtures/mdns/`):
+
+- `ca` carries many more bits than the documented six (e.g. `464901`, `199204`); only test the documented bits.
+- TXT `id` is 32 hex digits for single devices but a dashed UUID for groups: treat it as an opaque string.
+- Fuchsia devices (Nest Hub family) answer with no question section, set the cache-flush bit (class `0x8001`), put
+  several PTRs (the device plus every group it leads) in one packet, and send one A plus several AAAA records.
+- On Windows a PC commonly has several adapters (Ethernet, Wi-Fi, Tailscale, WSL/Hyper-V virtual switches) and Cast
+  devices answer on only one. Discovery must query and listen on every non-internal IPv4 interface; binding one
+  default interface (what `multicast-dns` does) finds nothing on many machines.
+
 ## Polyfill layer (`src/polyfill/`)
 
 Implements the legacy Chrome sender API (`chrome.cast`, API version `[1, 2]`), as documented at
