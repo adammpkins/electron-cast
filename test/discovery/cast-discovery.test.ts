@@ -1,0 +1,510 @@
+import { test, beforeEach, afterEach, mock } from "node:test";
+import assert from "node:assert/strict";
+import type { NetworkInterfaceInfo as OsInterface } from "node:os";
+import {
+  CastDiscovery,
+  listIPv4Interfaces,
+  type CastDiscoveryOptions,
+  type MdnsSocket,
+  type MdnsSocketHandlers,
+  type NetworkInterfaceInfo,
+} from "../../src/discovery/cast-discovery.ts";
+import type { CastDevice } from "../../src/discovery/device-cache.ts";
+import { encodeMdnsQuery, RecordType } from "../../src/discovery/dns-packet.ts";
+import { dnsName, fixture, header, rr, txt } from "./helpers.ts";
+
+const SERVICE = "_googlecast._tcp.local";
+const QUERY = encodeMdnsQuery(SERVICE, RecordType.PTR);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Wire-format builders
+
+interface Announce {
+  id: string;
+  fn: string;
+  addr: string;
+  port?: number;
+  ca?: number;
+  ttl?: number;
+  flags?: number;
+}
+
+const instanceOf = (id: string) => `Chromecast-${id}.${SERVICE}`;
+
+function announce(o: Announce): Buffer {
+  const instance = instanceOf(o.id);
+  const host = `${o.id}.local`;
+  const ttl = o.ttl ?? 120;
+  const srv = Buffer.concat([Buffer.from([0, 0, 0, 0, (o.port ?? 8009) >> 8, (o.port ?? 8009) & 0xff]), dnsName(host)]);
+  return Buffer.concat([
+    header({ an: 1, ar: 3, flags: o.flags ?? 0x8400 }),
+    rr(SERVICE, RecordType.PTR, 1, ttl, dnsName(instance)),
+    rr(instance, RecordType.SRV, 0x8001, ttl, srv),
+    rr(instance, RecordType.TXT, 0x8001, 4500, txt([`id=${o.id}`, `fn=${o.fn}`, "md=Chromecast", `ca=${o.ca ?? 5}`, "rs="])),
+    rr(host, RecordType.A, 0x8001, ttl, Buffer.from(o.addr.split(".").map(Number))),
+  ]);
+}
+
+function goodbye(id: string): Buffer {
+  return Buffer.concat([header({ an: 1 }), rr(SERVICE, RecordType.PTR, 1, 0, dnsName(instanceOf(id)))]);
+}
+
+/** Several records in one response: a goodbye for `byeId`, a TXT rename for `renameId`, a new device. */
+function mixed(byeId: string, renameId: string, rename: string, add: Announce): Buffer {
+  const instance = instanceOf(renameId);
+  const addBody = announce(add).subarray(12);
+  return Buffer.concat([
+    header({ an: 3, ar: 3 }),
+    rr(SERVICE, RecordType.PTR, 1, 0, dnsName(instanceOf(byeId))),
+    rr(instance, RecordType.TXT, 0x8001, 4500, txt([`id=${renameId}`, `fn=${rename}`, "md=Chromecast", "ca=5", "rs="])),
+    addBody,
+  ]);
+}
+
+const TV: Announce = { id: "aaaa0000000000000000000000000001", fn: "Lounge TV", addr: "10.0.0.10" };
+const SPEAKER: Announce = { id: "bbbb0000000000000000000000000002", fn: "Study speaker", addr: "10.0.0.20" };
+const HUB: Announce = { id: "cccc0000000000000000000000000003", fn: "Kitchen display", addr: "10.0.0.30" };
+
+// ---------------------------------------------------------------------------------------------------------------
+// Fakes
+
+class FakeSocket implements MdnsSocket {
+  readonly iface: NetworkInterfaceInfo;
+  readonly handlers: MdnsSocketHandlers;
+  sent: Buffer[] = [];
+  closed = false;
+  constructor(iface: NetworkInterfaceInfo, handlers: MdnsSocketHandlers) {
+    this.iface = iface;
+    this.handlers = handlers;
+  }
+  send(packet: Buffer): void {
+    if (this.closed) throw new Error(`send on closed socket ${this.iface.address}`);
+    this.sent.push(Buffer.from(packet));
+  }
+  close(): void {
+    this.closed = true;
+  }
+  receive(packet: Buffer, from = "10.0.0.10"): void {
+    this.handlers.message(packet, { address: from, port: 5353 });
+  }
+}
+
+class FakeNet {
+  ifaces: NetworkInterfaceInfo[];
+  /** Every socket ever opened, in order. */
+  sockets: FakeSocket[] = [];
+  /** Addresses passed to openSocket, in order, including failed attempts. */
+  attempts: string[] = [];
+  failOpen = new Map<string, Error>();
+
+  constructor(ifaces: NetworkInterfaceInfo[]) {
+    this.ifaces = ifaces;
+  }
+
+  readonly interfaces = () => this.ifaces.map((i) => ({ ...i }));
+
+  readonly openSocket = async (iface: NetworkInterfaceInfo, handlers: MdnsSocketHandlers): Promise<MdnsSocket> => {
+    this.attempts.push(iface.address);
+    await Promise.resolve();
+    const err = this.failOpen.get(iface.address);
+    if (err) throw err;
+    const s = new FakeSocket(iface, handlers);
+    this.sockets.push(s);
+    return s;
+  };
+
+  /** The open (not closed) socket for an address. */
+  on(address: string): FakeSocket {
+    const s = this.sockets.find((x) => x.iface.address === address && !x.closed);
+    assert.ok(s, `no open socket for ${address}`);
+    return s;
+  }
+
+  queriesOn(address: string): number {
+    return this.sockets.filter((s) => s.iface.address === address).reduce((n, s) => n + s.sent.length, 0);
+  }
+}
+
+const ETH: NetworkInterfaceInfo = { name: "Ethernet", address: "10.0.0.5" };
+const WIFI: NetworkInterfaceInfo = { name: "Wi-Fi", address: "192.168.1.5" };
+const WSL: NetworkInterfaceInfo = { name: "vEthernet (WSL)", address: "172.20.0.1" };
+
+interface Logged {
+  type: "deviceUp" | "deviceDown" | "deviceChanged";
+  id: string;
+  name: string;
+}
+
+function setup(ifaces: NetworkInterfaceInfo[] = [ETH, WIFI], extra: CastDiscoveryOptions = {}) {
+  const net = new FakeNet(ifaces);
+  const discovery = new CastDiscovery({ interfaces: net.interfaces, openSocket: net.openSocket, ...extra });
+  const events: Logged[] = [];
+  const errors: { address: string; message: string }[] = [];
+  for (const type of ["deviceUp", "deviceDown", "deviceChanged"] as const) {
+    discovery.on(type, (d: CastDevice) => events.push({ type, id: d.id, name: d.name }));
+  }
+  discovery.on("socketError", (iface, error) => errors.push({ address: iface.address, message: error.message }));
+  return { net, discovery, events, errors };
+}
+
+/** Lets promise chains started by a timer (socket opens) finish. setImmediate is not mocked. */
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+};
+
+async function advance(ms: number): Promise<void> {
+  mock.timers.tick(ms);
+  await flush();
+}
+
+beforeEach(() => {
+  mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
+});
+
+afterEach(() => {
+  mock.timers.reset();
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// listIPv4Interfaces
+
+test("listIPv4Interfaces keeps external IPv4 addresses, in order, once each", () => {
+  const nets = {
+    Ethernet: [
+      { address: "fe80::1", family: "IPv6", internal: false },
+      { address: "10.0.0.5", family: "IPv4", internal: false },
+    ],
+    "Loopback Pseudo-Interface 1": [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    "Wi-Fi": [{ address: "169.254.3.4", family: "IPv4", internal: false }],
+    "vEthernet (WSL)": [{ address: "172.20.0.1", family: "IPv4", internal: false }],
+    "Old Node": [{ address: "192.168.1.5", family: 4, internal: false }],
+    Duplicate: [{ address: "10.0.0.5", family: "IPv4", internal: false }],
+  } as unknown as NodeJS.Dict<OsInterface[]>;
+  assert.deepEqual(listIPv4Interfaces(nets), [
+    { name: "Ethernet", address: "10.0.0.5" },
+    { name: "vEthernet (WSL)", address: "172.20.0.1" },
+    { name: "Old Node", address: "192.168.1.5" },
+  ]);
+});
+
+test("listIPv4Interfaces reads the machine's interfaces by default", () => {
+  const list = listIPv4Interfaces();
+  assert.ok(Array.isArray(list));
+  assert.ok(list.every((i) => typeof i.name === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(i.address)));
+  assert.ok(!list.some((i) => i.address.startsWith("127.")));
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Sockets and queries
+
+test("start opens one socket per interface and sends a PTR query on each before resolving", async () => {
+  const { net, discovery } = setup([ETH, WIFI, WSL]);
+  await discovery.start();
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address, WSL.address]);
+  for (const s of net.sockets) assert.deepEqual(s.sent, [QUERY]);
+  assert.deepEqual(discovery.interfaces(), [ETH, WIFI, WSL]);
+});
+
+test("start called twice opens each socket once", async () => {
+  const { net, discovery } = setup();
+  await Promise.all([discovery.start(), discovery.start()]);
+  await discovery.start();
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address]);
+});
+
+test("queries again 1 s and 3 s after start, then every 60 s", async () => {
+  const { net, discovery } = setup([ETH]);
+  await discovery.start();
+  const at = async (to: number, expected: number) => {
+    await advance(to - Date.now());
+    assert.equal(net.queriesOn(ETH.address), expected, `queries sent by t=${to}`);
+  };
+  await at(999, 1);
+  await at(1000, 2);
+  await at(2999, 2);
+  await at(3000, 3);
+  await at(62_999, 3);
+  await at(63_000, 4);
+  await at(123_000, 5);
+  assert.ok(net.on(ETH.address).sent.every((p) => p.equals(QUERY)));
+});
+
+test("query timings can be configured", async () => {
+  const { net, discovery } = setup([ETH], { followUpQueriesMs: [500], refreshMs: 10_000 });
+  await discovery.start();
+  await advance(500);
+  assert.equal(net.queriesOn(ETH.address), 2);
+  await advance(10_000);
+  assert.equal(net.queriesOn(ETH.address), 3);
+});
+
+test("query() sends one more query on every open socket now", async () => {
+  const { net, discovery } = setup();
+  await discovery.start();
+  discovery.query();
+  assert.equal(net.queriesOn(ETH.address), 2);
+  assert.equal(net.queriesOn(WIFI.address), 2);
+});
+
+test("a custom service name is queried and watched", async () => {
+  const name = "_test-cast._tcp.local";
+  const { net, discovery } = setup([ETH], { serviceName: name });
+  await discovery.start();
+  assert.deepEqual(net.on(ETH.address).sent, [encodeMdnsQuery(name, RecordType.PTR)]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Devices
+
+test("a response on any interface brings devices up", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(WIFI.address).receive(announce(TV));
+  assert.deepEqual(events, [{ type: "deviceUp", id: TV.id, name: "Lounge TV" }]);
+  const [d] = discovery.devices();
+  assert.equal(d?.host, "10.0.0.10");
+  assert.equal(d?.port, 8009);
+  assert.equal(discovery.devices().length, 1);
+});
+
+test("one packet can bring several devices up (Fuchsia hub and its groups)", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(fixture("fuchsia-hub-max-groups"));
+  assert.equal(events.length, 3);
+  assert.ok(events.every((e) => e.type === "deviceUp"));
+  assert.equal(discovery.devices().length, 3);
+});
+
+test("the same answer heard on two interfaces is one device", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  net.on(WIFI.address).receive(announce(TV));
+  assert.equal(events.length, 1);
+  assert.equal(discovery.devices().length, 1);
+});
+
+test("a changed TXT record is deviceChanged", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  await advance(5000);
+  net.on(ETH.address).receive(announce({ ...TV, fn: "Den TV" }));
+  assert.deepEqual(events, [
+    { type: "deviceUp", id: TV.id, name: "Lounge TV" },
+    { type: "deviceChanged", id: TV.id, name: "Den TV" },
+  ]);
+  assert.equal(discovery.devices()[0]?.name, "Den TV");
+});
+
+test("a goodbye takes the device down at once", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  net.on(ETH.address).receive(goodbye(TV.id));
+  assert.deepEqual(events.map((e) => e.type), ["deviceUp", "deviceDown"]);
+  assert.deepEqual(discovery.devices(), []);
+});
+
+test("a device that stops answering goes down when its records expire", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  await advance(119_000);
+  assert.equal(events.filter((e) => e.type === "deviceDown").length, 0);
+  await advance(2000);
+  assert.deepEqual(events.filter((e) => e.type === "deviceDown"), [{ type: "deviceDown", id: TV.id, name: "Lounge TV" }]);
+  assert.deepEqual(discovery.devices(), []);
+});
+
+test("answers keep a device alive past its first TTL", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  await advance(100_000);
+  net.on(ETH.address).receive(announce(TV));
+  await advance(100_000);
+  assert.equal(events.filter((e) => e.type === "deviceDown").length, 0);
+  assert.equal(discovery.devices().length, 1);
+});
+
+test("events from one packet come down, then changed, then up", async () => {
+  const { net, discovery, events } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  net.on(ETH.address).receive(announce(SPEAKER));
+  await advance(5000);
+  events.length = 0;
+  net.on(ETH.address).receive(mixed(TV.id, SPEAKER.id, "Office speaker", HUB));
+  assert.deepEqual(events, [
+    { type: "deviceDown", id: TV.id, name: "Lounge TV" },
+    { type: "deviceChanged", id: SPEAKER.id, name: "Office speaker" },
+    { type: "deviceUp", id: HUB.id, name: "Kitchen display" },
+  ]);
+});
+
+test("queries (even with answers) and malformed packets are ignored", async () => {
+  const { net, discovery, events, errors } = setup();
+  await discovery.start();
+  const s = net.on(ETH.address);
+  s.receive(announce({ ...TV, flags: 0 })); // a query carrying known answers
+  s.receive(Buffer.from([1, 2, 3]));
+  s.receive(announce(TV).subarray(0, 40));
+  assert.deepEqual(events, []);
+  assert.deepEqual(errors, []);
+  s.receive(announce(TV));
+  assert.equal(events.length, 1);
+});
+
+test("devices() returns copies", async () => {
+  const { net, discovery } = setup();
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  const [d] = discovery.devices();
+  assert.ok(d);
+  d.name = "mutated";
+  d.addresses.push("1.2.3.4");
+  assert.equal(discovery.devices()[0]?.name, "Lounge TV");
+  assert.deepEqual(discovery.devices()[0]?.addresses, ["10.0.0.10"]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Interface changes and socket failures
+
+test("an interface that fails to open is reported, and the others still work", async () => {
+  const { net, discovery, errors } = setup([ETH, WIFI]);
+  net.failOpen.set(ETH.address, new Error("EADDRNOTAVAIL"));
+  await discovery.start();
+  assert.deepEqual(errors, [{ address: ETH.address, message: "EADDRNOTAVAIL" }]);
+  assert.deepEqual(net.on(WIFI.address).sent, [QUERY]);
+  assert.deepEqual(discovery.interfaces(), [WIFI]);
+});
+
+test("a failed interface is retried at the next interface check (10 s) and queried at once", async () => {
+  const { net, discovery } = setup([ETH, WIFI]);
+  net.failOpen.set(ETH.address, new Error("EADDRNOTAVAIL"));
+  await discovery.start();
+  net.failOpen.clear();
+  await advance(9_999);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address]);
+  await advance(1);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address, ETH.address]);
+  assert.deepEqual(net.on(ETH.address).sent, [QUERY]);
+  assert.deepEqual(discovery.interfaces(), [WIFI, ETH]);
+});
+
+test("new interfaces are opened and queried; vanished ones are closed; unchanged ones are left alone", async () => {
+  const { net, discovery } = setup([ETH, WIFI]);
+  await discovery.start();
+  const wifi = net.on(WIFI.address);
+  net.ifaces = [ETH, WSL];
+  await advance(10_000);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address, WSL.address]);
+  assert.equal(wifi.closed, true);
+  assert.deepEqual(net.on(WSL.address).sent, [QUERY]);
+  assert.deepEqual(discovery.interfaces(), [ETH, WSL]);
+  await advance(10_000);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address, WSL.address]);
+});
+
+test("the interface check interval can be configured", async () => {
+  const { net, discovery } = setup([ETH], { interfaceCheckMs: 2000 });
+  await discovery.start();
+  net.ifaces = [ETH, WIFI];
+  await advance(2000);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address]);
+});
+
+test("a socket error is reported, that socket is closed, and it is reopened at the next check", async () => {
+  const { net, discovery, errors } = setup([ETH, WIFI]);
+  await discovery.start();
+  const eth = net.on(ETH.address);
+  eth.handlers.error(new Error("ENETDOWN"));
+  assert.deepEqual(errors, [{ address: ETH.address, message: "ENETDOWN" }]);
+  assert.equal(eth.closed, true);
+  assert.deepEqual(discovery.interfaces(), [WIFI]);
+  discovery.query();
+  assert.equal(eth.sent.length, 1, "no query on the failed socket");
+  await advance(10_000);
+  assert.notEqual(net.on(ETH.address), eth);
+  assert.deepEqual(net.on(ETH.address).sent, [QUERY]);
+});
+
+test("a late error from a replaced socket does not close the socket that replaced it", async () => {
+  const { net, discovery, errors } = setup([ETH]);
+  await discovery.start();
+  const old = net.on(ETH.address);
+  old.handlers.error(new Error("ENETDOWN"));
+  await advance(10_000);
+  const fresh = net.on(ETH.address);
+  assert.notEqual(fresh, old);
+  old.handlers.error(new Error("late"));
+  assert.equal(fresh.closed, false);
+  assert.deepEqual(discovery.interfaces(), [ETH]);
+  assert.deepEqual(errors.map((e) => e.message), ["ENETDOWN"]);
+});
+
+test("a send that throws is reported as a socket error, not thrown", async () => {
+  const { net, discovery, errors } = setup([ETH]);
+  await discovery.start();
+  const eth = net.on(ETH.address);
+  eth.send = () => {
+    throw new Error("EHOSTUNREACH");
+  };
+  assert.doesNotThrow(() => discovery.query());
+  assert.deepEqual(errors, [{ address: ETH.address, message: "EHOSTUNREACH" }]);
+  assert.equal(eth.closed, true);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// stop
+
+test("stop closes every socket, stops all timers and events, and forgets devices", async () => {
+  const { net, discovery, events } = setup([ETH, WIFI]);
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  const sockets = [...net.sockets];
+  discovery.stop();
+  assert.ok(sockets.every((s) => s.closed));
+  assert.deepEqual(discovery.devices(), []);
+  assert.deepEqual(discovery.interfaces(), []);
+  const before = events.length;
+  sockets[0]?.receive(announce(SPEAKER));
+  net.ifaces = [ETH, WIFI, WSL];
+  await advance(300_000);
+  assert.equal(events.length, before);
+  assert.deepEqual(net.attempts, [ETH.address, WIFI.address]);
+  assert.ok(sockets.every((s) => s.sent.length === 1));
+  assert.doesNotThrow(() => discovery.stop());
+});
+
+test("a socket that finishes opening after stop is closed at once", async () => {
+  const net = new FakeNet([ETH]);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const opened: FakeSocket[] = [];
+  const discovery = new CastDiscovery({
+    interfaces: net.interfaces,
+    openSocket: async (iface, handlers) => {
+      await gate;
+      const s = new FakeSocket(iface, handlers);
+      opened.push(s);
+      return s;
+    },
+  });
+  const started = discovery.start();
+  discovery.stop();
+  release();
+  await started;
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]?.closed, true);
+  assert.deepEqual(opened[0]?.sent, []);
+});
+
+test("start after stop rejects", async () => {
+  const { discovery } = setup();
+  await discovery.start();
+  discovery.stop();
+  await assert.rejects(discovery.start(), /stopped/);
+});
