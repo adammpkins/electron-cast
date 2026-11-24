@@ -204,3 +204,10 @@ test("defaults: real discovery and clients, nothing opened until start", async (
   await manager.dispose();
   assert.deepEqual([...ipcMain.handlers.keys()], []);
 });
+
+test('selectDevice may answer "stop", which cancels the request', async () => {
+  const { call } = setup({ selectDevice: async () => "stop" as const });
+  const wc = new FakeWebContents(10);
+  await call(wc, "initialize", INIT);
+  assert.deepEqual(await call(wc, "requestSession", REQ), { ok: false, code: "cancel" });
+});

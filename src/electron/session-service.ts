@@ -51,13 +51,27 @@ export interface ClientMessage {
 export interface SenderInfo { id: number; origin: string }
 
 /** What the picker is told about a requestSession call. */
-export interface CastRequestInfo { appId: string; capabilities: string[]; origin: string; senderId: number }
+export interface CastRequestInfo {
+  appId: string;
+  capabilities: string[];
+  origin: string;
+  senderId: number;
+  /** The sender's current session for this app, if it has one; the key is absent when it does not. */
+  session?: { sessionId: string; deviceId: string };
+}
+
+/** The picker's answer: a device to cast to, `null` (cancel) or `"stop"` (stop the sender's current session). */
+export type DeviceChoice = CastDevice | null | "stop";
 
 /** Dependencies and callbacks of {@link CastSessionService}. */
 export interface CastSessionServiceOptions {
   devices: DeviceSource;
   createClient(device: CastDevice): CastClientLike;
-  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<CastDevice | null>;
+  /**
+   * Ask the user which device to cast to. Resolves a device, `null` (cancel) or
+   * `"stop"` (stop `request.session`, the sender's current session, if it has one).
+   */
+  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   emit(senderId: number, event: BridgeEvent): void;
 }
@@ -316,18 +330,33 @@ export class CastSessionService {
     try {
       const eligible = this.options.devices.devices().filter((d) => deviceMatches(d, p.capabilities));
       if (eligible.length === 0) return bad("receiver_unavailable");
-      let device: CastDevice | null;
+      const request: CastRequestInfo = {
+        appId: p.appId,
+        capabilities: p.capabilities,
+        origin: sender.origin,
+        senderId: sender.id,
+      };
+      const current = this.currentSessionFor(sender.id, p.appId);
+      if (current !== undefined) {
+        request.session = { sessionId: current.app.sessionId, deviceId: current.device.id };
+      }
+      let choice: DeviceChoice;
       try {
-        device = await this.options.selectDevice(eligible, {
-          appId: p.appId,
-          capabilities: p.capabilities,
-          origin: sender.origin,
-          senderId: sender.id,
-        });
+        choice = await this.options.selectDevice(eligible, request);
       } catch (err) {
         return bad("session_error", describe(err));
       }
-      if (device === null) return bad("cancel");
+      if (choice === null) return bad("cancel");
+      if (choice === "stop") {
+        const rec = request.session !== undefined ? this.sessions.get(request.session.sessionId) : undefined;
+        if (rec === undefined) return bad("cancel");
+        const stopped = await this.stopSessionRecord(rec, sender.id, true);
+        return stopped.ok ? bad("cancel") : stopped;
+      }
+      if (request.session !== undefined && choice.id === request.session.deviceId) {
+        const rec = this.sessions.get(request.session.sessionId);
+        if (rec !== undefined) return good(this.snapshotOf(rec));
+      }
       // The bound starts after the picker resolves; picker time does not count.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bound = new Promise<never>((_, reject) => {
@@ -337,7 +366,7 @@ export class CastSessionService {
         }, p.timeoutMs);
       });
       try {
-        const snapshot = await Promise.race([this.openSession(device, p.appId, sender, discard, cancelled), bound]);
+        const snapshot = await Promise.race([this.openSession(choice, p.appId, sender, discard, cancelled), bound]);
         return good(snapshot);
       } catch (err) {
         if (err instanceof Discarded) return bad("timeout", "timed out");
@@ -378,7 +407,17 @@ export class CastSessionService {
     if (p === null) return bad("invalid_parameter");
     const rec = this.sessions.get(p.sessionId);
     if (rec === undefined || !rec.members.has(sender.id)) return bad("session_error");
-    rec.stoppingBy = sender.id;
+    return this.stopSessionRecord(rec, sender.id, false);
+  }
+
+  /**
+   * Stop a session on the device and tear it down. `stoppingBy` keeps an echoed
+   * receiverStatus from notifying the caller; the other members learn from that echo
+   * or from the sessionEnded emitted here. When `tellCaller` is set (a picker "stop"),
+   * the caller gets sessionEnded too, because it did not call stop itself.
+   */
+  private async stopSessionRecord(rec: SessionRecord, caller: number, tellCaller: boolean): Promise<BridgeResult> {
+    rec.stoppingBy = caller;
     try {
       await rec.client.stop(rec.app.sessionId);
     } catch (err) {
@@ -390,13 +429,22 @@ export class CastSessionService {
     if (current !== undefined) {
       this.sessions.delete(rec.app.sessionId);
       for (const member of current.members) {
-        if (member !== sender.id) {
-          this.emitTo(member, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "stopped" });
-        }
+        if (!tellCaller && member === caller) continue;
+        this.emitTo(member, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "stopped" });
       }
+    } else if (tellCaller) {
+      this.emitTo(caller, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "stopped" });
     }
     this.cleanupIdle(rec.device.id, rec.client);
     return good(undefined);
+  }
+
+  /** The sender's current session for the app, if it has one (the first one found). */
+  private currentSessionFor(senderId: number, appId: string): SessionRecord | undefined {
+    for (const rec of this.sessions.values()) {
+      if (rec.appId === appId && rec.members.has(senderId)) return rec;
+    }
+    return undefined;
   }
 
   private handleLeaveSession(sender: SenderInfo, params: unknown): BridgeResult {

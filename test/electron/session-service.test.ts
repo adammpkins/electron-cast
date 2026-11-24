@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CastSessionService, capabilityNames, type CastRequestInfo } from "../../src/electron/session-service.ts";
+import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceChoice } from "../../src/electron/session-service.ts";
 import { CastTimeoutError } from "../../src/client/index.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
@@ -13,7 +13,7 @@ const PAGE2 = { id: 2, origin: "https://music.youtube.com" };
 const EVIL = { id: 3, origin: "https://evil.example" };
 
 function setup(opts: {
-  pick?: (devices: CastDevice[], req: CastRequestInfo) => Promise<CastDevice | null> | CastDevice | null;
+  pick?: (devices: CastDevice[], req: CastRequestInfo) => Promise<DeviceChoice> | DeviceChoice;
   devices?: FakeDevices;
   allowOrigin?: (o: string) => boolean;
   tweak?: (c: FakeClient) => void;
@@ -450,4 +450,80 @@ test("senderGone while its request is launching: the late session is torn down",
   const join = await service.handle(PAGE2, "joinSession", { sessionId: `${TV.id}-session-1` });
   assert.equal(!join.ok && join.code, "session_error");
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+});
+
+// --- The picker and the sender's current session (like Chrome's cast dialog: the current device, and "Stop casting").
+
+const REQ = { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 };
+
+test("the picker is told about the sender's current session for that app, and nothing when there is none", async () => {
+  const { service, picks } = setup();
+  const s = await session(service, PAGE);
+  assert.equal("session" in (picks[0]?.req ?? {}), false, "no session key at all on a first request");
+  await service.handle(PAGE, "requestSession", REQ);
+  assert.deepEqual(picks[1]?.req.session, { sessionId: s.sessionId, deviceId: TV.id });
+  await service.handle(PAGE, "requestSession", { ...REQ, appId: "CC1AD845" });
+  assert.equal("session" in (picks[2]?.req ?? {}), false, "a session of another app does not count");
+});
+
+test("another sender's session is not this sender's current session", async () => {
+  const { service, picks } = setup();
+  await session(service, PAGE);
+  await init(service, PAGE2, { autoJoinPolicy: "page_scoped" }); // does not join
+  await service.handle(PAGE2, "requestSession", { ...REQ });
+  assert.equal("session" in (picks[1]?.req ?? {}), false);
+});
+
+test("picking the current session's device returns that session without launching again", async () => {
+  const { service, clients } = setup({ tweak: (c) => (c.echoReplies = true) });
+  const s = await session(service, PAGE);
+  const r = await service.handle(PAGE, "requestSession", REQ);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.ok && (r.value as SessionSnapshot).sessionId, s.sessionId);
+  assert.equal(clients.length, 1);
+  assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("launch")), [`launch ${YT}`]);
+  assert.equal(clients[0]?.closed, false);
+});
+
+for (const echo of [false, true]) {
+  test(`"stop" from the picker stops the current session, tells every member including the caller, and cancels (echo ${echo})`, async () => {
+    const { service, clients, log } = setup({
+      tweak: (c) => (c.echoReplies = echo),
+      pick: (list, req) => (req.session ? "stop" : (list.find((d) => d.id === TV.id) ?? null)),
+    });
+    const s = await session(service, PAGE);
+    await init(service, PAGE2); // origin_scoped: auto-joins
+    const r = await service.handle(PAGE, "requestSession", REQ);
+    assert.deepEqual(r, { ok: false, code: "cancel" });
+    assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("stop")), [`stop ${s.sessionId}`]);
+    const ended = { type: "sessionEnded", sessionId: s.sessionId, status: "stopped" };
+    assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [ended], "the caller did not call stop itself, so it is told");
+    assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [ended]);
+    assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 1, "the idle client is closed once");
+    const again = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
+    assert.equal(again.ok, false, "the session is gone");
+  });
+}
+
+test('"stop" with no current session just cancels, with no client', async () => {
+  const { service, clients } = setup({ pick: () => "stop" });
+  await init(service);
+  assert.deepEqual(await service.handle(PAGE, "requestSession", REQ), { ok: false, code: "cancel" });
+  assert.equal(clients.length, 0);
+});
+
+test('a failed "stop" from the picker is session_error and the session stays', async () => {
+  const { service, log } = setup({
+    tweak: (c) => {
+      c.stop = async () => {
+        throw new Error("device said no");
+      };
+    },
+    pick: (list, req) => (req.session ? "stop" : (list.find((d) => d.id === TV.id) ?? null)),
+  });
+  const s = await session(service, PAGE);
+  assert.deepEqual(await service.handle(PAGE, "requestSession", REQ), { ok: false, code: "session_error", description: "device said no" });
+  assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+  const msg = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
+  assert.equal(msg.ok, true, "the session still works");
 });

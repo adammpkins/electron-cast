@@ -106,9 +106,12 @@ interfaces, so the library has no Electron dependency and runs in plain Node.
 
 - `main.ts`: `createCastManager({ ipcMain, selectDevice, allowOrigin?, discovery?, createClient?, channel? })`
   returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events go back to the
-  page on `<channel>:event`. `selectDevice(devices, request)` returns the user's choice or `null` (maps to
-  `chrome.cast.ErrorCode.CANCEL`); `allowOrigin(origin)` gates every call by the sender frame's origin. A sender is
-  one webContents, which leaves its sessions when it is destroyed or navigates (`did-navigate`).
+  page on `<channel>:event`. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
+  `chrome.cast.ErrorCode.CANCEL`) or `"stop"`
+  (stop `request.session`, the sender's current session, which is set when the sender is already casting that app;
+  picking that session's device returns it without relaunching). `allowOrigin(origin)` gates every call by the
+  sender frame's origin. A sender is one webContents, which leaves its sessions when it is destroyed or navigates
+  (`did-navigate`).
 - `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, bridgeKey? })` exposes the bridge
   (`call`, `onEvent`) and installs the polyfill in the main world before page scripts run.
 

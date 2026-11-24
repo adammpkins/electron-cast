@@ -1,4 +1,4 @@
-import { CastSessionService, type CastClientLike, type DeviceSource, type CastRequestInfo } from "./session-service.ts";
+import { CastSessionService, type CastClientLike, type DeviceSource, type CastRequestInfo, type DeviceChoice } from "./session-service.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
@@ -23,7 +23,7 @@ export interface IpcMainLike {
 /** Dependencies of {@link createCastManager}; the Electron objects are passed in, never imported. */
 export interface CastManagerOptions {
   ipcMain: IpcMainLike;
-  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<CastDevice | null>;
+  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   discovery?: DeviceSource & { start(): Promise<void>; stop(): void };  // default new CastDiscovery()
   createClient?(device: CastDevice): CastClientLike;                     // default new CastClient({ host, port })
