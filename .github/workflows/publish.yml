@@ -1,0 +1,39 @@
+name: Publish
+
+# Publishes to npm with trusted publishing (OIDC): no npm token is stored anywhere. npm checks that the request comes
+# from this repository, this workflow file and the "npm" environment, and adds a provenance attestation.
+#
+# Release: bump "version" in package.json, commit, then push a matching tag:
+#   git tag v0.2.0 && git push origin v0.2.0
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # lets the job request the OIDC token npm verifies
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - name: Tag matches package.json version
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run check
+      - run: npm publish --access public
