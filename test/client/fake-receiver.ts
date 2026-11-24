@@ -82,6 +82,14 @@ export class FakeReceiver {
     };
   }
 
+  /**
+   * Resolves once the client's CONNECT has arrived. With TLS 1.3 the client finishes its handshake before the
+   * server registers the socket, so send/kill/writeRaw right after connect() can otherwise reach nobody.
+   */
+  ready(): Promise<Received> {
+    return this.waitFor((m) => m.namespace === NS_CONNECTION && m.json?.type === "CONNECT");
+  }
+
   waitFor(pred: (m: Received) => boolean, timeoutMs = 2000): Promise<Received> {
     const found = this.received.find(pred);
     if (found) return Promise.resolve(found);

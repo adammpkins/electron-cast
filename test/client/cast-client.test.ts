@@ -46,6 +46,7 @@ test("connect opens a virtual connection to receiver-0 with a random sender id",
   assert.match(client.senderId, /^sender-[0-9a-f]{8}$/);
   assert.equal(client.connected, false);
   await client.connect();
+  await fake.ready();
   assert.equal(client.connected, true);
   const m = await fake.waitFor((x) => x.namespace === NS_CONNECTION);
   assert.equal(m.sourceId, client.senderId);
@@ -57,13 +58,15 @@ test("connect opens a virtual connection to receiver-0 with a random sender id",
 test("a custom sender id is used", async () => {
   const { fake, client } = await setup({ senderId: "sender-custom" });
   await client.connect();
+  await fake.ready();
   const m = await fake.waitFor((x) => x.namespace === NS_CONNECTION);
   assert.equal(m.sourceId, "sender-custom");
 });
 
 test("connect twice rejects; a closed client cannot reconnect", async () => {
-  const { client } = await setup();
+  const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   await assert.rejects(client.connect(), CastConnectionError);
   client.close();
   await assert.rejects(client.connect(), CastConnectionError);
@@ -72,6 +75,7 @@ test("connect twice rejects; a closed client cannot reconnect", async () => {
 test("getStatus sends GET_STATUS with increasing request ids and normalizes the reply", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const status = await client.getStatus();
   assert.deepEqual(status, { applications: [], volume: { level: 0.5, muted: false, controlType: "attenuation", stepInterval: 0.05 } });
   await client.getStatus();
@@ -87,12 +91,14 @@ test("a RECEIVER_STATUS without applications normalizes to an empty list", async
     return true;
   };
   await client.connect();
+  await fake.ready();
   assert.deepEqual(await client.getStatus(), { applications: [], volume: { level: 1 } });
 });
 
 test("launch resolves with the launched app, then app messages flow over its transport", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const app = await client.launch("233637DE");
   assert.equal(app.appId, "233637DE");
   assert.equal(app.sessionId, "session-1");
@@ -126,6 +132,7 @@ test("launch waits for a later RECEIVER_STATUS when the reply does not list the 
     return true;
   };
   await client.connect();
+  await fake.ready();
   const app = await client.launch("CC1AD845");
   assert.equal(app.transportId, "t-9");
 });
@@ -134,6 +141,7 @@ test("LAUNCH_ERROR rejects with CastRequestError", async () => {
   const { fake, client } = await setup();
   fake.launchError = "NOT_FOUND";
   await client.connect();
+  await fake.ready();
   const err = await client.launch("DEADBEEF").then(() => null, (e: unknown) => e);
   assert.ok(err instanceof CastRequestError);
   assert.equal(err.type, "LAUNCH_ERROR");
@@ -141,8 +149,9 @@ test("LAUNCH_ERROR rejects with CastRequestError", async () => {
 });
 
 test("INVALID_REQUEST rejects a generic request", async () => {
-  const { client } = await setup();
+  const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   await assert.rejects(client.request(NS.RECEIVER, PLATFORM_RECEIVER_ID, { type: "BOGUS" }), (e: unknown) => {
     assert.ok(e instanceof CastRequestError);
     assert.equal(e.type, "INVALID_REQUEST");
@@ -154,6 +163,7 @@ test("INVALID_REQUEST rejects a generic request", async () => {
 test("stop and setVolume send the right payloads", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const app = await client.launch("233637DE");
   const afterVolume = await client.setVolume({ level: 0.25 });
   assert.equal(afterVolume.volume.level, 0.25);
@@ -171,6 +181,7 @@ test("stop and setVolume send the right payloads", async () => {
 test("getAppAvailability maps availability to booleans", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   assert.deepEqual(await client.getAppAvailability(["233637DE", "BADAPP00"]), { "233637DE": true, BADAPP00: false });
   const req = fake.received.find((m) => m.json?.type === "GET_APP_AVAILABILITY");
   assert.deepEqual(req?.json?.appId, ["233637DE", "BADAPP00"]);
@@ -180,6 +191,7 @@ test("replies are matched by request id, namespace and source", async () => {
   const { fake, client } = await setup();
   fake.autoReply = false;
   await client.connect();
+  await fake.ready();
   const app = { transportId: "transport-7" };
   client.connectTransport(app.transportId);
   let settled = false;
@@ -207,6 +219,7 @@ test("request rejects for reply types ending in _ERROR and for LOAD_FAILED", asy
     return true;
   };
   await client.connect();
+  await fake.ready();
   await assert.rejects(client.request(APP_NS, "t", { type: "X", kind: "a" }), CastRequestError);
   await assert.rejects(client.request(APP_NS, "t", { type: "X", kind: "b" }), CastRequestError);
 });
@@ -215,6 +228,7 @@ test("request times out with CastTimeoutError and forgets the request", async ()
   const { fake, client } = await setup();
   fake.autoReply = false;
   await client.connect();
+  await fake.ready();
   await assert.rejects(client.request(NS.RECEIVER, PLATFORM_RECEIVER_ID, { type: "GET_STATUS" }, { timeoutMs: 50 }), CastTimeoutError);
   const req = fake.received.find((m) => m.json?.type === "GET_STATUS");
   fake.sendJson(NS_RECEIVER, "receiver-0", client.senderId, fake.status(req?.json?.requestId as number));
@@ -226,6 +240,7 @@ test("the requestTimeoutMs option sets the default timeout", async () => {
   const { fake, client } = await setup({ requestTimeoutMs: 40 });
   fake.autoReply = false;
   await client.connect();
+  await fake.ready();
   const t0 = Date.now();
   await assert.rejects(client.getStatus(), CastTimeoutError);
   assert.ok(Date.now() - t0 < 1000);
@@ -234,6 +249,7 @@ test("the requestTimeoutMs option sets the default timeout", async () => {
 test("emits message events for app traffic with string or Buffer data", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const got: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }[] = [];
   client.on("message", (m) => got.push(m));
   fake.sendJson(APP_NS, "transport-1", client.senderId, { type: "mdxSessionStatus", data: { screenId: "abc" } });
@@ -248,17 +264,20 @@ test("emits message events for app traffic with string or Buffer data", async ()
 test("heartbeat and connection traffic is not emitted as message events", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const got: unknown[] = [];
   client.on("message", (m) => got.push(m));
   fake.sendJson(NS_HEARTBEAT, "receiver-0", client.senderId, { type: "PONG" });
   fake.sendJson(NS_CONNECTION, "transport-x", client.senderId, { type: "CLOSE" });
+  fake.sendJson(APP_NS, "transport-1", client.senderId, { type: "marker" });
   await delay(50);
-  assert.deepEqual(got, []);
+  assert.deepEqual(got.map((m) => (m as { namespace: string }).namespace), [APP_NS], "only the app message is emitted");
 });
 
 test("emits receiverStatus for unsolicited status updates", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const statuses: unknown[] = [];
   client.on("receiverStatus", (s) => statuses.push(s));
   fake.volume.level = 0.9;
@@ -271,6 +290,7 @@ test("emits receiverStatus for unsolicited status updates", async () => {
 test("pings on the heartbeat interval and answers the device's PING with PONG", async () => {
   const { fake, client } = await setup({ heartbeatIntervalMs: 30 });
   await client.connect();
+  await fake.ready();
   await delay(120);
   const pings = fake.received.filter((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PING");
   assert.ok(pings.length >= 2, `expected >= 2 pings, got ${pings.length}`);
@@ -284,6 +304,7 @@ test("closes with an error when the device goes silent, rejecting pending reques
   fake.autoPong = false;
   fake.autoReply = false;
   await client.connect();
+  await fake.ready();
   const pending = client.getStatus();
   const [err] = (await once(client, "close")) as [Error | undefined];
   assert.ok(err instanceof CastConnectionError);
@@ -296,6 +317,7 @@ test("inbound traffic of any kind keeps the connection alive", async () => {
   const { fake, client } = await setup({ heartbeatIntervalMs: 20, heartbeatTimeoutMs: 80 });
   fake.autoPong = false;
   await client.connect();
+  await fake.ready();
   const keepAlive = setInterval(() => fake.sendJson(APP_NS, "transport-1", client.senderId, { type: "tick" }), 20);
   cleanups.push(() => clearInterval(keepAlive));
   await delay(250);
@@ -305,6 +327,7 @@ test("inbound traffic of any kind keeps the connection alive", async () => {
 test("CLOSE from receiver-0 closes the client; CLOSE from a transport emits transportClosed", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   client.connectTransport("transport-1");
   const closedTransports: string[] = [];
   client.on("transportClosed", (id) => closedTransports.push(id));
@@ -321,6 +344,7 @@ test("CLOSE from receiver-0 closes the client; CLOSE from a transport emits tran
 test("a dropped socket closes the client with an error", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const closed = once(client, "close");
   fake.kill();
   const [err] = (await closed) as [Error | undefined];
@@ -331,6 +355,7 @@ test("a dropped socket closes the client with an error", async () => {
 test("a protocol violation closes the client with an error", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   const closed = once(client, "close");
   const header = Buffer.alloc(4);
   header.writeUInt32BE(70000);
@@ -343,6 +368,7 @@ test("close() says goodbye, emits close once without an error, and is idempotent
   const { fake, client } = await setup();
   fake.autoReply = false;
   await client.connect();
+  await fake.ready();
   client.connectTransport("transport-1");
   const pending = client.getStatus();
   const events: unknown[] = [];
@@ -362,6 +388,7 @@ test("close() says goodbye, emits close once without an error, and is idempotent
 test("send encodes strings as STRING, objects as JSON and Buffers as BINARY", async () => {
   const { fake, client } = await setup();
   await client.connect();
+  await fake.ready();
   client.send(APP_NS, "t", "raw text");
   client.send(APP_NS, "t", { a: 1 });
   client.send(APP_NS, "t", Buffer.from([9, 8]));
