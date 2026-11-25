@@ -8,6 +8,24 @@
   media router log (`getLogs`, `registerLogObserver`) also holds the messages of Cast routes, as Chrome logs them: the
   envelopes to and from the page and the messages to and from the receiver, at `Info` in the `Route` category, with the JSON
   written as `base::WriteJson` writes it.
+- **The media router's sink service status** (`MediaSinkServiceStatus`, what `chrome://media-router-internals` shows as its
+  state): `getMediaSinkServiceStatus()` returns `discovered_sinks` (the sinks each discovery service, `cast` and `dial`,
+  reported, 3 s after a change) and `available_sinks` (the last 100 lists of sink ids, keyed `<PROVIDER>:<media source>`),
+  with Chrome's key names; `getMediaSinkServiceStatusAsString()` is `MediaRouterDesktop::GetMediaSinkServiceStatus`.
+- **`getLogsAsString()`** is `MediaRouterDesktop::GetLogsAsString`, the log as the JSON the Cast feedback page gets, with each
+  entry's keys sorted as Chrome writes them.
+- **A `castMode: "tab_mirror"` sinks query listed every device**, DIAL sinks and speakers without audio out included: it asked
+  for a tab source Chrome's `IsTabMirroringSource` does not accept. It now lists the Cast sinks that can run a streaming app.
+
+### Documentation
+
+- `FallbackToAudioTabMirroring` stays "does not apply", now with Chrome's reason: only the Global Media Controls panel reads
+  it, and the toolbar dialog always has tab and desktop mirroring.
+- The README no longer lists file mirroring as a Chrome feature (Chrome's `MediaCastMode` has none), and the DESIGN page no
+  longer says `media_sink_service_status.cc` is gone from Chromium (it is in `chrome/browser/media/router/mojo/`).
+- The Chromium map's "not yet tried on a real device" rows now agree with the README and the "Tested on real devices"
+  records: the CONNECT and LAUNCH fields, receiver labels with a token store, the sink order and the failed launch were tested
+  on a Nest Hub Max; discovery parsing with eight real devices.
 
 ## 0.5.0-next.2 (prerelease)
 

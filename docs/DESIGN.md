@@ -863,7 +863,7 @@ disabled).
 | `CastMessageLogging` (`kCastMessageLogging`, disabled by default) | `--enable-features=CastMessageLogging` (`castMessageLogging` in `switches.ts`, `src/electron/message-logging.ts`) writes the messages of a Cast route to the media router log (`getLogs`, `registerLogObserver`), at `Info` in the `Route` category, as `CastSessionClientImpl::SendMessageToClient` and `LogCastInternalMessage` (cast_session_client_impl.cc) and `CastActivityManager::OnAppMessage`, `OnInternalMessage` and `OnMessageSent` (cast_activity_manager.cc) do: every envelope to the page, every parsed message from it for this client and session (the body only: the app message's `message`, a v2 message whole, nothing for the others), every non-reserved-namespace message from the receiver, every reserved-namespace one that is a JSON object of a known type other than `CLOSE`, and every message the session's channel sends. Messages of a channel with no session of the manager are not logged, as Chrome logs only a channel that has an activity. JSON is written as `base::WriteJson` writes it (sorted keys, `<` as `<`, at most 10 containers deep, else `<error>`); the log's own limits apply (1024 characters of message, 9 of an id). Read once at `createCastManager`. A client from a custom `createClient` reports no sent messages (the hook is internal to the manager's own clients). Not matched: a number written `1.0` is logged as `1`, and mirroring routes and the `mode: "chromecast"` bridge have no hook of their own (a session they share with the manager is logged like any other) |
 | `AllowAllSitesToInitiateMirroring` | `--enable-features=AllowAllSitesToInitiateMirroring` lets any origin start mirroring through a Cast Streaming presentation URL, not only `kPresentationApiAllowlist` (`allowAllSitesToInitiateMirroring` in `switches.ts`; see [Site-initiated mirroring](#site-initiated-mirroring-and-mirroring-to-flinging)) |
 | `DelayMediaSinkDiscovery` | Does not apply: it holds discovery back until a user gesture in the browser; here discovery starts at `start()`, and the app decides when to call it |
-| `FallbackToAudioTabMirroring` | Does not apply: it adds tab mirroring to the cast modes of a dialog; the app builds its own |
+| `FallbackToAudioTabMirroring` | Does not apply, for a reason Chrome's code shows (enabled by default; `media_router_feature.cc`). It is read in two places, both of the Global Media Controls panel: `CreateMediaCastModeSet` (`media_router_ui.cc`) adds `TAB_MIRROR` to the `PRESENTATION` and `REMOTE_PLAYBACK` mode sets of `CreateWithDefaultMediaSource`, `CreateWithStartPresentationContext` and `CreateWithMediaSessionRemotePlayback`, and `SupportsTabAudioMirroring` (`cast_device_list_host.cc`) lets that panel's device list offer tab mirroring to audio sinks (`CAST_AUDIO`, `CAST_AUDIO_GROUP`) that support neither. The toolbar dialog uses `CreateWithDefaultMediaSourceAndMirroring` and `CreateWithStartPresentationContextAndMirroring`, which always have `PRESENTATION`, `TAB_MIRROR` and `DESKTOP_MIRROR`. The flag changes which sources a dialog observes, never what a media router answers for one source, and this library has no panel and no mode sets: `registerMediaSinksObserver` answers one query at a time, so the app gets Chrome's list by registering the `presentationUrls` query and a `castMode: "tab_mirror"` query and joining them (an audio sink is one with `iconType` `cast_audio` or `cast_audio_group`) |
 | `RedirectionMediaRouteProvider` | Does not apply: media remoting redirection is not ported |
 | `MediaRouterShowCastSessionsStartedByOtherDevices` (profile pref) | Does not apply: it only filters what the dialog shows; `getRoutes` returns them all and the app filters |
 | `MediaRouterMediaRemotingEnabled`, `MediaRouterReceiverIdHashToken` | Not part of S10 here (remoting is not offered; the token is S3) |
@@ -882,8 +882,17 @@ Recording permission and raises the issue. Pass `mirroring.electron.systemPrefer
 
 **S13, diagnostics.** `MediaRouterLogger` is `LoggerImpl` (1000 entries, the same truncation of the fields): discovery,
 route and mirroring events are written to it and `getLogs`, `registerLogObserver` read it, and `getCastProviderState` is
-`CastMediaRouteProvider::GetState`. The sink service status page of Chrome (`media_sink_service_status.cc`) no longer
-exists in Chromium `main`, so there is no port of it; `getSinks` already reports the sinks.
+`CastMediaRouteProvider::GetState`. `MediaSinkServiceStatus` (`chrome/browser/media/router/mojo/media_sink_service_status.cc`,
+which exists in Chromium `main`) is ported as `getMediaSinkServiceStatus`: `MediaRouterDesktop::GetState` returns it to the
+`getState` message of `chrome://media-router-internals`, and `GetMediaSinkServiceStatus` (the mojom method) returns it as JSON,
+as `getMediaSinkServiceStatusAsString`. It holds `discovered_sinks`, which each discovery service (`cast`, `dial`) reports 3 s
+after its sinks change and only when its list differs (`MediaSinkServiceBase::OnDiscoveryComplete`), and `available_sinks`,
+an LRU of 100 lists of sink ids keyed `<PROVIDER>:<media source>` (`MediaRouterDesktop::OnSinksReceived`, here: each
+`registerMediaSinksObserver` query with `presentationUrls`, one source per URL, or a `castMode`). The sink fields are those of
+`ToValue` (ids cut to 9 characters, keys sorted, `discovered_by_dial` from how the channel was first opened); `channel_id` is
+0 because this library does not number its channels, and a wired display's sinks are not recorded. `getLogsAsString` is
+`MediaRouterDesktop::GetLogsAsString`, the call the Cast feedback page makes (`LoggerImpl::GetLogsAsJson`). Both use Chrome's
+names, as `getLogs` and `getMirroringStats` do.
 
 ## Wired displays
 
