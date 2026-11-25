@@ -15,6 +15,10 @@
   forwarded to the receiver (they were dropped, so their callbacks never fired); a failed `SET_VOLUME` or `STOP`
   reports `internal_error` / "unknown error"; a media request that cannot be sent gets no reply; an app message for a
   vanished session reports `session_error` "Invalid session ID". Unknown v2 message types are still dropped, as in Chrome.
+- Presentation mode: a page can rejoin a session that kept playing on the device after the app restarted, the way it
+  can in Chrome: `reconnect("cast-session_<id>")` (Google's SDK `requestSessionById`) now finds sessions this run did
+  not start, by asking the known devices what they run. Auto-join still does not join them, as in Chrome, and nothing
+  is persisted. The service gains a `joinRunningSession` call for this; `mode: "chromecast"` is unchanged.
 
 ## 0.3.1
 

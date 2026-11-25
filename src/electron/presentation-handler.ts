@@ -240,7 +240,8 @@ export class CastPresentationHandler {
       snapshot = sessions[0]!;
     } else if (presentationId.startsWith(CAST_SESSION_PREFIX)) {
       const sessionId = presentationId.slice(CAST_SESSION_PREFIX.length);
-      const res = await this.service.handle(sender, "joinSession", { sessionId });
+      // Like Chrome, also finds a session this run did not start (one still playing from before an app restart).
+      const res = await this.service.handle(sender, "joinRunningSession", { sessionId, appId: parsed.appId });
       if (!res.ok) throw new PresentationError("NotFoundError", res.description ?? "No matching route");
       const s = res.value as SessionSnapshot;
       if (s.appId !== parsed.appId) {

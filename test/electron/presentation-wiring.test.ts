@@ -321,3 +321,72 @@ test("availability watches are capped per page, oldest dropped", async () => {
   assert.equal(ids.length, 32);
   assert.ok(!ids.includes("w0") && ids.includes("w39"));
 });
+
+// ---------- after an app restart (Chrome: reconnect("cast-session_<id>") finds the session from receiver status) ----------
+
+/** A first run that casts and quits, and a second manager whose device still plays that session. */
+async function restarted() {
+  const first = setup();
+  const wc1 = new FakeWebContents(5);
+  assert.equal((await first.pcall(wc1, "start", { connectionId: "conn-1", urls: [URL1] })).ok, true);
+  const apps = first.clients[0]!.apps.map((a) => ({ ...a }));
+  const sessionId = apps[0]!.sessionId;
+  await first.manager.dispose();
+  const second = setup({
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      if (d.id === TV.id) c.apps = apps.map((a) => ({ ...a }));
+      second.clients.push(c);
+      return c;
+    },
+  });
+  return { second, sessionId, transportId: apps[0]!.transportId };
+}
+
+test("after a restart a page rejoins the running session with reconnect(cast-session_<id>), and auto-join does not", async () => {
+  const { second, sessionId, transportId } = await restarted();
+  const wc = new FakeWebContents(7);
+  const other = new FakeWebContents(8);
+
+  const auto = await second.pcall(wc, "reconnect", { connectionId: "c0", urls: [URL1], presentationId: "auto-join" });
+  assert.equal(auto.ok, false, "Chrome does not auto-join a session it did not start");
+  assert.equal(auto.code, "NotFoundError");
+
+  const r = await second.pcall(wc, "reconnect", { connectionId: "c1", urls: [URL1], presentationId: `cast-session_${sessionId}` });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.value.id, `cast-session_${sessionId}`);
+  const msgs = wc.events().filter((e) => e.type === "message").map((e) => JSON.parse(e.data));
+  assert.deepEqual(msgs.map((m) => m.type), ["new_session"]);
+  assert.equal(msgs[0].message.sessionId, sessionId);
+  assert.equal(msgs[0].message.transportId, transportId);
+  assert.deepEqual(other.events(), []);
+
+  // The rejoined connection is live both ways.
+  second.psend(wc, "c1", JSON.stringify({ type: "app_message", message: { sessionId, namespaceName: MDX, message: "hi" }, sequenceNumber: 1, timeoutMillis: 3000, clientId: "c1" }));
+  await tick();
+  const tv = second.clients.find((c) => c.device.id === TV.id)!;
+  assert.deepEqual(tv.sent.at(-1), { namespace: MDX, destinationId: transportId, payload: "hi" });
+  tv.pushMessage(transportId, MDX, "from receiver");
+  await tick();
+  assert.equal(JSON.parse(wc.events().at(-1).data).type, "app_message");
+});
+
+test("after a restart nothing is rejoined for another app, an unknown id, a session that ended or a refused origin", async () => {
+  const { second, sessionId } = await restarted();
+  const wc = new FakeWebContents(7);
+  const other = `https://google.com/cast#__castAppId__=CC1AD845/__castClientId__=c1`;
+  assert.equal((await second.pcall(wc, "reconnect", { connectionId: "a", urls: [other], presentationId: `cast-session_${sessionId}` })).code, "NotFoundError");
+  assert.equal((await second.pcall(wc, "reconnect", { connectionId: "b", urls: [URL1], presentationId: "cast-session_nope" })).code, "NotFoundError");
+  assert.deepEqual(wc.events(), []);
+
+  const gone = await restarted();
+  gone.second.clients.length = 0;
+  gone.second.manager.dispose();
+  const none = setup();
+  assert.equal((await none.pcall(wc, "reconnect", { connectionId: "c", urls: [URL1], presentationId: `cast-session_${gone.sessionId}` })).code, "NotFoundError");
+
+  const refused = await restarted();
+  const denied = setup({ allowOrigin: () => false });
+  assert.equal((await denied.pcall(wc, "reconnect", { connectionId: "d", urls: [URL1], presentationId: `cast-session_${refused.sessionId}` })).ok, false);
+  assert.equal(denied.clients.length, 0, "no device is contacted for a refused origin");
+});

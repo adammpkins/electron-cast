@@ -261,6 +261,8 @@ export class CastSessionService {
           return await this.handleRequestSession(sender, params);
         case "joinSession":
           return this.handleJoinSession(sender, params);
+        case "joinRunningSession":
+          return await this.handleJoinRunningSession(sender, params);
         case "sendMessage":
           return this.handleSendMessage(sender, params);
         case "stopSession":
@@ -509,6 +511,111 @@ export class CastSessionService {
     return good(undefined);
   }
 
+  /** The device's client entry, created and connecting on first use. */
+  private clientFor(device: CastDevice): ClientEntry {
+    const existing = this.clients.get(device.id);
+    if (existing !== undefined) return existing;
+    const client = this.options.createClient(device);
+    this.bindClient(client, device);
+    const entry: ClientEntry = {
+      client,
+      device,
+      ready: client.connect().catch((err: unknown) => {
+        // Remove the entry and close the client once so the next request starts fresh.
+        this.dropClient(device.id, client);
+        throw err;
+      }),
+      opening: 0,
+    };
+    // A lookup may never await this; openSession still sees the rejection.
+    entry.ready.catch(() => {});
+    this.clients.set(device.id, entry);
+    return entry;
+  }
+
+  /**
+   * Join a session by its id, as Chrome's Media Router does for `reconnect("cast-session_<id>")`. A session this
+   * service already holds is joined as joinSession does. Otherwise the id is looked up in the receiver status of
+   * every known device: Chrome's CastSessionTracker learns the sessions running on all sinks and
+   * CastActivityManager::AddNonLocalActivity makes them joinable by id (and only by id: auto-join skips them, and no
+   * origin is checked). `appId`, when given, must be the session's app (CastActivity::CanJoinSession). Unlike Chrome
+   * the lookup runs when asked instead of tracking every device all the time.
+   */
+  private async handleJoinRunningSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
+    const p = parseSessionId(params);
+    if (p === null) return bad("invalid_parameter");
+    const appId = isRecord(params) && typeof params.appId === "string" ? params.appId : undefined;
+    const known = this.sessions.get(p.sessionId);
+    if (known !== undefined) {
+      if (appId !== undefined && known.appId !== appId) return bad("session_error");
+      return this.handleJoinSession(sender, params);
+    }
+    const found = await this.findRunningSession(p.sessionId);
+    if (found === undefined) return bad("session_error");
+    const { entry, app, volume } = found;
+    try {
+      if (this.disposed || (appId !== undefined && app.appId !== appId)) return bad("session_error");
+      // Another join of the same session finished while this one looked.
+      if (this.sessions.has(app.sessionId)) return this.handleJoinSession(sender, params);
+      entry.client.connectTransport(app.transportId);
+      const rec: SessionRecord = {
+        device: entry.device,
+        client: entry.client,
+        app,
+        origin: sender.origin,
+        appId: app.appId,
+        members: new Set([sender.id]),
+        parked: new Set(),
+        lastVolume: volume,
+        lastSnapshot: null,
+      };
+      rec.lastSnapshot = this.snapshotOf(rec);
+      this.sessions.set(app.sessionId, rec);
+      return good(rec.lastSnapshot);
+    } finally {
+      entry.opening -= 1;
+      if (!this.sessions.has(app.sessionId)) this.cleanupIdle(entry.device.id, entry.client);
+    }
+  }
+
+  /**
+   * Ask every known device what it runs and resolve with the one running `sessionId`. The winner's `opening` count
+   * stays raised for the caller to release; a device that cannot be reached or runs something else is let go.
+   */
+  private findRunningSession(sessionId: string): Promise<{ entry: ClientEntry; app: ReceiverApplication; volume: ReceiverVolume } | undefined> {
+    const devices = this.options.devices.devices();
+    return new Promise((resolve) => {
+      let pending = devices.length;
+      let won = false;
+      if (pending === 0) resolve(undefined);
+      for (const device of devices) {
+        const entry = this.clientFor(device);
+        entry.opening += 1;
+        void (async () => {
+          let app: ReceiverApplication | undefined;
+          let volume: ReceiverVolume | undefined;
+          try {
+            await entry.ready;
+            const status = await entry.client.getStatus();
+            app = status.applications.find((a) => a.sessionId === sessionId);
+            volume = status.volume;
+          } catch {
+            // unreachable: not this device
+          }
+          if (app !== undefined && volume !== undefined && !won) {
+            won = true;
+            resolve({ entry, app, volume });
+            return;
+          }
+          entry.opening -= 1;
+          this.cleanupIdle(device.id, entry.client);
+          pending -= 1;
+          if (pending === 0 && !won) resolve(undefined);
+        })();
+      }
+    });
+  }
+
   /** Connect (or reuse) the device's client, launch the app and register the session. */
   private async openSession(
     device: CastDevice,
@@ -517,23 +624,7 @@ export class CastSessionService {
     discard: { value: boolean },
     cancelled: { value: boolean },
   ): Promise<SessionSnapshot> {
-    const existing = this.clients.get(device.id);
-    let entry = existing;
-    if (entry === undefined) {
-      const client = this.options.createClient(device);
-      this.bindClient(client, device);
-      entry = {
-        client,
-        device,
-        ready: client.connect().catch((err: unknown) => {
-          // Remove the entry and close the client once so the next request starts fresh.
-          this.dropClient(device.id, client);
-          throw err;
-        }),
-        opening: 0,
-      };
-      this.clients.set(device.id, entry);
-    }
+    const entry = this.clientFor(device);
     const client = entry.client;
     entry.opening += 1;
     let registered = false;
