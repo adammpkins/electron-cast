@@ -135,8 +135,10 @@ Discovery needs to see the LAN's multicast traffic. Under WSL2 that depends on t
 
 - Wait a minute, or reboot the Cast device: electron-cast queries at start, again after 1 s and 3 s, then every 60 s.
 - Make sure the device is a Cast device that advertises `_googlecast._tcp` (the Linux and macOS commands above browse for it).
-- Your picker may be filtering them out. In default mode `selectDevice` receives every device found; in
-  `mode: "chromecast"` only those with the capabilities the page asked for.
+- Give it a few seconds: a device is listed only once its channel is open and authenticated, after a random delay of up
+  to 5 s and a 3 s quiet period. One that fails authentication is never listed (see below).
+- Your picker may be filtering them out. In default mode `selectDevice` receives the devices that said they have the
+  page's receiver app; in `mode: "chromecast"` those with the capabilities the page asked for.
 
 ## The cast button never appears
 
@@ -166,14 +168,14 @@ click. Casting must start from a user gesture, as in Chrome; a call from the Dev
 
 ## A device is refused, or casting fails after picking it
 
-A device that fails device authentication still appears in the picker (it was found at discovery) and fails when picked. The
-page sees `NotFoundError` with a description that names the reason; `mode: "chromecast"` sees `receiver_unavailable`.
+A device that fails device authentication is never listed, as in Chrome: the channel opened to it at discovery is refused,
+retried with Chrome's backoff, and then given up, so it does not reach the picker and a page that asks finds no screen.
 
 To see the real reason in your logs, wrap `createClient` and log the `CastAuthError`: the exact snippet is in [Device
 authentication](guides/device-authentication.md#what-failure-looks-like). The `reason` values, and what each usually means,
 are in the [API reference](API.md#errors) and the [guide](guides/device-authentication.md#diagnosing-a-refused-device).
 
-Other reasons a pick fails, from the same `createClient` wrapper:
+Other reasons a device does not show or a cast fails, from the same `createClient` wrapper:
 
 | What you see | Meaning |
 |---|---|
@@ -183,7 +185,7 @@ Other reasons a pick fails, from the same `createClient` wrapper:
 | A pick that never finishes | Your `selectDevice` never resolved. The time the picker is open does not count against the launch timeout, so resolve `null` on cancel |
 
 A device is connected over IPv4 when it has an address, else IPv6 (link-local ones with the interface's zone, `fe80::1%12`). IPv6
-is covered by unit tests only so far, not by a real-device run.
+discovery, and TLS and device authentication over unique-local and link-local addresses, were verified on real devices.
 
 ## The app hangs at top-level `await app.whenReady()` (Electron 45)
 
@@ -239,10 +241,15 @@ exposes:
 ```ts
 import { ipcMain } from "electron";
 import { CastClient, type CastDevice } from "electron-cast";
-import { createCastManager } from "electron-cast/main";
+import { createCastManager, type ChannelParams } from "electron-cast/main";
 
-function createClient(device: CastDevice): CastClient {
-  const client = new CastClient({ host: device.host, port: device.port });
+function createClient(device: CastDevice, params: ChannelParams): CastClient {
+  const client = new CastClient({
+    host: device.host,
+    port: device.port,
+    connectTimeoutMs: params.connectTimeoutMs,
+    heartbeatTimeoutMs: params.livenessTimeoutMs,
+  });
   const tag = `cast[${device.name}]`;
   client.on("message", (m) => console.log(tag, m.namespace, m.sourceId, "->", m.destinationId, typeof m.data === "string" ? m.data.slice(0, 200) : `<${m.data.length} bytes>`));
   client.on("receiverStatus", (s) => console.log(tag, "status", s.applications.map((a) => a.displayName), s.volume));

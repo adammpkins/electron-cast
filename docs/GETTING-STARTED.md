@@ -61,8 +61,9 @@ Three decisions are yours here:
   can serve the request. Resolve a `CastDevice`, `null` to cancel, or `"stop"` to stop the sender's current session.
   The menu above is the smallest possible picker; [Building your own device picker](guides/device-picker.md) shows a
   window with live updates.
-- **When discovery runs.** `await cast.start()` opens an mDNS socket on each network interface. Call it at startup, or
-  later if casting is a setting that is off by default. `await cast.dispose()` stops everything and cannot be undone;
+- **When discovery runs.** `await cast.start()` opens an mDNS socket on each network interface, then, as in Chrome, a
+  kept-open channel to each device found; a device is listed once its channel is open and authenticated, so the list
+  fills in a few seconds after `start()`. Call it at startup, or later if casting is a setting that is off by default. `await cast.dispose()` stops everything and cannot be undone;
   create a new manager to turn casting back on.
 
 Do not write a top-level `await app.whenReady()` in an ES module main process: on Electron 45 it never resolves
@@ -176,7 +177,8 @@ already has its own CSP, and casting works with it.
 
 ## 6. Run it
 
-Start the app and open the page. The launcher appears when discovery has found a device. Click it, pick a device from
+Start the app and open the page. The launcher appears when a device that has the page's receiver app is listed, a few
+seconds after `start()`. Click it, pick a device from
 your `selectDevice`, and the receiver app launches. For the first run, the default media receiver (`CC1AD845`, the
 `DEFAULT_MEDIA_RECEIVER_APP_ID` above) plays any media URL the device can reach; see
 [Custom receivers](guides/custom-receivers.md).
@@ -234,7 +236,7 @@ your package's policy, not the library's).
 
 **Coexisting with avahi.** electron-cast binds UDP 5353 with address reuse, which is how a second mDNS client shares the
 port with `avahi-daemon` or `systemd-resolved`. If that bind fails it falls back to a socket on an ephemeral port that
-receives unicast replies (mDNS "legacy unicast"). electron-cast only asks: it never advertises and never answers mDNS queries. Discovery and device authentication were tested from
+receives unicast replies (mDNS "legacy unicast"). electron-cast only asks: it never advertises and never answers mDNS queries. Discovery, device authentication and casting end to end were tested from
 Ubuntu under WSL2 with mirrored networking (see [Platforms](../README.md#platforms-and-what-was-tested)); they were not
 tested next to a running `avahi-daemon`. If a host firewall (`ufw`, `firewalld`) drops inbound multicast, devices will not
 appear; [Troubleshooting](TROUBLESHOOTING.md#linux) lists the commands.

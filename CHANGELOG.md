@@ -2,30 +2,26 @@
 
 ## Unreleased
 
-- **Devices are tracked as Chrome's Media Router tracks them.** electron-cast opens a channel to every device mDNS
-  finds (after Chrome's random delay of up to 5 s), runs device authentication on it, and lists the device only once
-  that has passed. A failed attempt is retried with Chrome's backoff (15 s, 3 attempts); a device that fails
-  authentication is never listed, where before it appeared in the picker and failed on use. The channel then stays
-  open, with a ping every 5 s, and is reopened after a failure (sleep and resume included); a device is dropped only
-  when it cannot be reopened, not when mDNS stops reporting it. The list is reported once it has been quiet for 3 s.
-  `manager.devices()`, the picker's list and the sinks observers show these devices, so right after `start()` the
-  list fills in over a few seconds. New options: `sinks`
-  (`openDelayMaxMs`, `reportDelayMs`, `retry`, `allowAllIps`) on `createCastManager` and `CastSessionService`.
-  Each is a Chrome setting; there is no cap or off switch because Chrome has none. New methods:
-  `CastManager.discoverSinksNow()` and `CastManager.settled()`.
-- **A session tracker follows what every device runs**, from the receiver status (and media status) on the device's
-  channel, whoever started it. `joinRunningSession` is answered from it instead of scanning the devices, with the same
-  results and errors. Sessions started elsewhere, or by this app before it restarted, are reported through the routes
-  observers and `getRoutes()` as non-local routes, as Chrome does; `MediaRoute` gains `isLocal` and `sinkName`, and
-  `origin` is empty on a non-local route. A non-local route can be terminated and have its volume set. A session whose
-  pages all let go now stays a (non-local) route while the device runs it, where it used to disappear from the list.
-- A device's channel is shared by its sessions and kept open, so clients from `createClient` live as long as the device
-  is a sink, not as long as a session. `createClient` is called once per device (again after a failure) and its
-  clients must be fine to keep connected. It gets a second argument, `{ connectTimeoutMs, livenessTimeoutMs }`. A channel
-  replaced because the device's address changed stays open while a session uses it (as Chrome leaves the old socket);
-  an address list that mDNS merely reorders changes nothing. A device whose host is not an IP address is skipped with a
-  warning. `CastManager.settled()` takes `{ retries: true }`. Chromecast mode (`mode: "chromecast"`) behaves as before for pages; it
-  shares the device list.
+This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
+channels, the sessions on them are followed whoever started them, and the app can cast and control media from its own
+UI. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
+is frozen and behaves as before for pages; it shares the device list.
+
+### Added
+
+- **A session tracker follows what every device runs**, from the receiver status and media status on the device's
+  channel, whoever started it (Chrome's `CastSessionTracker`). Sessions started elsewhere, or by this app before it
+  restarted, are reported through the routes observers and `getRoutes()` as non-local routes, as Chrome does;
+  `MediaRoute` gains `isLocal` and `sinkName`, and `origin` is empty on a non-local route. A non-local route can be
+  terminated and have its volume set.
+- **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
+  `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
+  `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
+  images). It works on non-local routes too. Its status comes from the session tracker, as `CastMediaController`'s does:
+  every receiver status and every `MEDIA_STATUS` reaches every observer, changed or not, with media updates merged
+  into what was known and the `supportedMediaCommands` mask turned into a list. Binding sends the session's state
+  first and then `MEDIA_GET_STATUS`. New types `MediaController`, `MediaStatus`, `MediaStatusObserver`, `MediaImage`
+  and `MediaPlayState`. See docs/MAIN-API.md.
 - **Casting from the app's own UI, on the page's default request.** In Chrome a page sets
   `navigator.presentation.defaultRequest = new PresentationRequest(urls)`; the Cast dialog, opened from the browser's
   menu or toolbar, offers it as a source, and when the user picks a device Chrome starts the presentation and fires
@@ -38,37 +34,77 @@
     default request on a sink with no picker and no user gesture. The page gets `connectionavailable` with a working
     connection and the route appears in routes observers. It rejects with `MediaRouteError` carrying Chrome's
     `RouteRequestResultCode` (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`,
-    `unknown_error`) or `unable_to_cast`.
+    `unknown_error`) or `unable_to_cast`. `startCasting` launches anew on a sink that already has a route, stops the
+    route its window launched before, and uses the URL's `__castLaunchTimeout__` or 60 s, all as Chrome's
+    `CastActivityManager` does. New types `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
   - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
-    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities. `startCasting` launches anew on a
-    sink that already has a route, stops the route its window launched before, and uses the URL's
-    `__castLaunchTimeout__` or 60 s, all as Chrome's `CastActivityManager` does. New types
-    `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
-  - `navigator.presentation.defaultRequest` is now a nullable attribute as in Blink: it takes a `PresentationRequest`
-    or `null` and throws `TypeError` for anything else. `connectionavailable` fires after the current task, as Blink
-    enqueues it.
-  - `mode: "chromecast"` is unchanged.
+    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities.
+- New options and methods for the device list: `sinks` (`openDelayMaxMs`, `reportDelayMs`, `retry`, `allowAllIps`,
+  `dynamicTimeoutDeltaMs`) on `createCastManager` and `CastSessionService`, each a Chrome setting (there is no cap or
+  off switch, because Chrome has none); `CastManager.discoverSinksNow()` and `CastManager.settled()` (with
+  `{ retries: true }`); the type `ChannelParams`.
+- `isPubliclyRoutable`, `isLoopback`, `isCastAddressAllowed` and `parseIpBytes` are exported from the discovery layer
+  (ports of `net::IPAddress`). `APP_AVAILABILITY_REFRESH_MS` is exported.
+
+### Changed
+
+- **Devices are tracked as Chrome's Media Router tracks them.** electron-cast opens a channel to every device mDNS
+  finds (after Chrome's random delay of up to 5 s), runs device authentication on it, and lists the device only once
+  that has passed. A failed attempt is retried with Chrome's backoff (15 s, 3 attempts); a device that fails
+  authentication is never listed, where before it appeared in the picker and failed on use. The channel then stays
+  open, with a ping every 5 s, and is reopened after a failure (sleep and resume included); a device is dropped only
+  when it cannot be reopened, not when mDNS stops reporting it. The list is reported once it has been quiet for 3 s.
+  `manager.devices()`, the picker's list and the sinks observers show these devices, so **right after `start()` the
+  list is empty and fills in over a few seconds**.
+- **`createClient` is called once per device, and its signature is now `(device, params)`.** A device's channel is
+  shared by its sessions and kept open, so clients live as long as the device is a sink, not as long as a session,
+  and must be fine to keep connected. `createClient` is called again after a failure, with
+  `params = { connectTimeoutMs, livenessTimeoutMs }` for that attempt; pass them on to `CastClient`
+  (`connectTimeoutMs`, `heartbeatTimeoutMs`). A channel replaced because the device's address changed stays open while
+  a session uses it (as Chrome leaves the old socket); an address list that mDNS merely reorders changes nothing. A
+  device whose host is not an IP address is skipped with a warning.
+- **App availability for pages, as in Chrome.** In the default mode a page's `getAvailability()` and the devices its
+  `start()` offers come from the devices' own answer to `GET_APP_AVAILABILITY` for the request's app, asked over the
+  channels already open (Chrome's `CastAppDiscoveryServiceImpl`): a device that does not have the app is not offered,
+  availability turns true as soon as a device says it has the app, and `change` events follow each answer. An
+  "available" answer stands, an "unavailable" one for a minute, no answer never. `discoverSinksNow()` asks again by
+  the same rules. `mode: "chromecast"` still goes by capabilities.
 - **Public and loopback device addresses are refused, as in Chrome.** Chrome opens no Cast channel to a publicly
   routable or loopback address unless `MediaRouterCastAllowAllIPs` is set (`CastMediaSinkServiceImpl::OpenChannel`).
   The sink service checks the address each time it opens a channel, so such a device is not listed, offered or
-  connected to; `sinks: { allowAllIps: true }` turns it off. Private, link-local, unique-local and `100.64.0.0/10` addresses are unaffected.
-  `isPubliclyRoutable`, `isLoopback` and `isCastAddressAllowed` are exported from the discovery layer.
+  connected to; `sinks: { allowAllIps: true }` turns it off. Private, link-local, unique-local and `100.64.0.0/10`
+  addresses are unaffected.
+- `joinRunningSession` is answered from the session tracker instead of connecting to every device and asking, with the
+  same results and errors; the device must be listed (its channel open) by then. A session whose pages all let go now
+  stays a (non-local) route while the device runs it, where it used to disappear from the list.
+- `navigator.presentation.defaultRequest` is now a nullable attribute as in Blink: it takes a `PresentationRequest`
+  or `null` and throws `TypeError` for anything else. `connectionavailable` fires after the current task, as Blink
+  enqueues it.
+- Up to 1024 media requests from a page may wait for the receiver's answer, as in Chrome
+  (`kMaxPendingMediaRequests`); a full table drops its older half before taking the new one (it was 100).
+
+### Fixed
+
 - **Mirroring and remote-playback sources are never launched as ordinary apps.** A presentation URL naming a Cast
   Streaming app (`0F5096E8`, `85CDB22F`), alone or beside other apps in one legacy URL, and a `remote-playback:` URL
   are unavailable (`getAvailability()` is `false`) and `start()` rejects with `NotFoundError` ("No screens found.").
   Of several URLs the first ordinary Cast app one is served. The stand-in's `PresentationRequest` drops URLs of unknown
   protocol like Blink and throws `NotSupportedError` when none is left.
-- **App availability for pages, as in Chrome.** In the default mode a page's `getAvailability()` and the devices its
-  `start()` offers now come from the devices' own answer to `GET_APP_AVAILABILITY` for the request's app, asked over
-  the channels already open (Chrome's `CastAppDiscoveryServiceImpl`): a device that does not have the app is not
-  offered, availability turns true as soon as a device says it has the app, and `change` events follow each answer.
-  `mode: "chromecast"` is unchanged.
-- **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
-  `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
-  `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
-  images). It works on non-local routes too and takes its status from the session tracker's channel, as Chrome's
-  `CastMediaController` does. See docs/MAIN-API.md.
-- **Documentation.** A rewritten README, a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING. `npm run check` now also checks the docs: every public export is mentioned, the TypeScript examples typecheck against the sources, and relative links and anchors resolve; `npm run docs:check:chromium` (network) rechecks the Chromium citations. Comment fixes only in `src/`.
+- A device that fails device authentication no longer shows in the picker (see Changed).
+
+### Documentation
+
+- A rewritten README with a Chrome parity table (including what is out of scope, such as Chrome's Global Media
+  Controls panel, and what is in progress: DIAL, mirroring, wired display and the Presentation Receiver API, and
+  access-code casting), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
+  receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting
+  and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING.
+- Tested-on facts: YouTube Music Desktop casting, rejoin after a force-kill, and stop verified on Linux (Ubuntu under
+  WSL2, dev and packaged builds) as well as Windows; IPv6 discovery and the Cast channel with TLS and device
+  authentication over unique-local and link-local addresses verified on real devices.
+- `npm run check` now also checks the docs: every public export is mentioned, the TypeScript examples typecheck
+  against the sources, and relative links and anchors resolve; `npm run docs:check:chromium` (network) rechecks the
+  Chromium citations. Comment fixes only in `src/`.
 
 ## 0.4.0
 

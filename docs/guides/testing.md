@@ -11,7 +11,9 @@ replaced.
 
 `createCastManager` accepts a `discovery` (anything with `devices()`, `start()`, `stop()` and `on`/`off` for `deviceUp`,
 `deviceDown`, `deviceChanged`) and a `createClient` (anything shaped like `CastClientLike`). With those and a fake
-`ipcMain`, a unit test drives the whole main-process path without Electron:
+`ipcMain`, a unit test drives the whole main-process path without Electron. As in Chrome, a device is offered only once
+its channel is open and authenticated, after a random delay of up to 5 s and a 3 s quiet period; a test sets both to 0
+with `sinks` and waits for `cast.settled()` after `cast.start()`:
 
 ```ts
 import assert from "node:assert/strict";
@@ -62,9 +64,12 @@ test("a page can start a session on the picked device", async () => {
     ipcMain,
     discovery: new FakeDiscovery(),
     createClient: () => client,
+    sinks: { openDelayMaxMs: 0, reportDelayMs: 0 },
     allowOrigin: (origin) => origin === "https://app.example.com",
     selectDevice: async (devices) => ((asked = devices), devices[0] ?? null),
   });
+  await cast.start();
+  await cast.settled(); // the fake device's channel is open and it is listed
 
   // The "page": one webContents with a main frame at an allowed origin.
   const sender = Object.assign(new EventEmitter(), { id: 1, send() {}, isDestroyed: () => false });
@@ -90,8 +95,9 @@ default presentation mode's channel is `electron-cast:presentation` and also nee
 to copy. The `presentation: false` option serves only the `chromecast` channel and does not need `ipcMain.on`.
 
 Things worth testing in your own code, all possible this way: that `allowOrigin` refuses what it should, that your picker
-resolves `null` on cancel and a device otherwise, what your UI does when `createClient` makes a client whose `connect()`
-rejects (a `CastAuthError` or `CastConnectionError`), and what happens when `FakeDiscovery` emits `deviceDown` mid-session.
+resolves `null` on cancel and a device otherwise, that a device whose client's `connect()` rejects (a `CastAuthError` or
+`CastConnectionError`) never reaches your picker, and what your UI does when a client emits `close` mid-session (the channel
+is reopened, and the device dropped if that fails).
 
 ## A fake receiver for `CastClient`
 
@@ -121,7 +127,8 @@ Unit tests with fakes prove your logic; they cannot prove that the preload bundl
   started](../GETTING-STARTED.md#2-the-preload)), the real `ipcMain`, `contextBridge` and `webContents`, and the built package
   loaded by name (`electron-cast/main`), so the `exports` map and `dist/` are what get tested.
 - **Faked:** only the network. `createCastManager({ ipcMain, discovery: new FakeDiscovery(), createClient: (d) => new FakeClient(d), ... })`
-  with a fake device, so there is no mDNS, no TLS and no device.
+  with a fake device, so there is no mDNS, no TLS and no device. The fake client answers `getStatus` and
+  `getAppAvailability`, which the manager asks over the channel it keeps open to the device.
 - **A page with a real origin.** A `file:` page has an opaque origin, so the test registers a standard, secure custom scheme
   (`protocol.registerSchemesAsPrivileged`) and loads a page from it, which `allowOrigin` can name.
 - **A user gesture.** The page's code runs through `webContents.executeJavaScript(code, true)`, whose second argument makes

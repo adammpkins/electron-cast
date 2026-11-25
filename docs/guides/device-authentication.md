@@ -21,7 +21,7 @@ There are no dependencies and no network access: the root certificates and the f
 steps, and where electron-cast differs from Chromium, are in [DESIGN.md](../DESIGN.md#device-authentication-srcclientauth). The
 Chromium sources it ports are in the [Chromium map](../CHROMIUM-MAP.md#cast-v2-channel-and-device-authentication).
 
-It happens **when the connection opens**, not at discovery.
+It happens **when the channel opens**, which the manager does for every device discovery finds, before listing it.
 
 **Tested:** it passed on 8 real devices from Windows (a Chromecast, a Chromecast Ultra, a Google Home Mini, a Nest Hub, a
 Nest Hub Max and two Cast groups), and again on all 8 from Linux on 2026-11-25. The Google Home Mini passed with the
@@ -41,22 +41,28 @@ tokens). It does not get cookies or anything else from the page ([SECURITY.md](.
 
 ## What failure looks like
 
-- **To the user.** The device still **shows in your picker**, because it was found at discovery. Picking it fails like an
-  unreachable device.
-- **To the page.** In the default mode the request rejects with `NotFoundError` and a description that names the reason,
-  in the form `Cast device authentication failed for <address>: <detail>`. In
-  `mode: "chromecast"` it is `receiver_unavailable`. The page learns nothing more.
+- **To the user.** The device is **never listed**, as in Chrome: a device is a sink only once its channel has passed
+  authentication, so it does not reach your picker. The attempt is retried with Chrome's backoff (15 s, 3 attempts), then
+  given up.
+- **To the page.** The device is not there: availability does not count it and `start()` does not offer it. The page
+  learns nothing about why.
 - **To you.** `CastClient.connect()` rejects with `CastAuthError`, which has a `reason` (`untrusted_chain`, `revoked`,
-  `bad_signature`, `timeout`, and so on; [the full list](../API.md#errors)) and the device's `host`. The manager swallows it as
-  an unreachable device, so to log it, wrap the client you hand the manager:
+  `bad_signature`, `timeout`, and so on; [the full list](../API.md#errors)) and the device's `host`. The manager treats it as
+  an unreachable device, so to log it, wrap the client you hand the manager. `createClient` gets the attempt's timeouts as
+  its second argument; pass them on:
 
 ```ts
 import { ipcMain } from "electron";
 import { CastAuthError, CastClient, type CastDevice } from "electron-cast";
-import { createCastManager } from "electron-cast/main";
+import { createCastManager, type ChannelParams } from "electron-cast/main";
 
-function createClient(device: CastDevice): CastClient {
-  const client = new CastClient({ host: device.host, port: device.port });
+function createClient(device: CastDevice, params: ChannelParams): CastClient {
+  const client = new CastClient({
+    host: device.host,
+    port: device.port,
+    connectTimeoutMs: params.connectTimeoutMs,
+    heartbeatTimeoutMs: params.livenessTimeoutMs,
+  });
   const connect = client.connect.bind(client);
   client.connect = async () => {
     try {
@@ -88,7 +94,7 @@ off. Prefer doing it for the receivers you mean, not for everything:
 ```ts
 import { ipcMain } from "electron";
 import { CastClient, type CastDevice } from "electron-cast";
-import { createCastManager } from "electron-cast/main";
+import { createCastManager, type ChannelParams } from "electron-cast/main";
 
 // Ids of the receivers you run yourself (CastDevice.id, the mDNS TXT `id`).
 const OWN_RECEIVERS = new Set(["0123456789abcdef0123456789abcdef"]);
@@ -96,8 +102,14 @@ const OWN_RECEIVERS = new Set(["0123456789abcdef0123456789abcdef"]);
 export const cast = createCastManager({
   ipcMain,
   selectDevice: async () => null, // your picker
-  createClient: (device: CastDevice) =>
-    new CastClient({ host: device.host, port: device.port, verifyDevice: !OWN_RECEIVERS.has(device.id) }),
+  createClient: (device: CastDevice, params: ChannelParams) =>
+    new CastClient({
+      host: device.host,
+      port: device.port,
+      connectTimeoutMs: params.connectTimeoutMs,
+      heartbeatTimeoutMs: params.livenessTimeoutMs,
+      verifyDevice: !OWN_RECEIVERS.has(device.id),
+    }),
 });
 ```
 

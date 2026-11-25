@@ -18,8 +18,9 @@ What the library tries to guarantee:
 
 - A page can only use the narrow bridge the preload exposes. It never gets Node, sockets, `ipcRenderer` or an IPC
   handle. It works with `sandbox: true` and `contextIsolation: true`.
-- A page cannot choose which device, host or port to connect to. Only a device the app's `selectDevice` returned can
-  be connected to.
+- A page cannot choose which device, host or port to connect to. The main process opens channels only to devices
+  discovery found (at addresses Chrome would accept), and a page casts only to a device the app's `selectDevice`
+  returned (or the app's own `startCasting` named).
 - A page cannot see or touch another origin's sessions, except that, as in Chrome, a page that already knows a session
   id can rejoin that session (see [Scoping of sessions and messages](#scoping-of-sessions-and-messages)).
 - A device is used only after it proves it is a genuine Google-certified Cast device (on by default; see
@@ -182,8 +183,9 @@ From 0.4.0 electron-cast does the same challenge, on by default: after the TLS h
 certificate's validity window is current and short, that the device's certificate chain leads to a Cast root, that
 the chain is not revoked, and that the device's signature over the nonce and this connection's TLS certificate
 verifies, which ties the proof to this connection. A device that fails makes `connect()` reject with `CastAuthError`
-(with a `reason`), the socket is closed, and the page sees an unreachable device. Verification happens at connect, not
-at discovery, so a failing device still appears in the picker, which is another reason to show names as plain text.
+(with a `reason`), the socket is closed, and the device is never listed: as in Chrome, a device is a sink only once its
+channel has passed authentication, so a failing device does not reach the picker. Names still come from mDNS, so show
+them as plain text.
 Details and the differences from Chromium: [docs/DESIGN.md](docs/DESIGN.md).
 
 With `verifyDevices: false` (manager) or `verifyDevice: false` (client), none of this runs: the connection is
@@ -241,8 +243,10 @@ reveal to everyone on those networks that this machine looks for Cast devices.
 
 Answers are accepted from any host on those networks, parsed with a defensive decoder (malformed packets are dropped),
 and turned into device records. A device record's address comes from the answer, so a hostile host can announce a
-device name and an address of its choosing. Nothing connects to it until the user picks it in `selectDevice`. Show
-the device's name as plain text in your picker, since it is attacker-controlled when the network is.
+device name and an address of its choosing. As in Chrome, the manager opens a TLS channel to each device found at an
+allowed address (not publicly routable, not loopback) to authenticate it before listing it, so such a host receives a
+TLS connection and an authentication challenge, and nothing more unless it passes. Show the device's name as plain text
+in your picker, since it is attacker-controlled when the network is.
 
 Nothing is sent and no socket is opened until you call `manager.start()`. To turn casting off:
 

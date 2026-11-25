@@ -23,9 +23,9 @@ SDK should work ([custom receivers](guides/custom-receivers.md)); what has been 
 
 ## Which Electron, Node and operating systems?
 
-Electron 35 or later (the preload needs `contextBridge.executeInMainWorld`), Node 20 or later. Real devices have been used from
-Windows (end to end, Electron 45) and Linux (discovery and device authentication, Ubuntu under WSL2 with mirrored networking).
-macOS has not been tried against a real device. The [README](../README.md#platforms-and-what-was-tested) lists exactly what was
+Electron 35 or later (the preload needs `contextBridge.executeInMainWorld`), Node 20 or later. Real devices have been used end
+to end from Windows and from Linux (Ubuntu under WSL2 with mirrored networking), with Electron 45: casting, rejoin after the app
+was force-killed, and stop, in dev and packaged builds. macOS has not been tried against a real device. The [README](../README.md#platforms-and-what-was-tested) lists exactly what was
 run.
 
 ## Does it work with `sandbox: true` and `contextIsolation: true`?
@@ -35,38 +35,45 @@ other files, so you have to bundle `electron-cast/preload` into it ([how](GETTIN
 
 ## What network access does it use?
 
-Multicast DNS queries on your local networks (UDP 5353) to find devices, and a TCP connection (usually port 8009) to the device a
-user picks. Device authentication needs no network: Google's Cast roots and a fallback revocation list ship in the package. It
+Multicast DNS queries on your local networks (UDP 5353) to find devices, and, as in Chrome, one TLS connection (usually port 8009)
+to each device found at a private or link-local address, kept open with a ping every 5 s, so the device can be authenticated
+before it is listed and its sessions followed. Device authentication needs no network: Google's Cast roots and a fallback revocation list ship in the package. It
 makes no other connection, advertises nothing, and answers no queries. `manager.start()` is what opens the sockets; nothing
 happens before it. See [SECURITY.md](../SECURITY.md#mdns-exposure).
 
 ## Can I start a cast from my app's menu or tray?
 
-Not directly. A cast needs the page's own SDK state and a user gesture, as in Chrome. Tell the page to press its own Cast button
-(for example by sending it a message it listens for); the route then appears in your observers. See the
-[main-process API](MAIN-API.md#casting-from-the-apps-own-ui). App-initiated casting through the page's default presentation request
-is in progress.
+Yes, the way Chrome's Cast dialog does it: when the page has set `navigator.presentation.defaultRequest`, the app calls
+`manager.startCasting(sinkId, { webContentsId })` from its menu or tray, with no picker and no user gesture, and the page gets
+`connectionavailable` (Google's SDK adopts the session). A page that sets no default request has nothing to start; tell it to
+press its own Cast button instead. See the [main-process API](MAIN-API.md#casting-from-the-apps-own-ui).
 
 ## Can I control playback (play, pause, seek) from the main process?
 
-Observing and controlling the **session** is supported: list devices and sessions, stop or detach a session, set the device
-volume ([MAIN-API](MAIN-API.md)). Play, pause and seek are media commands, which the page's SDK sends; from Node you can send them
-yourself with [`CastClient`](guides/low-level-client.md) on the media namespace.
+Yes. `manager.getMediaController(routeId, observer?)` is Chrome's `MediaController` for a route: `play`, `pause`, `seek`,
+`nextTrack`, `previousTrack`, `setVolume`, `setMute`, and the media status (title, play state, position, what the media can do).
+It works on sessions other senders started too. That is also how to build your own version of Chrome's toolbar media panel
+(Global Media Controls, browser UI that electron-cast leaves to the app): `registerMediaRoutesObserver` for the list,
+`getMediaController` for each route, `terminateRoute` for Stop. See [MAIN-API](MAIN-API.md#media-control).
 
 ## Can it mirror a tab or the desktop?
 
-No. Tab, desktop and file mirroring are Chrome features electron-cast does not implement, and neither is the Remote Playback API.
-See the [parity table](../README.md#chrome-parity).
+Not yet. Mirroring is in progress; until it lands, a mirroring source is reported unavailable. The Remote Playback API
+(`video.remote`) needs support in Electron itself, so `remote-playback:` sources are reported unavailable. See the
+[parity table](../README.md#chrome-parity).
 
-## Why does my picker list a device that then fails?
+## Why is the device list empty right after `start()`?
 
-Devices are authenticated when connected, not when discovered, so a device that is not Google-certified, or has been revoked,
-still shows in the picker and fails when picked. See [Device authentication](guides/device-authentication.md).
+As in Chrome, a device is listed only once a channel to it is open and has passed device authentication. Channels open after a
+random delay of up to 5 s, and the list is reported once it has been quiet for 3 s, so it fills in a few seconds after
+`start()`. A device that is not Google-certified, or has been revoked, is never listed. A picker that
+[updates live](guides/device-picker.md#a-picker-window-with-live-updates) shows devices as they come. See [Device authentication](guides/device-authentication.md).
 
 ## The app restarted and the cast was still playing. Why did it not come back by itself?
 
-Like Chrome, auto-join only joins sessions this run started. After a restart the app has to give the page the old session id and
-the page calls `chrome.cast.requestSessionById`. [Recipe](guides/restart-rejoin.md), with YouTube Music Desktop as the worked example.
+Like Chrome, auto-join only joins sessions this run started. The session is listed as a non-local route as soon as its device's
+channel is open, but the page has to ask for it: after a restart the app gives the page the old session id and the page calls
+`chrome.cast.requestSessionById`. [Recipe](guides/restart-rejoin.md), with YouTube Music Desktop as the worked example.
 
 ## What is `mode: "chromecast"`?
 

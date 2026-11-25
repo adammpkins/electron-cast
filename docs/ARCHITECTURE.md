@@ -49,7 +49,8 @@ Reading it:
 - **The preload** exposes the bridge and installs the stand-in with `contextBridge.executeInMainWorld`. In `start` calls it reads
   `navigator.userActivation.isActive` itself and sends that, replacing anything the page passed.
 - **The main process** owns every secret and every socket: it decides which pages may cast (`allowOrigin`), which device was
-  picked (`selectDevice`), and does discovery and the device connection. The page never sees a device's IP address or port.
+  picked (`selectDevice`), and does discovery and the device channels, one kept open to each device as in Chrome. The page
+  never sees a device's IP address or port.
 - **The IPC channels** (`electron-cast:presentation` invoke, `:presentation:send` and `:presentation:event`; for
   `mode: "chromecast"` `electron-cast:call` and `:event`) are the only way across. What is validated on each is in
   [SECURITY.md](../SECURITY.md#what-crosses-the-ipc-boundary).
@@ -92,6 +93,11 @@ sequenceDiagram
   participant C as CastClient
   participant D as Cast device
 
+  Note over S,D: Before any page asks: a channel to each device found
+  S->>C: connect() (after a random delay of up to 5 s)
+  C->>D: TLS handshake, device authentication challenge
+  D-->>C: auth reply, checked (see below)
+  C->>D: CONNECT to receiver-0, GET_STATUS (the device is listed now)
   User->>SDK: clicks the cast button
   SDK->>SI: PresentationRequest.start()
   SI->>SI: user activation? (else InvalidAccessError)
@@ -101,16 +107,12 @@ sequenceDiagram
   M->>M: origin from senderFrame, hasGesture must be true (else AbortError)
   M->>H: startPresentation(urls, origin, senderId)
   H->>H: parse the Cast presentation URL, take the app id
-  H->>S: handle("requestSession", {appId})
+  H->>S: handle("requestSession", {appId, appAvailability})
   S->>S: allowOrigin(origin)
-  S->>UI: selectDevice(devices, request, picker)
+  S->>C: GET_APP_AVAILABILITY on each open channel, unless an answer stands
+  S->>UI: selectDevice(devices that have the app, request, picker)
   UI-->>S: a CastDevice
-  S->>C: connect()
-  C->>D: TLS handshake
-  C->>D: device authentication challenge
-  D-->>C: auth reply, checked (see below)
-  C->>D: CONNECT to receiver-0
-  S->>C: launch(appId)
+  S->>C: launch(appId) on that device's open channel
   C->>D: LAUNCH
   D-->>C: RECEIVER_STATUS with the app and its transportId
   S->>C: connectTransport(transportId), getStatus()
@@ -125,12 +127,15 @@ sequenceDiagram
 
 Notes on the steps:
 
-- Step 4 and 5: the page-side refusal is a compatibility behaviour; the real check is the main process's (steps 6, 7 and
+- Steps 1 to 4 happen once per device, not per cast (Chrome's `CastMediaSinkServiceImpl`), and again when a channel fails.
+  A device that fails device authentication (step 3) rejects `connect()` with `CastAuthError` and is never listed, so it
+  never reaches the picker.
+- Step 7: the page-side refusal is a compatibility behaviour; the real check is the main process's (steps 9 and 11, and
   [SECURITY.md](../SECURITY.md#user-gesture)).
-- Step 9: if `allowOrigin` returns false the request fails as "no receivers".
-- Steps 10 and 11: the time your picker is open does not count against the page's launch timeout.
-- Steps 13 to 14: a device that fails device authentication rejects `connect()` with `CastAuthError`, which the page sees as an
-  unreachable device (`NotFoundError`).
+- Step 15: if `allowOrigin` returns false the request fails as "no receivers".
+- Step 16: a device that does not have the app is not offered; if none has it, `start()` rejects with `NotFoundError`. The
+  same answers serve the page's `getAvailability()` ([API](API.md#app-availability)).
+- Steps 17 and 18: the time your picker is open does not count against the page's launch timeout.
 - The envelope in the last steps is the JSON format Chrome's Media Router speaks to the SDK (see the glossary).
 - App messages, media requests, volume and stop flow the other way through the same connection: the SDK sends an `app_message`
   or `v2_message` envelope, the handler maps it (for example to a `LOAD` on the media namespace to the app's transport) and the
@@ -146,7 +151,7 @@ sequenceDiagram
   participant SDK as Google's SDK (page)
   participant H as PresentationHandler
   participant S as SessionService
-  participant C as CastClient (per known device)
+  participant C as CastClient (each device's open channel)
   participant D as Cast devices
 
   Note over SDK,D: Reload: auto-join
@@ -162,11 +167,9 @@ sequenceDiagram
   alt this run already holds the session
     S-->>H: join it, no origin check
   else not held
-    S->>C: connect and getStatus() on every known device
-    C->>D: GET_STATUS
-    D-->>C: applications
-    S->>S: first device running that sessionId and app wins, others released
-    S->>C: connectTransport(transportId)
+    D-->>C: RECEIVER_STATUS, whenever it changes (followed all along)
+    S->>S: the session tracker: which device runs that sessionId and app
+    S->>C: connectTransport(transportId) on that device's channel
     S-->>H: a session owned by the caller's origin
   end
   H-->>SDK: new_session, or NotFoundError if no device runs it
@@ -175,8 +178,9 @@ sequenceDiagram
 - **Auto-join** only finds sessions this run holds, as Chrome's `FindActivityForAutoJoin` skips activities that are not local.
 - **A page reload** parks its sessions (`senderNavigated`): they stay open on the device, get no events, and the next page of
   the same frame rejoins them. `senderGone` (a destroyed webContents or removed frame) ends the sender's share for good.
-- **Join by id** asks the known devices when it is asked. Chrome tracks every device's sessions all the time; electron-cast
-  looks on request. The app supplies the id ([guide](guides/restart-rejoin.md)).
+- **Join by id** is answered from the session tracker, which follows every device's receiver status over its open channel,
+  as Chrome's `CastSessionTracker` does; nothing is looked up when asked. The app supplies the id
+  ([guide](guides/restart-rejoin.md)).
 
 ## Device authentication
 
@@ -203,8 +207,8 @@ sequenceDiagram
   end
 ```
 
-Each failure maps to a `CastAuthError.reason` ([list](API.md#errors)). Verification runs when the connection opens, never at
-discovery. Details, and the one deliberate difference from Chromium (a stale built-in CRL skips revocation rather than refusing):
+Each failure maps to a `CastAuthError.reason` ([list](API.md#errors)). Verification runs when the channel opens, which the
+sink service does for every device discovery finds, before the device is listed. Details, and the one deliberate difference from Chromium (a stale built-in CRL skips revocation rather than refusing):
 [DESIGN.md](DESIGN.md#device-authentication-srcclientauth).
 
 ## Glossary

@@ -31,7 +31,7 @@ export interface AppDiscoverySinks {
 
 const CAPABILITY_BITS: Record<string, number> = { video_out: 1, video_in: 2, audio_out: 4, audio_in: 8, multizone_group: 32 };
 
-/** `CastDeviceCapabilitySet::HasAll`; unknown names are ignored, as everywhere in the session service. */
+/** `capabilities.HasAll(required_capabilities)` in `GetAvailableSinks`; unknown names are ignored, as in the session service. */
 function hasAll(device: CastDevice, capabilities: string[]): boolean {
   for (const cap of capabilities) {
     const bit = CAPABILITY_BITS[cap];

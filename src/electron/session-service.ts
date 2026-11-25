@@ -999,7 +999,7 @@ export class CastSessionService {
   /**
    * Send a message to a session's receiver app from main, with no page involved, over the device's channel. A session
    * this service does not hold is reached too, as Chrome's `CastMessageHandler::SendMediaRequest` reaches a non-local
-   * activity's session: a virtual connection to its transport is opened first (`EnsureConnection`).
+   * activity's session: a virtual connection to its transport is opened first (`SendCastMessageToSocket` -> `DoEnsureConnection`).
    */
   sendSessionMessage(sessionId: string, namespace: string, message: string): BridgeResult {
     const rec = this.sessions.get(sessionId);

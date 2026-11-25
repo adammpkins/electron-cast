@@ -20,8 +20,9 @@ Google's SDK issues that call from `chrome.cast.requestSessionById(id)`. So the 
 
 1. While casting, the app stores the session id (Google's SDK exposes it as `session.sessionId`).
 2. At the next start, the page calls `chrome.cast.requestSessionById(id)` once the SDK is ready.
-3. electron-cast asks the known devices which one runs that session, connects to it and returns it. The SDK hands it to
-   the `sessionListener` you gave `chrome.cast.initialize`, exactly like a session the user just started.
+3. electron-cast already knows which device runs that session (its session tracker follows every device's receiver
+   status, as Chrome's does), joins it over that device's channel and returns it. The SDK hands it to the
+   `sessionListener` you gave `chrome.cast.initialize`, exactly like a session the user just started.
 
 Nothing to configure in electron-cast. `allowOrigin` still applies first; no origin check beyond that is made, because
 the session id acts as the capability, as in Chrome ([SECURITY.md](../../SECURITY.md#scoping-of-sessions-and-messages)).
@@ -135,10 +136,10 @@ Why these choices:
 - **Rejoin once, and give up.** A session that is gone (the device was restarted, someone else took the device, the
   receiver app was stopped from a phone) makes the join fail with `NotFoundError`, and Google's SDK does not tell the page.
   The timeout turns "nothing arrived" into "forget it", so the next start does not retry a dead id forever.
-- **Discovery has to have found the device first.** electron-cast asks the *known* devices what they run, so a join
-  attempted before mDNS has answered fails. Start the manager early (before the page loads, as YouTube Music Desktop does)
-  and use a join timeout of several seconds. If your page loads very fast, retry `requestSessionById` after receiver
-  availability turns true instead of only once.
+- **The device has to be listed first.** electron-cast answers from what each listed device's channel reports, so a join
+  attempted before the device's channel is open (a few seconds after `start()`) fails. Start the manager early (before
+  the page loads, as YouTube Music Desktop does) and use a join timeout of several seconds. If your page loads very fast,
+  retry `requestSessionById` after receiver availability turns true instead of only once.
 - **Do not save on every update.** Report on adoption and on stop; the session id does not change while it lives.
 
 ## A worked example: YouTube Music Desktop
@@ -155,18 +156,19 @@ session id. It then:
 - at each start asks main for the saved session once, calls `chrome.cast.requestSessionById`, and clears the saved
   session if none arrives within 15 seconds.
 
-This was tested on Windows, in dev and packaged builds: the app was killed mid-song, restarted, and rejoined the same
-session on the same device with no picker; Stop casting cleared it. It has not been tried on macOS or Linux. The
+This was tested on Windows and on Linux (Ubuntu under WSL2), in dev and packaged builds: the app was force-killed
+mid-song, restarted, and rejoined the same session on the same device with no picker; Stop casting cleared it. It has
+not been tried on macOS. The
 implementation is in the YouTube Music Desktop fork's `src/main/services/castmanager/index.ts` and
 `src/renderer/ytmview/scripts/setup/cast.ts`.
 
 ## What happens in electron-cast
 
 For the curious, `reconnect("cast-session_<id>")` reaches the session service's `joinRunningSession`
-([API](../API.md#joinrunningsession)): a session this run already holds is joined at once; otherwise each known device is
-asked for its receiver status, the first one running the id is connected to, and the other connections are released.
-Chrome does the same lookup from state it tracks continuously (`CastSessionTracker`, then
-`CastActivityManager::AddNonLocalActivity`); electron-cast looks when asked. The message flow is drawn in
+([API](../API.md#joinrunningsession)): a session this run already holds is joined at once; otherwise the session tracker,
+which keeps what every device runs from the receiver status on its open channel, names the device, and the page joins
+over that channel. Until then the session is listed as a non-local route, as in Chrome (`CastSessionTracker`, then
+`CastActivityManager::AddNonLocalActivity`). The message flow is drawn in
 [Architecture](../ARCHITECTURE.md#reconnect-and-rejoin).
 
 `mode: "chromecast"` does not do this.

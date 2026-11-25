@@ -12,7 +12,8 @@ selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePick
 ```
 
 - `devices` is the list at the moment the page asked, already filtered to devices that can serve the request. In the
-  default mode the page asks for no capabilities, so it holds every device found.
+  default mode those are the listed devices (open, authenticated channel) that said they have the page's receiver app,
+  as in Chrome.
 - `request` says who is asking: `origin` (show it), `appId`, `capabilities`, `senderId`, and `session` when this sender is
   already casting that app, with `{ sessionId, deviceId }`.
 - `picker` streams devices that appear while your UI is open, and an `AbortSignal` that fires when the request no
@@ -36,8 +37,8 @@ grace period (the `setTimeout(..., 100)`).
 
 ## A picker window with live updates
 
-mDNS answers trickle in for several seconds, so a picker that only shows the list from the moment of the click can
-look empty. This one re-renders as devices come and go. It follows what Chrome's dialog does (it registers a sinks
+Devices are listed over several seconds (mDNS answers, then a channel and device authentication per device), so a picker
+that only shows the list from the moment of the click can look empty. This one re-renders as devices come and go. It follows what Chrome's dialog does (it registers a sinks
 observer while it is open) through the third argument.
 
 Main process:

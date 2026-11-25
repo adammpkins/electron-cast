@@ -89,8 +89,8 @@ and `.../cast/certificate/`, with BoringSSL's path validator under it):
    key over `sender_nonce || DER of the TLS certificate`, which ties the proof to this connection.
 
 A failure rejects `connect()` with `CastAuthError` (with a `reason`) and closes the socket. The session layer reports it
-like any unreachable device (`receiver_unavailable`). Devices are verified when connected, not when discovered, so a
-device that fails shows in the picker but cannot be cast to.
+like any unreachable device (`receiver_unavailable`). The sink service connects to every discovered device and lists it
+only once this has passed, so a device that fails is never a sink and never reaches the picker.
 
 Not checked, or different from Chromium:
 

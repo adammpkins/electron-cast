@@ -49,7 +49,7 @@ A group is one device to the user and several to the network. Its facts, seen on
 - Casting to a group is the same call as casting to a device: resolve the group's `CastDevice` from `selectDevice`.
 
 Sort groups after devices in your picker, as the example in [Building your own device picker](device-picker.md) does.
-mDNS answers arrive over several seconds, so a picker that [updates live](device-picker.md#a-picker-window-with-live-updates)
+Devices are listed over several seconds after `start()`, so a picker that [updates live](device-picker.md#a-picker-window-with-live-updates)
 is worth having.
 
 ## Which devices a page can be shown
