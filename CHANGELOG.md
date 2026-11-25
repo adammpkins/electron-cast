@@ -26,6 +26,17 @@
   an address list that mDNS merely reorders changes nothing. A device whose host is not an IP address is skipped with a
   warning. `CastManager.settled()` takes `{ retries: true }`. Chromecast mode (`mode: "chromecast"`) behaves as before for pages; it
   shares the device list.
+- **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
+  `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
+  address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
+  with Chrome's checks, quick open parameters (2 s connect, 3 attempts 1 s apart) and expiry: it stays for
+  `accessCode.deviceDuration` seconds (default 0) plus 20 s, a device a page is casting to stays until the cast ends, and a
+  network change (`manager.networksChanged()`, called by the app) removes it and brings the remembered ones back. It is off
+  unless `createCastManager({ accessCode: { enabled: true } })`, as Chrome's `AccessCodeCastEnabled` policy is. Turning a
+  typed code into an address is a private Google service that needs Chrome's sign-in, so it is not part of electron-cast;
+  [DESIGN.md](docs/DESIGN.md#access-code-casting-access-codets) says why. New: `addSinkByAddress`, `configureAccessCode`,
+  `rememberedSinks`, `networksChanged`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
+  between runs), and `pingIntervalMs` in `createClient`'s second argument.
 
 ## 0.4.0
 

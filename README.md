@@ -178,6 +178,9 @@ there describes the top-level await form of the same hang).
 - Several pages or windows at once, and iframes (with `nodeIntegrationInSubFrames`). A page that reloads keeps its
   sessions open on the device and rejoins them (auto-join, `origin_scoped` or `tab_and_origin_scoped`). A page that
   closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
+- Devices that mDNS does not reach, added by address as Chrome's access code casting adds them: `addSinkByAddress` opens a
+  channel to a device the app knows and lists it for a set time. Resolving the code the device shows is Google's service and
+  is not included ([why](docs/DESIGN.md#access-code-casting-access-codets)).
 - A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
   its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
 

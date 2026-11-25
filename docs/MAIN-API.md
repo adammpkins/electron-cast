@@ -1,6 +1,6 @@
 # Main-process API
 
-`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()` and the API below, which lets the
+`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()`, `addSinkByAddress()` (see [Adding a device by address](#adding-a-device-by-address)) and the API below, which lets the
 app observe and control casting from the main process. It follows Chrome's Media Router, so the same concepts and
 method names apply: devices are **sinks**, running sessions are **routes**, and you watch both with **observers**.
 
@@ -23,6 +23,7 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `detachRoute(id)` | `MediaRouter::DetachRoute` exists, but the Cast provider does not implement it (`CastMediaRouteProvider::DetachRoute` is `NOTIMPLEMENTED`): a page lets go through its Presentation connection closing (`CastSessionClientImpl::DidClose`). No counterpart for "every page lets go" | `media_router.h`, `chrome/browser/media/router/providers/cast/cast_media_route_provider.cc`, `cast_session_client_impl.cc` |
 | `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController` binds a `mojom::MediaController` (`SetVolume`, `SetMute`); on a Cast route `CastMediaController` sends a receiver `SET_VOLUME` request. Used by the global media controls (`CastMediaNotificationItem::SetVolume / SetMute`, controller bound in `cast_media_notification_producer.cc`), not by the Cast dialog. There is no class named `MediaRouteController` in current Chromium | `components/media_router/common/mojom/media_controller.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `chrome/browser/ui/global_media_controls/` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
+| `addSinkByAddress`, `configureAccessCode`, `networksChanged` | `AccessCodeCastSinkService` after the discovery server has answered (`OnAccessCodeValidated`, `OnEnabledPrefChange`, `OnNetworksChanged`) | `chrome/browser/media/router/discovery/access_code/access_code_cast_sink_service.cc`; see [DESIGN.md](DESIGN.md#access-code-casting-access-codets) |
 | Sinks listed only once a channel is open and authenticated, with retry and removal; the session tracker; non-local routes | `CastMediaSinkServiceImpl`, `MediaSinkServiceBase`, `CastSessionTracker`, `CastActivityManager::AddNonLocalActivity` | see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts) for each rule and its source |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
@@ -138,3 +139,31 @@ still fails with `receiver_unavailable` before the picker opens.
 Not supported: a cast needs the page's own SDK state and a user gesture, as in Chrome. To start one from the app's
 menu or tray, tell the page to press its own Cast button (for example `webContents.executeJavaScript` clicking the
 site's cast button, or a message the page listens for). The route then appears in the observers above.
+
+## Adding a device by address
+
+Chrome's Access Code Cast lets a user type the code a device shows to cast to it from another network. electron-cast does
+not turn codes into addresses (that is a Google service that needs Chrome's own sign-in; see
+[DESIGN.md](DESIGN.md#access-code-casting-access-codets)), but it does what Chrome does once the address is known: the app
+supplies it.
+
+```ts
+const manager = createCastManager({
+  ipcMain, selectDevice,
+  accessCode: { enabled: true, deviceDuration: 3600 },   // Chrome's AccessCodeCastEnabled and AccessCodeCastDeviceDuration
+});
+const result = await manager.addSinkByAddress({
+  id: "a1b2c3d4e5f60718293a4b5c6d7e8f90",               // the device's unique id
+  name: "Seminar Room 4",
+  capabilities: { videoOut: true, audioOut: true },
+  ipV4Address: "10.20.30.40",                            // or ipV6Address, which is preferred
+  port: 8009,                                            // optional, 8009 by default
+});
+// { code: "ok", sinkId } | { code: "response_malformed" | "sink_creation_error" | "channel_open_error", message, ... }
+```
+
+The device is then in `devices()` and the sinks observers, offered to the picker and to pages' availability checks like any
+discovered device. It is removed `deviceDuration` seconds after it was added (plus 20 s), or when the cast to it ends after
+that. A public or loopback address is refused as for any device, unless `sinks.allowAllIps` is set. Call `networksChanged()`
+when the machine's network changes. `configureAccessCode({ enabled, deviceDuration })` changes the settings while running,
+`rememberedSinks()` lists what is remembered, and `accessCode.store` (`load`, `save`) keeps it between runs.

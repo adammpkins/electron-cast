@@ -367,3 +367,79 @@ Where electron-cast differs from Chrome here:
 - The tracker asks for status when a channel opens and then follows what the device pushes; Chrome asks again whenever
   a sink is added or updated (`OnSinkAddedOrUpdated`), including when only its name changed.
 - The snapshot of a session this app started still passes the app's namespaces unfiltered, as before.
+
+### Access code casting (`access-code.ts`)
+
+Chrome can cast to a device that mDNS does not reach, by typing the code the device shows on its screen. Chrome calls this
+Access Code Cast (the product around it is Cast Moderator). It is two things, and only the second is here. Chromium `main`
+(November 2026); paths are relative to the Chromium source root, under
+`chrome/browser/media/router/discovery/access_code/` unless a path is given.
+
+**1. Turning a code into an address: not supported.** Chrome sends the code to Google's `castedumessaging-pa.googleapis.com`
+(`access_code_cast_constants.cc`: `kDefaultDiscoveryEndpoint`, `kDiscoveryServicePath`; a `GET /v1/receivers/<code>` built in
+`access_code_cast_discovery_interface.cc`: `CreateEndpointFetcher`) with an OAuth token of the signed-in Chrome profile
+(`SetAuthType(OAUTH)`, `ConsentLevel::kSignin`, consumer `OAuthConsumerId::kAccessCodeCastDiscovery`, whose only scope is
+`https://www.googleapis.com/auth/cast-edu-messaging`, `google_apis/gaia/oauth_consumer_registry.cc`). Without a signed-in
+profile the flow stops before the request (`ui/webui/access_code_cast/access_code_cast_handler.cc`: `IsPrimaryAccountSignedIn`,
+`PROFILE_SYNC_ERROR`). The service is an internal Google one (`discovery_resources.proto` points at a google3
+`discovery_service.proto`) with no public documentation and no key for apps; the token comes from Chrome's own sign-in and
+OAuth client, which an Electron app does not have and must not borrow. The feature is also off unless an administrator sets
+`AccessCodeCastEnabled` (default false, for `chrome.*` and `chrome_os` from 102, per profile;
+`components/policy/resources/templates/policy_definitions/GoogleCast/`), and it is not built on Android
+(`access_code_cast_feature.cc`: `!BUILDFLAG(IS_ANDROID)`). So electron-cast cannot resolve codes. The only override is
+`--access-code-cast-url`, which Chrome honours on non-stable, non-beta builds only (`access_code_cast_constants.cc`:
+`IsCommandLineSwitchSupported`), and it points at the same kind of service.
+
+**2. Adding the device it names: here, with the address supplied by the app.** What the server returns is a device id, a
+name, capabilities and a network address (`discovery_resources.proto`: `DiscoveryDevice`, `NetworkInfo`). Everything after
+that is a normal Cast sink and does not depend on Google: `CreateAccessCodeMediaSink` builds a `MediaSinkInternal` from it,
+`AddSinkToMediaRouter` has `CastMediaSinkServiceImpl::OpenChannel` open a Cast channel to the address, and the sink is listed
+like an mDNS one. `CastManager.addSinkByAddress(device)` does that part; where the address comes from (a directory, a
+config, the user typing an IP address) is up to the app. The device then goes through the same picker and the same
+Presentation API availability as any other: `CastAppDiscoveryServiceImpl` asks every sink of `CastMediaSinkServiceImpl` for
+app availability (`providers/cast/cast_app_discovery_service.cc`: `StartObservingMediaSinks`, `Refresh`), whatever its
+`discovery_type`, and `CastActivityManager` uses the type only for metrics. Chrome's own entry point is a separate dialog in
+the Cast menu (`chrome/browser/ui/webui/access_code_cast/`); a page cannot open it, and the app's picker takes its place here.
+
+Mind what "another network" means: the server returns the address the device has registered, and Chrome opens a channel to
+it by the same rule as for any sink, which refuses public and loopback addresses unless `MediaRouterCastAllowAllIPs` is set
+(`mdns/cast_media_sink_service_impl.cc`: `OpenChannel`). So this reaches devices that are routable but not on mDNS's
+multicast domain (another VLAN or subnet, as in a school or office); it does not traverse NAT, and a public address needs
+`sinks.allowAllIps`.
+
+| Rule | Where here | Chromium |
+|---|---|---|
+| Access code casting is off unless enabled; with it off nothing is added, remembered or timed (default `false`) | `accessCode.enabled`, `AccessCodeCastDisabledError` | `access_code_cast_feature.cc`: `GetAccessCodeCastEnabledPref`; `access_code_cast_sink_service_factory.cc`: `GetForProfile`, `BuildServiceInstanceForBrowserContext`; `AccessCodeCastEnabled.yaml` |
+| The device must be an object with a string name and id and a capabilities object whose present values are booleans; otherwise the reply is malformed | `createAccessCodeSink` (`response_malformed`) | `access_code_cast_discovery_interface.cc`: `ConstructDiscoveryDeviceFromJson` |
+| A sink needs, in this order: an IP literal (IPv6 preferred over IPv4), a non-empty id, a non-empty name, a port (a decimal integer in 0..65535, default 8009) | `createAccessCodeSink` (`sink_creation_error` and its `reason`) | `access_code_media_sink_util.cc`: `CreateAccessCodeMediaSink`, `GetIPAddress`; `net/base/port_util.cc`: `IsPortValid`; `mdns/media_sink_util.cc`: `CreateCastMediaSinkResult` |
+| The id is processed as an mDNS id is (`uuid:` and dashes dropped, lower case); the model name is `Chromecast Cast Moderator`; capabilities are the five flags as the same bits an mDNS `ca` record has | `createAccessCodeSink` | `access_code_media_sink_util.cc`: `kDefaultAccessCodeModelName`, `ConvertDeviceCapabilities`; `components/media_router/common/discovery/media_sink_internal.cc`: `ProcessDeviceUUID` |
+| A device already listed keeps its channel (and endpoint); only its name and capabilities are refreshed, and its stored data and time are replaced | `addSinkToMediaRouter`, `updateExistingSink` | `access_code_cast_sink_service.cc`: `OpenChannelIfNecessary`, `UpdateExistingSink` |
+| Otherwise a channel is opened with its own quick parameters: connect 2 s, liveness 8 s, ping 4 s, retried 1 s apart (50% jitter, no growth) up to the sink service's 3 attempts; a failure is `channel_open_error` | `CastSinkService.openSink` (`params`, `backoff`), `MANUAL_ENTRY_PARAMS`, `MANUAL_ENTRY_BACKOFF` | `access_code_cast_sink_service.cc`: `kConnectTimeoutInSeconds`, `kPingIntervalInSeconds`, `kLivenessTimeoutInSeconds`, `backoff_policy_`, `OpenChannelIfNecessary`, `OnChannelOpenedResult`; `cast_media_sink_service_impl.cc`: `OnChannelErrorMayRetry` |
+| The address rules of discovered devices apply: a public or loopback address is not opened to | `CastSinkService.openChannel` | `cast_media_sink_service_impl.cc`: `OpenChannel` |
+| A device added by code is remembered with its addition time; another entry at the same IP endpoint is replaced | `storeSinkInPrefs`, `AccessCodeStore` | `access_code_cast_pref_updater_impl.cc`: `UpdateDevicesDict`, `UpdateDeviceAddedTimeDict`; `access_code_cast_pref_updater.cc`: `GetMatchingIPEndPoints` |
+| It stays listed for `deviceDuration` seconds from when it was added (policy default 0) plus 20 s, so that a route can be created first | `setExpirationTimer`, `durationTillExpiration` (`accessCode.deviceDuration`) | `access_code_cast_sink_service.cc`: `DoSetExpirationTimer`, `DoCalculateDurationTillExpiration`; `access_code_cast_sink_service.h`: `kExpirationTimerDelay`; `AccessCodeCastDeviceDuration.yaml` |
+| When the time is up, a device a page is casting to (a local route) stays until that route ends; any other is forgotten and its channel removed 450 ms later | `onExpiration`, `expireSink`, `removeAndDisconnectMediaSinkFromRouter` | `access_code_cast_sink_service.cc`: `OnExpiration`, `ExpireSink`, `RemoveAndDisconnectMediaSinkFromRouter`, `kExpirationDelay` |
+| When a route to such a device ends, after 450 ms with no new route its time is checked and, if up, it expires at once | `onRoutesUpdated`, `checkMediaSinkForExpiration` | `access_code_cast_sink_service.cc`: `AccessCodeMediaRoutesObserver::OnRoutesUpdated`, `HandleMediaRouteRemovedByAccessCode`, `OnAccessCodeRouteRemoved`, `DoCheckMediaSinkForExpiration` |
+| Remembered devices are read when the service starts (entries that do not validate are dropped), added again with the sink service's usual open parameters, and their timers set | `AccessCodeSinks.load`, `initAllStoredDevices` | `access_code_cast_sink_service.cc`: `InitAllStoredDevices`, `ValidateStoredDevices`; `access_code_media_sink_util.cc`: `ParseValueDictIntoMediaSinkInternal` |
+| A network change removes the devices that have no route, and after 4.45 s the remembered ones are added again | `networksChanged` | `access_code_cast_sink_service.cc`: `OnNetworksChanged`, `RemoveAndDisconnectExistingSinksOnNetwork`, `kNetworkChangeBuffer` |
+| The policies apply while running: disabling removes and forgets every device, a new duration resets every timer | `configureAccessCode` | `access_code_cast_sink_service.cc`: `OnEnabledPrefChange`, `OnDurationPrefChange` |
+
+Where electron-cast differs from Chrome here:
+
+- The device arrives as an object, not as the server's JSON, so `networkInfo` and `deviceCapabilities` are flat fields and
+  the "no network info / no capabilities" results (`kMissingNetworkInfo`, `kMissingDeviceCapabilities`) cannot occur: a
+  missing capabilities object is `response_malformed`, as a missing dict is in `ConstructDiscoveryDeviceFromJson`. A port
+  may be a number as well as the server's string; Chrome would ignore a number and use 8009, which here would hide a typo.
+  An address that is not a string counts as absent, as in Chrome.
+- Chrome names an access code sink `cast:<uuid>`, with literal angle brackets, where an mDNS sink is `cast:uuid`, so a
+  device found both ways is two sinks there until the same-address rule removes one. electron-cast's sinks are named by the
+  plain processed id, so one device found both ways is one sink, and a device already listed by mDNS takes the "already
+  exists" path. Either way a device has one sink per address.
+- The prefs become `AccessCodeStore` (`load` once when enabled, `save` the whole list after each change), with the app
+  deciding where it lives; one entry holds the data of Chrome's two dictionaries. The default store is memory.
+- Chrome learns of a network change from `DiscoveryNetworkMonitor`; electron-cast does not track networks, so the app calls
+  `networksChanged()`.
+- The result is reported after the device is remembered and its timer set; Chrome reports first.
+- Chrome's metrics, its `chrome://media-router-internals` log (here the optional `accessCode.log`), its offline check
+  (`SERVICE_NOT_PRESENT`) and the dialog that goes on to start a route are not here: the app starts a cast through its own
+  picker once the device is listed.
