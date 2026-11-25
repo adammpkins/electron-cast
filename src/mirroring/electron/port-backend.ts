@@ -9,6 +9,7 @@ import type {
 } from "../backend.ts";
 import type { FrameSenderConfig, ResolutionChangePolicy, VideoCaptureParams } from "../mirror-settings.ts";
 import { CaptureSizeOracle, suggestConstraints } from "../sender/capture-size-oracle.ts";
+import { H264QuantizerReader, normalizedH264Quantizer } from "../sender/h264-quantizer.ts";
 import { EncoderUtilizationAverage, calculateEncoderUtilization, computeLossiness } from "../sender/video-encoder-metrics.ts";
 import type { RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
 import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.ts";
@@ -81,6 +82,10 @@ export class PortBackend implements MirroringBackend {
   private frameInterval = 1000 / 30;
   private targetBitrate = 0;
   private isHardwareEncoder = false;
+  private videoCodec: FrameSenderConfig["videoCodec"];
+  private h264Quantizer = new H264QuantizerReader();
+  /** Whether the agent estimates the complexity of the frames it encodes; a new encoder always does. */
+  private agentEstimatesComplexity = true;
   private readonly utilizationAverage = new EncoderUtilizationAverage();
   private oracle: CaptureSizeOracle | undefined;
   private oracleFrames = new Map<number, number>();
@@ -142,12 +147,23 @@ export class PortBackend implements MirroringBackend {
         const referenced = m.key ? frameId : this.lastVideoFrameId;
         this.lastVideoFrameId = frameId;
         const data = Buffer.from(m.data);
-        // OnFrameEncodeDone: WebCodecs reports no quantizer, so the frame's estimated complexity stands in for it and
-        // only frames that were estimated have a lossiness.
+        // MediaVideoEncoderWrapper::OnEncodedFrame: the quantizer the encoder used, normalized to [0, 1], when there is
+        // one (`output.qp`), else the complexity estimated for the frame; a frame with neither has no lossiness.
+        // WebCodecs passes no quantizer on, so an H.264 frame's is read from its slice header (h264-quantizer.ts).
+        const qp = this.videoCodec === "h264" && data.length > 0 ? this.h264Quantizer.read(data) : undefined;
+        const complexity = qp !== undefined ? normalizedH264Quantizer(qp) : m.complexity;
+        if (data.length > 0) this.estimateComplexityUnless(qp !== undefined, m.complexity !== undefined);
+        const durationMs = m.durationMs ?? this.frameInterval;
         const lossiness =
-          m.complexity !== undefined && this.targetBitrate > 0
-            ? computeLossiness(data.length, m.durationMs ?? this.frameInterval, this.targetBitrate, m.complexity)
+          complexity !== undefined && this.targetBitrate > 0
+            ? computeLossiness(data.length, durationMs, this.targetBitrate, complexity)
             : undefined;
+        if (qp !== undefined) this.stages.add("video QP", qp);
+        if (lossiness !== undefined) this.stages.add("video lossiness x100", lossiness * 100);
+        else this.stages.add("video frames without lossiness", 1);
+        if (this.targetBitrate > 0 && durationMs > 0) {
+          this.stages.add("video frame bitrate, % of target", ((data.length * 8000) / durationMs / this.targetBitrate) * 100);
+        }
         this.feedbackFrame = this.oracleFrames.get(m.rtp);
         this.videoCallbacks?.onEncoded(ref, {
           isKeyFrame: m.key,
@@ -250,6 +266,9 @@ export class PortBackend implements MirroringBackend {
     // CalculateEncoderUtilization treats hardware and software encoders differently; the session host says which one
     // this is (a WebCodecs hardware encoder was found for the codec).
     this.isHardwareEncoder = config.useHardwareEncoder;
+    this.videoCodec = config.videoCodec;
+    this.h264Quantizer = new H264QuantizerReader();
+    this.agentEstimatesComplexity = true;
     this.port.postMessage({ t: "set-codec", codec: config.videoCodec ?? "vp8", codecString: config.codecParameter, hardware: config.useHardwareEncoder });
     this.port.postMessage({ t: "set-bitrate", bps: config.startBitrate });
     // The agent reports unsupported or failed codecs; "initialized" is the default until it says otherwise.
@@ -430,6 +449,20 @@ export class PortBackend implements MirroringBackend {
   }
 
   /**
+   * `encoder_reports_qp_` of `MediaVideoEncoderWrapper`: while the encoder's frames carry a quantizer, Chrome does not
+   * run the complexity estimator (`EncodeVideoFrame`), and the first frame without one turns it back on. The agent's
+   * estimate costs a copy of every frame's pixels. A chunk that carries an estimate shows the agent is estimating: its
+   * new encoder (another capture size) starts that way, as `ConstructEncoder` resets the flag.
+   */
+  private estimateComplexityUnless(encoderReportsQp: boolean, chunkHasEstimate: boolean): void {
+    if (chunkHasEstimate) this.agentEstimatesComplexity = true;
+    const wanted = !encoderReportsQp;
+    if (wanted === this.agentEstimatesComplexity) return;
+    this.agentEstimatesComplexity = wanted;
+    this.port.postMessage({ t: "estimate-complexity", on: wanted });
+  }
+
+  /**
    * `VideoCaptureClient::ProcessFeedback`. Chrome keeps the feedback for the next buffer it releases and the capture
    * device's oracle takes it from there (`FrameSinkVideoCapturerImpl`, `VideoCaptureOracle::RecordConsumerFeedback`);
    * here it goes to the oracle at once, for the frame whose output produced it.
@@ -454,6 +487,10 @@ export class PortBackend implements MirroringBackend {
     this.oracleFrames.set(rtp, oracle.nextFrameNumber);
     if (this.oracleFrames.size > 64) this.oracleFrames.delete(this.oracleFrames.keys().next().value!);
     oracle.recordCapture(this.pendingVideo.size / PIPELINE_CAPACITY);
+    // Debug aid: what Chrome logs as "Capability of ... consumer" (VideoCaptureOracle::AnalyzeForDecreasedArea). Under
+    // 100 for three seconds, the capture steps down.
+    const capability = oracle.consumerCapability;
+    if (capability !== undefined) this.stages.add("capture area the consumer can take, % of current", capability * 100);
 
     // The encoder wants even dimensions (I420 chroma); the capture constraints round their maximum to even for the same reason.
     const { width: w, height: h } = oracle.captureSize;
@@ -461,6 +498,7 @@ export class PortBackend implements MirroringBackend {
     const key = `${size.width}x${size.height}`;
     if (key !== this.sentCaptureSize) {
       this.sentCaptureSize = key;
+      this.log?.(`capture size -> ${key} (source ${width}x${height})`);
       this.port.postMessage({ t: "capture-size", ...size });
     }
   }

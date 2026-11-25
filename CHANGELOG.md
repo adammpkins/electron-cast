@@ -48,6 +48,13 @@
   Chromium's and keeps time as Chrome's task runner does; Node's timer stays as the fallback. The engine logs how late its
   tasks ran (`timers:`), and the feedback line now gives the round trips as measured and the number of feedback gaps over
   100 ms.
+- **A hardware H.264 encoder that cannot reach its target bitrate now makes the mirrored tab's capture smaller, as in
+  Chrome.** Chrome judges how lossy a frame is by the quantizer its encoder reports; WebCodecs reports none, so the
+  estimated complexity of the frame's pixels stood in, and for mostly still pages that estimate is low. At a low target
+  the encoder sat at its largest quantizer (QP 51, a blocky picture) and still sent several times the target, while the
+  capture stayed at full size. The quantizer is now read from each H.264 frame's slice header, and the complexity
+  estimate (a copy of every frame's pixels) is skipped while it can be. The stage log adds the QP, each frame's bitrate
+  as a share of the target, the capture area the feedback allows, and a line for every capture size change.
 - A mirroring route the receiver ended itself (its app is gone from the receiver status) no longer sends a CLOSE and a STOP
   for the session the receiver dropped; it only closes its channel (`CastActivityManager::OnSessionRemoved`,
   `RemoveActivity`).

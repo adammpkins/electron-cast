@@ -49,6 +49,11 @@ export type EngineToAgent =
   | { t: "refresh" }
   /** The capture size the agent encodes at (`VideoCaptureOracle::capture_size`); frames are scaled to it by the encoder. */
   | { t: "capture-size"; width: number; height: number }
+  /**
+   * Whether to estimate the complexity of each frame before it is encoded. Off while the engine reads a quantizer
+   * from the encoder's output (`encoder_reports_qp_`); a new encoder starts with it on.
+   */
+  | { t: "estimate-complexity"; on: boolean }
   | { t: "encode-audio"; seq: number }
   | { t: "drop-audio"; seq: number }
   | { t: "set-audio"; bps: number }
@@ -68,7 +73,8 @@ export type AgentToEngine =
    */
   | { t: "frame"; rtp: number; refMs: number; width: number; height: number; refresh?: boolean; captureBeginMs?: number; captureEndMs?: number }
   /**
-   * `complexity` is the frame complexity estimate in [0, 1] (absent when the frame could not be examined) and
+   * `complexity` is the frame complexity estimate in [0, 1] (absent when the frame could not be examined or the
+   * engine turned the estimate off) and
    * `durationMs` the frame's duration, which lossiness is measured over.
    */
   | { t: "video-chunk"; rtp: number; key: boolean; data: ArrayBuffer; encodeMs: number; durationMs?: number; complexity?: number }

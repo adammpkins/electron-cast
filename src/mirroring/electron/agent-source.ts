@@ -10,7 +10,7 @@
  * raw frames are encoded (the drop decision of `VideoSender::InsertRawVideoFrame`); the agent only holds a few
  * frames for it. A `VideoFrame` goes straight into the encoder; its pixels are read once per encoded frame, to
  * estimate the frame's complexity (media/cast/encoding/frame_complexity_estimator.cc), which stands in for the
- * quantizer WebCodecs does not report. The engine also tells the agent the capture size to encode at
+ * quantizer WebCodecs does not report, unless the engine finds the quantizer in the encoded frame (H.264). The engine also tells the agent the capture size to encode at
  * (`capture-size`): the encoder scales frames to its configured size.
  *
  * Messages are those of agent-protocol.ts.
@@ -57,6 +57,7 @@ export const AGENT_SOURCE = String.raw`
   let lastRtp = 0;
   let captureSize = null;              // { width, height } the engine's capture size oracle wants encoded, null for the source size
   let encodeChain = Promise.resolve(); // encodes run one after another: the complexity estimate awaits a pixel copy
+  let estimating = true;               // false while the engine reads the encoder's quantizer instead (encoder_reports_qp_)
   let lastEncodedTimestamp = null;     // capture clock (us) of the frame encoded before, for GetFrameDuration
   let firstTimestamp = null;
   let lastCapture = null;              // { timestamp (capture clock, us), refMs (epoch ms) } of the newest frame, refresh or not
@@ -121,6 +122,7 @@ export const AGENT_SOURCE = String.raw`
         return;
       case "encode": return (encodeChain = encodeChain.then(() => encodeFrame(m.rtp)));
       case "capture-size": captureSize = { width: m.width, height: m.height }; return;
+      case "estimate-complexity": estimating = m.on === true; return;
       case "encode-audio": return encodeAudio(m.seq);
       case "drop-audio": { const d = pendingAudio.get(m.seq); pendingAudio.delete(m.seq); if (d) d.close(); return; }
       // The engine's timer. A timer set from a message event is not nested, so it is not clamped to 4 ms.
@@ -479,6 +481,8 @@ export const AGENT_SOURCE = String.raw`
     if (videoEncoder && videoEncoder.state !== "closed") videoEncoder.close();
     abandonInFlight();
     encoderSize = { width, height };
+    // ConstructEncoder: nothing is known about a new encoder's quantizer (encoder_reports_qp_ = false).
+    estimating = true;
     videoEncoder = new VideoEncoder({
       output: (chunk) => {
         // A software VP8 encoder may swallow a frame without output. The chunk's timestamp is the frame's, so frames
@@ -526,7 +530,8 @@ export const AGENT_SOURCE = String.raw`
       if (videoEncoder.encodeQueueSize > 4) { dropVideo(rtp); return; }
       const key = keyNext;
       keyNext = false;
-      const estimated = await estimateComplexity(frame, key);
+      // EncodeVideoFrame: no estimate while the encoder's own quantizer is known.
+      const estimated = estimating ? await estimateComplexity(frame, key) : null;
       // GetFrameDuration: the frame's own duration, else the time since the last frame within [1/60 s, 1/24 s].
       const durationMs = frame.duration != null && frame.duration > 0
         ? frame.duration / 1000

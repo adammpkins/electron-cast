@@ -575,6 +575,28 @@ test("agent: a uniform frame has no complexity, an unexaminable format reports n
   assert.ok(Math.abs(c[2]!.durationMs! - 1000 / 60) < 1e-9);
 });
 
+test("agent: no complexity is estimated while the engine has it turned off, and a new encoder estimates again", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  const encodeNext = async (i: number, options: FrameOptions = { luma: () => 9 }) => {
+    await a.capture(i * 33_000, options);
+    await a.command({ t: "encode", rtp: a.rtps()[i]! });
+  };
+  await encodeNext(0);
+  await a.command({ t: "estimate-complexity", on: false });
+  await encodeNext(1);
+  await a.command({ t: "estimate-complexity", on: true });
+  await encodeNext(2);
+  await a.command({ t: "estimate-complexity", on: false });
+  await encodeNext(3);
+  a.encoders[0]!.emit(0, true); a.encoders[0]!.emit(1); a.encoders[0]!.emit(2); a.encoders[0]!.emit(3);
+  // A frame of another size makes a new encoder (ConstructEncoder), which knows nothing of the old one's quantizer.
+  await encodeNext(4, { luma: () => 9, width: 320, height: 180 });
+  a.encoders[1]!.emit(0, true);
+  const c = chunksOf(a.sent);
+  assert.deepEqual(c.map((m) => "complexity" in m), [true, false, true, false, true]);
+});
+
 test("agent: the engine's capture size sets the size the encoder is configured for, and only while the aspect ratio matches", async () => {
   const a = startAgent();
   await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 1280, height: 720, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
