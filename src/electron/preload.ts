@@ -1,4 +1,5 @@
 import { installChromeCast } from "../polyfill/install.ts";
+import { installPresentationStandIn } from "../polyfill/presentation-standin.ts";
 import type { BridgeEvent, BridgeMethod, BridgeResult } from "../polyfill/bridge-types.ts";
 
 /** The subset of an Electron `contextBridge` the bridge needs. */
@@ -10,6 +11,8 @@ export interface ContextBridgeLike {
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
   on(channel: string, listener: (event: unknown, ...args: any[]) => void): unknown;
+  /** Needed only in presentation mode. */
+  send?(channel: string, ...args: unknown[]): void;
 }
 /** Dependencies of {@link installCastBridge}; the Electron objects are passed in, never imported. */
 export interface CastBridgeOptions {
@@ -17,6 +20,13 @@ export interface CastBridgeOptions {
   ipcRenderer: IpcRendererLike;
   channel?: string;    // default "electron-cast"
   bridgeKey?: string;  // default "__electronCastBridge"
+  /**
+   * "chromecast" (default) installs electron-cast's own chrome.cast. "presentation" installs a stand-in
+   * Presentation API instead, so the page's own copy of Google's Cast SDK loads and runs unmodified; the main
+   * process must be created with `presentation: true`.
+   */
+  mode?: "chromecast" | "presentation";
+  presentationBridgeKey?: string;  // default "__electronCastPresentationBridge"
 }
 
 function describe(err: unknown): string {
@@ -26,6 +36,10 @@ function describe(err: unknown): string {
 /** Call from a preload script: exposes the bridge and installs chrome.cast in the page before its scripts run. */
 export function installCastBridge(options: CastBridgeOptions): void {
   const channel = options.channel ?? "electron-cast";
+  if (options.mode === "presentation") {
+    installPresentationBridge(options, channel);
+    return;
+  }
   const bridgeKey = options.bridgeKey ?? "__electronCastBridge";
   const bridge = {
     /** Forward one bridge call to the main process; never rejects. */
@@ -54,4 +68,43 @@ export function installCastBridge(options: CastBridgeOptions): void {
   };
   options.contextBridge.exposeInMainWorld(bridgeKey, bridge);
   options.contextBridge.executeInMainWorld({ func: installChromeCast, args: [bridgeKey] });
+}
+
+/** Presentation mode: expose the stand-in's bridge and install the stand-in; chrome.cast is left to Google's SDK. */
+function installPresentationBridge(options: CastBridgeOptions, channel: string): void {
+  const key = options.presentationBridgeKey ?? "__electronCastPresentationBridge";
+  const ipc = options.ipcRenderer;
+  if (typeof ipc.send !== "function") throw new TypeError("presentation mode needs ipcRenderer.send");
+  const send = ipc.send.bind(ipc);
+  const bridge = {
+    /** Forward one call to the main process; never rejects. */
+    call(method: string, params: unknown): Promise<unknown> {
+      let invoked: Promise<unknown>;
+      try {
+        invoked = ipc.invoke(`${channel}:presentation`, method, params);
+      } catch (err) {
+        invoked = Promise.reject(err);
+      }
+      return invoked.then(
+        (result) => result,
+        (err: unknown) => ({ ok: false, code: "OperationError", description: describe(err) }),
+      );
+    },
+    /** Page -> main: one message on an open connection; the reply comes back in-band. */
+    send(connectionId: string, data: string): void {
+      send(`${channel}:presentation:send`, connectionId, data);
+    },
+    /** Relay `<channel>:presentation:event` payloads to the page, dropping the IPC event object. */
+    onEvent(listener: (event: unknown) => void): void {
+      ipc.on(`${channel}:presentation:event`, (_event, payload) => {
+        try {
+          listener(payload);
+        } catch (err) {
+          console.error(err);
+        }
+      });
+    },
+  };
+  options.contextBridge.exposeInMainWorld(key, bridge);
+  options.contextBridge.executeInMainWorld({ func: installPresentationStandIn, args: [key] });
 }
