@@ -76,9 +76,10 @@ function device(id: string): CastDevice {
   return { id, name: id, model: "Fake", host: "127.0.0.1", addresses: ["127.0.0.1"], port: 8009, capabilities: 5, isGroup: false, statusText: "", instanceName: id, txt: {} };
 }
 
-function stubManager(options: { withoutFreeze?: boolean } = {}) {
+function stubManager(options: { withoutFreeze?: boolean; terminateRoutesOfPage?: (id: number) => void } = {}) {
   const services: StubService[] = [];
   const manager = new MirroringManager({
+    ...(options.terminateRoutesOfPage ? { terminateRoutesOfPage: options.terminateRoutesOfPage } : {}),
     findDevice: (id) => (id.startsWith("dev-") ? device(id) : undefined),
     createClient: (d) => new FakeClient(`sess-${d.id}`),
     createService: (_params, observer) => {
@@ -222,5 +223,23 @@ test("a service that cannot pause reports a route that cannot freeze, and ending
   manager.terminate(route.id);
   await sleep(FREEZE_DELAY_MS + 100);
   assert.deepEqual(services[0]!.calls, ["stop"], "no pause after the route ended");
+  manager.dispose();
+});
+
+test("a page that becomes a mirroring source, by a launch or a switch, loses its other routes (routes_by_frame_)", async () => {
+  const ended: number[] = [];
+  const { manager } = stubManager({ terminateRoutesOfPage: (id) => void ended.push(id) });
+  const route = await manager.startMirroring("dev-1", { castMode: "tab_mirror", webContentsId: 5 });
+  assert.deepEqual(ended, [5], "launch");
+  manager.switchMirroringSourceTab(route.id, 6);
+  assert.deepEqual(ended, [5, 6], "switch");
+  manager.switchMirroringSourceTab(route.id, 6);
+  assert.deepEqual(ended, [5, 6], "no change, no termination");
+  await manager.startMirroring("dev-2", { castMode: "desktop_mirror", desktopSourceId: "screen:0:0" });
+  assert.deepEqual(ended, [5, 6], "a desktop source belongs to no page");
+  // The other direction: a Cast session launched from the mirrored page ends its mirroring route.
+  manager.terminateRoutesOfTab(6);
+  assert.equal(manager.routes().length, 1);
+  assert.equal(manager.routes()[0]!.webContentsId, undefined);
   manager.dispose();
 });

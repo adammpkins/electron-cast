@@ -224,6 +224,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     createClient,
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
+    // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
+    // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
+    onSessionLaunched: (senderId) => mirroring?.terminateRoutesOfTab(senderId),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -452,6 +455,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       findDevice: (id) => discovery.devices().find((d) => d.id === id),
       createClient: (d) => createClient(d),
       createService,
+      terminateRoutesOfPage: (wcId) => {
+        for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
+      },
       log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
     });
   }

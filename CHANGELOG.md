@@ -17,6 +17,10 @@
   frame as Chrome's freeze does (audio goes on, 500 ms delay), and mirroring routes report `freezeInfo` (`canFreeze`,
   `isFrozen`). Tested against the fake receiver and the capture agent's stand-ins; the receiver's behaviour while frozen
   and a real tab switch are for a live test (`examples/live-mirroring`).
+- **One route per page, and a closed tab ends its mirroring.** As in Chrome, a page that becomes a mirroring source
+  (a launch or a switch) loses the Cast SDK / Presentation API sessions it launched, and a page that launches one
+  loses its mirroring routes (`CastActivityManager::routes_by_frame_`). Closing the page being mirrored ends a tab route
+  (`CastMirroringServiceHost::WebContentsDestroyed`); a desktop route is unaffected.
 
 ## 0.4.0
 

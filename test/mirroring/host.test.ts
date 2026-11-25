@@ -19,7 +19,12 @@ function fakeElectron() {
     muteCalls: [] as boolean[],
     isAudioMuted() { return this.muted; },
     setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); },
-    isDestroyed: () => false,
+    gone: false,
+    onDestroyed: [] as (() => void)[],
+    isDestroyed() { return this.gone; },
+    once(_event: "destroyed", l: () => void) { this.onDestroyed.push(l); },
+    /** The page is closed: `destroyed` fires on its listeners. */
+    destroy() { this.gone = true; for (const l of this.onDestroyed.splice(0)) l(); },
     getMediaSourceId: () => "id",
     executeJavaScript: async (code: string) => (code.includes("isConfigSupported") ? ["vp8"] : undefined),
     postMessage() {},
@@ -154,7 +159,7 @@ test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep
 
 /** Another page to switch to: the same stand-in with its own id, mute state and capture id. */
 function otherPage(base: ReturnType<typeof fakeElectron>["page"], id: number, muted = false) {
-  return { ...base, id, muted, muteCalls: [] as boolean[], isAudioMuted() { return this.muted; }, setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); }, getMediaSourceId: () => `tab-${id}` };
+  return { ...base, id, muted, gone: false, onDestroyed: [] as (() => void)[], muteCalls: [] as boolean[], isAudioMuted() { return this.muted; }, setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); }, getMediaSourceId: () => `tab-${id}` };
 }
 
 test("host: switching the source tab moves the local mute, mints the new tab's capture id and tells the engine; the old tab is unmuted only if the host muted it", async () => {
@@ -224,4 +229,44 @@ test("host: pause and resume go to the capture and report once requested; after 
   service.pause!(() => done.push("late"));
   assert.deepEqual(done, ["paused", "resumed"]);
   host.dispose();
+});
+
+test("host: the mirrored tab being destroyed ends the session (WebContentsDestroyed); a tab switched away from, or a desktop source, does not", async () => {
+  const mk = async (type: "tab" | "desktop") => {
+    const { electron, state, page } = fakeElectron();
+    const next = otherPage(page, 8);
+    const pages: Record<number, unknown> = { 7: page, 8: next };
+    (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
+    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+    const stops: string[] = [];
+    const service = host.factory(
+      { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
+      { didStop: () => void stops.push("stop") },
+      { send() {} },
+      (type === "tab" ? { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } : { type: "desktop", id: "urn:x-org.chromium.media:source:desktop:screen:1:0" }) as never,
+    );
+    for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
+    await sleep(20);
+    return { state, page, next, service, host, stops };
+  };
+  const t = await mk("tab");
+  t.page.destroy();
+  assert.deepEqual(t.stops, ["stop"], "the observer is told the session stopped, which ends the route");
+  assert.equal(t.state.windows[0]!.destroyed, true, "the capture window is released");
+  assert.deepEqual(t.state.procs[0]!.posted.at(-1), { type: "stop" });
+  t.host.dispose();
+
+  const s = await mk("tab");
+  s.service.switchMirroringSourceTab!(8);
+  s.page.destroy();
+  assert.deepEqual(s.stops, [], "the old tab is no longer observed");
+  s.next.destroy();
+  assert.deepEqual(s.stops, ["stop"], "the new tab is");
+  s.host.dispose();
+
+  const d = await mk("desktop");
+  d.page.destroy();
+  assert.deepEqual(d.stops, []);
+  d.service.stop();
+  d.host.dispose();
 });

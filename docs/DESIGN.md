@@ -439,11 +439,28 @@ Only **tab** routes switch. Chrome's host `CHECK`s that the new source is a web 
 capture only, and the control is behind `AccessCodeCastTabSwitchingUi` (an internal UI flag, not mirrored here). A desktop
 route refuses with `unable_to_cast`; Chrome has no desktop-source switch to port.
 
-Not ported: the remoting branch of `SwitchSourceTab` (remoting is not offered), and `routes_by_frame_` also holding
-Presentation API routes: Chrome ends a Cast SDK route of the new page when it becomes a mirroring source, here only
-other mirroring routes of that page end. The same one-route-per-page rule at launch (`DoLaunchSession`: "If there is a
-route from this frame already, stop it") is applied to mirroring routes too. Not observed: the mirrored page being
-destroyed (`WebContentsDestroyed` stops the session in Chrome), which was already the case before switching existed.
+Not ported: the remoting branch of `SwitchSourceTab` (remoting is not offered).
+
+**One route per page** (`CastActivityManager::routes_by_frame_`, keyed by `frame_tree_node_id`, for every kind of route).
+`DoLaunchSession` ("If there is a route from this frame already, stop it") terminates the frame's existing route before a
+new one launches, and `OnSourceChanged` does the same for the new tab's frame on a switch. Here the two route kinds live in
+separate layers, so the rule is a pair of narrow hooks: `MirroringManagerOptions.terminateRoutesOfPage` (called when a page
+becomes a mirroring source, by a launch or a switch; `main.ts` ends the Cast SDK / Presentation API sessions that page
+*launched*, `CastSessionService.sessionsLaunchedBy`, through `terminateSession`) and `CastSessionServiceOptions.onSessionLaunched`
+(called when a page launches a session; `main.ts` ends that page's mirroring routes). A session the page only joined is not
+ended, as Chrome's `routes_by_frame_` records launches only. Deviation: Chrome's key is the frame, here a main frame is
+its page (a subframe's session is not matched to a mirroring route, which in Chrome is also a main frame).
+
+**The mirrored page being destroyed** (tab routes only). `CastMirroringServiceHost` is a `WebContentsObserver` on the tab
+(`Observe(GetContents(...))` in `Start`, again for the new tab in `SwitchMirroringSourceTab`); `WebContentsDestroyed()`
+calls `StopMirroringSession()`, which resets `mirroring_service_`. The Mirroring Service's disconnect handler
+(`MirroringService::OnDisconnect`) resets its `OpenscreenSessionHost`, whose destructor runs `StopSession()` and calls
+`observer_->DidStop()`; `MirroringActivity::DidStop()` -> `StopMirroring()` runs `on_stop_` ->
+`CastActivityManager::OnActivityStopped` -> `TerminateSession`, which removes the activity as `TERMINATED` with
+`PresentationConnectionCloseReason::CLOSED` (the same path as a user stopping the route). Here `host.ts` listens for
+`destroyed` on the page being mirrored (the new page after a switch; the old one is ignored) and reports `didStop`, which
+ends the route as `terminateRoute` does. A desktop source observes no `WebContents` (the `Observe` calls are in the tab
+branch only), so nothing happens there when a window closes: capture just ends or goes on.
 
 **Freezing** (`MediaRouterUI::FreezeRoute` / `UnfreezeRoute` -> `MirroringMediaControllerHostImpl::Freeze` / `Unfreeze` ->
 `MirroringActivity::Pause` / `Play` -> `CastMirroringServiceHost::Pause` / `Resume`). Freezing pauses the *video capture

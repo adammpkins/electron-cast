@@ -17,6 +17,7 @@ function setup(opts: {
   devices?: FakeDevices;
   allowOrigin?: (o: string) => boolean;
   tweak?: (c: FakeClient) => void;
+  onSessionLaunched?: (senderId: number) => void;
 } = {}) {
   const devices = opts.devices ?? new FakeDevices();
   const log = new EventLog();
@@ -35,6 +36,7 @@ function setup(opts: {
       return opts.pick ? opts.pick(list, req) : (list.find((d) => d.id === TV.id) ?? null);
     },
     allowOrigin: opts.allowOrigin,
+    onSessionLaunched: opts.onSessionLaunched,
     emit: log.emit,
   });
   return { service, devices, log, clients, picks };
@@ -612,4 +614,21 @@ test('a failed "stop" from the picker is session_error and the session stays', a
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
   const msg = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
   assert.equal(msg.ok, true, "the session still works");
+});
+
+test("onSessionLaunched fires for a launch, not for a join, and sessionsLaunchedBy names the launcher's sessions", async () => {
+  const launched: number[] = [];
+  const { service } = setup({ onSessionLaunched: (id) => void launched.push(id) });
+  const snap = await session(service, PAGE);
+  assert.deepEqual(launched, [PAGE.id]);
+  assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), [snap.sessionId]);
+  assert.deepEqual(service.sessionsLaunchedBy(PAGE2.id), []);
+  await init(service, PAGE2);
+  const j = await service.handle(PAGE2, "joinSession", { sessionId: snap.sessionId });
+  assert.equal(j.ok, true, JSON.stringify(j));
+  assert.deepEqual(launched, [PAGE.id], "a join is not a launch");
+  assert.deepEqual(service.sessionsLaunchedBy(PAGE2.id), []);
+  const ended = await service.terminateSession(snap.sessionId);
+  assert.equal(ended.ok, true);
+  assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), []);
 });

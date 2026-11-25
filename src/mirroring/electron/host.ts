@@ -32,6 +32,7 @@ export interface WebContentsMirrorLike {
   postMessage(channel: string, message: unknown, transfer?: PortMainLike[]): void;
   setWindowOpenHandler(handler: () => { action: "deny" }): void;
   on(event: "will-navigate", listener: (event: { preventDefault(): void }) => void): unknown;
+  once(event: "destroyed", listener: () => void): unknown;
   readonly session: {
     setPermissionRequestHandler(handler: ((wc: unknown, permission: string, callback: (granted: boolean) => void) => void) | null): void;
     setPermissionCheckHandler(handler: ((wc: unknown, permission: string) => boolean) | null): void;
@@ -123,6 +124,17 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         };
       }
     };
+    // CastMirroringServiceHost observes the mirrored WebContents (`Observe(GetContents(...))`, again for the new tab on a
+    // switch) and its WebContentsDestroyed() calls StopMirroringSession(): the Mirroring Service is released, whose
+    // session host stops and reports DidStop(), and the route ends. A desktop source observes nothing. A stale listener
+    // (the tab was switched away from) is ignored, as Chrome stops observing the old contents.
+    const observeTab = (target: WebContentsMirrorLike): void => {
+      target.once("destroyed", () => {
+        if (ended || tabTarget !== target) return;
+        observer.didStop?.();
+        teardown();
+      });
+    };
     const teardown = (): void => {
       if (ended) return;
       ended = true;
@@ -178,6 +190,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           const target = e.webContents.fromId(tabId);
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
           tabTarget = target;
+          observeTab(target);
           // The id is bound to the requesting frame, so it can only be minted once the agent page has loaded. A switch
           // that came in before then has replaced `tabTarget`, so the start carries the newest tab.
           mintTabSource = () => ({ kind: "tab", mediaSourceId: tabTarget!.getMediaSourceId(wc) });
@@ -264,6 +277,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         unmuteTab = undefined;
         muteTab(next);
         tabTarget = next;
+        observeTab(next);
         if (capture !== undefined) post({ type: "switch-source", webContentsId, source: capture });
       },
       // CastMirroringServiceHost::Pause / Resume: straight to the video capture host, so audio goes on.

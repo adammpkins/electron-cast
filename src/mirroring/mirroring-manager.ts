@@ -65,6 +65,11 @@ export interface MirroringManagerOptions {
   /** A fresh Cast client for the device; the manager connects it and closes it when the route ends. */
   createClient(device: CastDevice): MirroringClient;
   createService: MirroringServiceFactory;
+  /**
+   * End the other kinds of route (Presentation API / Cast SDK sessions) that the page launched. Chrome keeps one route per
+   * frame in `routes_by_frame_` for every kind of route, so a page that becomes a mirroring source loses them.
+   */
+  terminateRoutesOfPage?(webContentsId: number): void;
   log?(level: "info" | "error", message: string): void;
 }
 
@@ -125,7 +130,7 @@ export class MirroringManager {
       if (entry.route.sinkId === sinkId) entry.activity.stopMirroring();
     }
     // `CastActivityManager::DoLaunchSession`: "If there is a route from this frame already, stop it."
-    if (source.type === "tab") this.stopRoutesOfTab(options.webContentsId!);
+    if (source.type === "tab") this.terminateRoutesOfTab(options.webContentsId!);
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
@@ -155,6 +160,7 @@ export class MirroringManager {
         for (const other of [...this.entries.values()]) {
           if (other !== entry && other.activity.webContentsId === tab) other.activity.stopMirroring();
         }
+        this.options.terminateRoutesOfPage?.(tab);
       },
     });
     entry.activity = activity;
@@ -217,10 +223,15 @@ export class MirroringManager {
     return true;
   }
 
-  private stopRoutesOfTab(webContentsId: number): void {
+  /**
+   * `CastActivityManager::DoLaunchSession`: a route launched from a frame ends the one that frame already has, of any
+   * kind. Also what a Presentation API route's launch does to a mirroring route of the same page.
+   */
+  terminateRoutesOfTab(webContentsId: number): void {
     for (const entry of [...this.entries.values()]) {
       if (entry.activity.webContentsId === webContentsId) entry.activity.stopMirroring();
     }
+    this.options.terminateRoutesOfPage?.(webContentsId);
   }
 
   dispose(): void {
