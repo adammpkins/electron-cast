@@ -3,7 +3,7 @@ import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
 import { CastTimeoutError } from "../client/index.ts";
 import {
-  ObservedMap, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
+  ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
@@ -77,6 +77,16 @@ export interface CastSessionServiceOptions {
   selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   emit(senderId: number, event: BridgeEvent): void;
+  /**
+   * DIAL sinks for the picker (see `requestSink`). `source` announces their changes (as `deviceChanged`); `available`
+   * lists the sinks that have the app for a page at `origin`; `monitor` makes the sink service find out, until the
+   * returned function is called.
+   */
+  dial?: {
+    source: DeviceSource;
+    available(appName: string, origin: string): CastDevice[];
+    monitor(appName: string): () => void;
+  };
 }
 
 interface SenderRecord {
@@ -179,6 +189,19 @@ function parseRequestSession(params: unknown): { appId: string; capabilities: st
   return { appId, capabilities, timeoutMs: timeout };
 }
 
+/** `requestSink` parameters: like `requestSession`'s, with the Cast app id optional and a DIAL app name. */
+function parseRequestSink(params: unknown): { appId: string | null; capabilities: string[]; timeoutMs: number } | null {
+  if (!isRecord(params)) return null;
+  const { appId, dialApp, capabilities, timeoutMs } = params;
+  if (appId !== null && typeof appId !== "string") return null;
+  if (dialApp !== null && typeof dialApp !== "string") return null;
+  if (appId === null && dialApp === null) return null;
+  if (!isStringArray(capabilities)) return null;
+  const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
+  if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
+  return { appId, capabilities, timeoutMs: timeout };
+}
+
 function parseSessionId(params: unknown): { sessionId: string } | null {
   if (!isRecord(params) || typeof params.sessionId !== "string") return null;
   return { sessionId: params.sessionId };
@@ -256,7 +279,7 @@ export class CastSessionService {
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
-    this.sinks = createSinksObservers(options.devices);
+    this.sinks = createSinksObservers(options.dial === undefined ? options.devices : combineSources(options.devices, options.dial.source));
     options.devices.on("deviceUp", this.deviceListener);
     options.devices.on("deviceDown", this.deviceListener);
     options.devices.on("deviceChanged", this.deviceListener);
@@ -276,6 +299,8 @@ export class CastSessionService {
           return await this.handleRequestSession(sender, params);
         case "joinSession":
           return this.handleJoinSession(sender, params, true);
+        case "requestSink":
+          return await this.handleRequestSession(sender, params, true);
         case "joinRunningSession":
           return await this.handleJoinRunningSession(sender, params);
         case "sendMessage":
@@ -368,39 +393,66 @@ export class CastSessionService {
     return good({ available, sessions: joined });
   }
 
-  private async handleRequestSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
-    const p = parseRequestSession(params);
+  /**
+   * `requestSession`, and (`main`) `requestSink`: the presentation handler's picker call, which may also offer DIAL
+   * sinks. A DIAL choice is returned as `{ dialSink }` and nothing is launched here.
+   */
+  private async handleRequestSession(sender: SenderInfo, params: unknown, main = false): Promise<BridgeResult> {
+    let dialApp: string | null = null;
+    let p: { appId: string | null; capabilities: string[]; timeoutMs: number } | null;
+    if (main) {
+      p = parseRequestSink(params);
+      if (p === null) return bad("invalid_parameter");
+      dialApp = (params as { dialApp?: unknown }).dialApp as string | null;
+    } else {
+      p = parseRequestSession(params);
+    }
     if (p === null) return bad("invalid_parameter");
+    const appId = p.appId;
+    const capabilities = p.capabilities;
+    const dial = dialApp !== null ? this.options.dial : undefined;
+    const dialAvailable = (): CastDevice[] => (dial !== undefined && dialApp !== null ? dial.available(dialApp, sender.origin) : []);
+    const castEligible = (): CastDevice[] =>
+      appId === null ? [] : this.options.devices.devices().filter((d) => deviceMatches(d, capabilities));
     if (this.pendingRequests.has(sender.id)) return bad("invalid_parameter");
     const discard = { value: false };
     const cancelled = { value: false };
     const pending: PendingRequest = { discard, cancelled };
     this.pendingRequests.set(sender.id, pending);
     try {
-      const eligible = this.options.devices.devices().filter((d) => deviceMatches(d, p.capabilities));
+      const eligible = [...castEligible(), ...dialAvailable()];
       if (eligible.length === 0) return bad("receiver_unavailable");
       const request: CastRequestInfo = {
-        appId: p.appId,
-        capabilities: p.capabilities,
+        appId: appId ?? "",
+        capabilities,
         origin: sender.origin,
         senderId: sender.id,
       };
-      const current = this.currentSessionFor(sender.id, p.appId);
+      const current = appId === null ? undefined : this.currentSessionFor(sender.id, appId);
       if (current !== undefined) {
         request.session = { sessionId: current.app.sessionId, deviceId: current.device.id };
       }
       let choice: DeviceChoice;
       // The picker gets live device updates until it answers; closing aborts its signal.
-      const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
+      const pick = createPickerContext(this.sinks, (d) =>
+        d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && deviceMatches(d, capabilities));
       pending.picker = pick;
+      const stopMonitoring = dial !== undefined && dialApp !== null ? dial.monitor(dialApp) : undefined;
       try {
         choice = await this.options.selectDevice(eligible, request, pick.context);
       } catch (err) {
         return bad("session_error", describe(err));
       } finally {
         pick.close();
+        stopMonitoring?.();
       }
       if (choice === null) return bad("cancel");
+      if (choice !== "stop" && choice.dial !== undefined) {
+        // Only a device offered for this request can be chosen.
+        if (!eligible.some((d) => d.id === choice.id)) return bad("receiver_unavailable");
+        return good({ dialSink: choice });
+      }
+      if (appId === null) return bad("invalid_parameter");
       if (choice === "stop") {
         const rec = request.session !== undefined ? this.sessions.get(request.session.sessionId) : undefined;
         if (rec === undefined) return bad("cancel");
@@ -422,7 +474,7 @@ export class CastSessionService {
         }, p.timeoutMs);
       });
       try {
-        const snapshot = await Promise.race([this.openSession(choice, p.appId, sender, discard, cancelled), bound]);
+        const snapshot = await Promise.race([this.openSession(choice, appId, sender, discard, cancelled), bound]);
         return good(snapshot);
       } catch (err) {
         if (err instanceof Discarded) return bad("timeout", "timed out");
@@ -902,6 +954,7 @@ export class CastSessionService {
   private routeOf(rec: SessionRecord): MediaRoute {
     return {
       id: rec.app.sessionId,
+      providerId: "cast",
       mediaSource: `cast:${rec.appId}`,
       sinkId: rec.device.id,
       description: rec.app.statusText || rec.app.displayName,

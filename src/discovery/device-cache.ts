@@ -13,6 +13,11 @@ export interface CastDevice {
   statusText: string;
   instanceName: string;
   txt: Record<string, string>;
+  /**
+   * Present on a DIAL sink (found by SSDP, not mDNS): `id` is then `dial:<uuid>`, `host` the device's address, `port` 0
+   * and `capabilities` 0. A device that is a Cast device never shows up as a DIAL sink, as in Chrome.
+   */
+  dial?: { appUrl: string; modelName: string; ipAddress: string };
 }
 
 /** Devices added, updated or removed by one ingest or expire call. */

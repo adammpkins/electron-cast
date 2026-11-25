@@ -5,6 +5,10 @@
 import { randomBytes } from "node:crypto";
 import type { BridgeEvent, InitializeResult, SessionSnapshot } from "../polyfill/bridge-types.ts";
 import type { CastSessionService } from "./session-service.ts";
+import type { DialService } from "../dial/index.ts";
+import { DialRouteError, DialRouteProvider } from "../dial/route-provider.ts";
+import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
+import type { CastDevice } from "../discovery/index.ts";
 import {
   MEDIA_NAMESPACE,
   envelope,
@@ -45,7 +49,16 @@ export class PresentationError extends Error {
 }
 
 /** A live getAvailability watch of one sender. */
-interface Watch { onchange: (value: boolean) => void }
+interface Watch {
+  onchange: (value: boolean) => void;
+  /** The request has a Cast URL: Cast availability events count. */
+  hasCast: boolean;
+  /** The request has a DIAL URL: DIAL availability counts. */
+  hasDial: boolean;
+  castAvailable: boolean;
+  dialAvailable: boolean;
+  last: boolean;
+}
 
 /** Per-sender handler state: its connections keyed by clientId, and its availability watches. */
 interface SenderState {
@@ -58,6 +71,8 @@ const MAX_PENDING_MEDIA = 100;
 /** Request ids wrap back to 1 past this value. */
 const REQUEST_ID_MAX = 2 ** 31;
 const CAST_SESSION_PREFIX = "cast-session_";
+/** `MediaRouterBase::CreatePresentationId`: every presentation id the Media Router makes starts with this. */
+const DIAL_PRESENTATION_PREFIX = "mr_";
 
 /** One presentation connection between the handler and a page. */
 class Conn implements PresentationConnectionHandle {
@@ -69,6 +84,8 @@ class Conn implements PresentationConnectionHandle {
   /** Media request ids handed out to the receiver, mapped back to the page's sequence numbers. */
   readonly pendingMedia = new Map<number, number>();
   sessionId: string | null;
+  /** The DIAL route this connection is on; null on a Cast session. */
+  dialRouteId: string | null = null;
   /** The latest session snapshot seen for this connection (namespaces, receiver). */
   snapshot: SessionSnapshot | null;
   onclose: ((reason: "closed" | "terminated") => void) | null = null;
@@ -147,25 +164,112 @@ class Conn implements PresentationConnectionHandle {
 /** Drives CastSessionService on behalf of pages speaking the presentation envelope. */
 export class CastPresentationHandler {
   private readonly service: Pick<CastSessionService, "handle">;
+  private readonly dial: DialService | undefined;
+  private readonly dialRoutesChanged: (() => void) | undefined;
   private readonly token: string;
   private readonly senders = new Map<number, SenderState>();
   private nextRequestId: number;
   private watchSeq = 0;
 
-  constructor(opts: { service: Pick<CastSessionService, "handle">; token?: string }) {
+  /**
+   * `dial` serves the `cast-dial:` sources of a request (its provider must use the same `token`). `dialRoutesChanged`
+   * is called when the pages holding a DIAL route change.
+   */
+  constructor(opts: { service: Pick<CastSessionService, "handle">; token?: string; dial?: DialService; dialRoutesChanged?: () => void }) {
     this.service = opts.service;
+    this.dial = opts.dial;
+    this.dialRoutesChanged = opts.dialRoutesChanged;
     this.token = opts.token ?? randomBytes(16).toString("hex");
     this.nextRequestId = 1 + Math.floor(Math.random() * (2 ** 30 - 1));
+    if (this.dial !== undefined) {
+      this.dial.provider.on("messages", (routeId, messages) => {
+        for (const conn of this.dialConns(routeId)) for (const m of messages) conn.deliver(m);
+      });
+      this.dial.provider.on("terminated", (routeId) => {
+        for (const conn of this.dialConns(routeId)) conn.end("terminated");
+        this.dialRoutesChanged?.();
+      });
+    }
   }
 
-  /** Is the app available on some receiver? Resolves false for unparseable URLs and failed calls. */
+  /** The open connections on a DIAL route. */
+  private dialConns(routeId: string): Conn[] {
+    const out: Conn[] = [];
+    for (const state of this.senders.values()) {
+      for (const conn of state.conns.values()) if (!conn.closed && conn.dialRouteId === routeId) out.push(conn);
+    }
+    return out;
+  }
+
+  /** The senders that hold a DIAL route with an open connection. */
+  dialMembers(routeId: string): number[] {
+    return [...new Set(this.dialConns(routeId).map((c) => c.senderId))];
+  }
+
+  /** The route's pages let go of it; the app keeps running on the device (nothing in Chrome stops it either). */
+  detachDialRoute(routeId: string): void {
+    for (const conn of this.dialConns(routeId)) conn.end("closed");
+    this.dialRoutesChanged?.();
+  }
+
+  /** The Cast and DIAL parts of a request's URLs. */
+  private classify(urls: string[]): { cast: ReturnType<typeof parsePresentationUrl>; castUrl: string; dialUrl: string | null; dialApp: string | null } {
+    let cast: ReturnType<typeof parsePresentationUrl> = null;
+    let castUrl = "";
+    let dialUrl: string | null = null;
+    let dialApp: string | null = null;
+    for (const url of urls) {
+      if (this.dial !== undefined && isDialSource(url)) {
+        const app = appNameFromDialSource(url);
+        if (dialUrl === null && app !== "") {
+          dialUrl = url;
+          dialApp = app;
+        }
+        continue;
+      }
+      if (cast === null) {
+        const parsed = parsePresentationUrl(url);
+        if (parsed !== null) {
+          cast = parsed;
+          castUrl = url;
+        }
+      }
+    }
+    return { cast, castUrl, dialUrl, dialApp };
+  }
+
+  /**
+   * Is the app available on some receiver? Resolves false for unparseable URLs and failed calls. A request with both
+   * Cast and DIAL URLs is available when either is (Blink ORs the sources of a request).
+   */
   async getAvailability(req: PresentationRequestInfo & { onchange(value: boolean): void; signal: AbortSignal }): Promise<boolean> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) return false;
+    const { cast, dialApp } = this.classify(req.urls);
+    if (cast === null && dialApp === null) return false;
     const state = this.senderState(req.senderId);
     const watchId = ++this.watchSeq;
-    state.watches.set(watchId, { onchange: req.onchange });
+    const watch: Watch = {
+      onchange: req.onchange, hasCast: cast !== null, hasDial: dialApp !== null,
+      castAvailable: false, dialAvailable: false, last: false,
+    };
+    state.watches.set(watchId, watch);
     const signal = req.signal;
+    const dial = this.dial;
+    if (dial !== undefined && dialApp !== null) {
+      // The sink service only asks devices about apps somebody monitors.
+      const release = dial.monitorApp(dialApp);
+      const recompute = (): void => {
+        watch.dialAvailable = dial.availableFor(dialApp, req.origin).length > 0;
+        this.reportWatch(watch, false);
+      };
+      dial.on("change", recompute);
+      watch.dialAvailable = dial.availableFor(dialApp, req.origin).length > 0;
+      const unwatch = (): void => {
+        release();
+        dial.off("change", recompute);
+      };
+      if (signal.aborted) unwatch();
+      else signal.addEventListener("abort", unwatch, { once: true });
+    }
     if (signal.aborted) {
       state.watches.delete(watchId);
     } else {
@@ -173,30 +277,59 @@ export class CastPresentationHandler {
         state.watches.delete(watchId);
       }, { once: true });
     }
-    const res = await this.service.handle(this.senderOf(req.senderId, req.origin), "initialize", {
-      appId: parsed.appId,
-      capabilities: parsed.capabilities,
-      autoJoinPolicy: "page_scoped",
-    });
-    if (!res.ok) return false;
-    return (res.value as InitializeResult).available;
+    if (cast !== null) {
+      const res = await this.service.handle(this.senderOf(req.senderId, req.origin), "initialize", {
+        appId: cast.appId,
+        capabilities: cast.capabilities,
+        autoJoinPolicy: "page_scoped",
+      });
+      watch.castAvailable = res.ok && (res.value as InitializeResult).available;
+    }
+    watch.last = watch.castAvailable || watch.dialAvailable;
+    return watch.last;
+  }
+
+  /** Tell the page when a watch's combined availability changed; a Cast-only watch is told on every service event. */
+  private reportWatch(watch: Watch, castEvent: boolean): void {
+    const value = watch.castAvailable || watch.dialAvailable;
+    if (!watch.hasDial && castEvent) {
+      watch.last = value;
+      watch.onchange(value);
+      return;
+    }
+    if (value === watch.last) return;
+    watch.last = value;
+    watch.onchange(value);
   }
 
   /** Launches the app and resolves with a connection carrying receiver_action then new_session. */
   async startPresentation(req: PresentationRequestInfo): Promise<PresentationConnectionHandle> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const { cast: parsed, castUrl, dialUrl, dialApp } = this.classify(req.urls);
+    if (parsed === null && dialUrl === null) {
+      throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    }
     const sender = this.senderOf(req.senderId, req.origin);
-    const res = await this.service.handle(sender, "requestSession", {
-      appId: parsed.appId,
-      capabilities: [],
-      timeoutMs: parsed.launchTimeout ?? 60000,
-    });
+    // With a DIAL URL the picker may also offer DIAL sinks; the user's choice decides which URL is used.
+    const res = dialUrl !== null
+      ? await this.service.handle(sender, "requestSink", {
+        appId: parsed?.appId ?? null,
+        dialApp,
+        capabilities: [],
+        timeoutMs: parsed?.launchTimeout ?? 60000,
+      })
+      : await this.service.handle(sender, "requestSession", {
+        appId: parsed!.appId,
+        capabilities: [],
+        timeoutMs: parsed!.launchTimeout ?? 60000,
+      });
     if (!res.ok) {
       if (res.code === "cancel") throw new PresentationError("AbortError", res.description ?? "The user cancelled the request");
       if (res.code === "receiver_unavailable") throw new PresentationError("NotFoundError", res.description ?? "No receivers are available");
       throw new PresentationError("OperationError", res.description ?? res.code);
     }
+    const chosen = (res.value as { dialSink?: CastDevice } | null)?.dialSink;
+    if (dialUrl !== null && chosen !== undefined) return this.startDial(req, dialUrl, chosen);
+    if (parsed === null) throw new PresentationError("OperationError", "No receiver was chosen");
     const s = res.value as SessionSnapshot;
     const clientId = parsed.clientId ?? randomBytes(16).toString("hex");
     const state = this.senderState(req.senderId);
@@ -205,7 +338,7 @@ export class CastPresentationHandler {
       state.conns.delete(clientId);
       previous.end("closed");
     }
-    const conn = new Conn(this, `${CAST_SESSION_PREFIX}${s.sessionId}`, (req.urls[0] ?? ""), req.senderId, req.origin, clientId, s.sessionId, s);
+    const conn = new Conn(this, `${CAST_SESSION_PREFIX}${s.sessionId}`, castUrl, req.senderId, req.origin, clientId, s.sessionId, s);
     state.conns.set(clientId, conn);
     const label = receiverLabel(s.receiver.label, this.token);
     conn.deliver(envelope("receiver_action", { receiver: toReceiver(s.receiver, label), action: "cast" }, clientId));
@@ -223,8 +356,12 @@ export class CastPresentationHandler {
 
   /** Rejoins an existing session; the connection carries new_session only. */
   async reconnectPresentation(req: PresentationRequestInfo & { presentationId: string }): Promise<PresentationConnectionHandle> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const { cast: parsed, castUrl, dialUrl } = this.classify(req.urls);
+    if (parsed === null && dialUrl === null) {
+      throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    }
+    if (dialUrl !== null && req.presentationId.startsWith(DIAL_PRESENTATION_PREFIX)) return this.joinDial(req, dialUrl);
+    if (parsed === null) throw new PresentationError("NotFoundError", `Unknown presentation id: ${req.presentationId}`);
     const sender = this.senderOf(req.senderId, req.origin);
     const presentationId = req.presentationId;
     let snapshot: SessionSnapshot;
@@ -259,10 +396,47 @@ export class CastPresentationHandler {
       state.conns.delete(clientId);
       previous.end("closed");
     }
-    const conn = new Conn(this, presentationId, (req.urls[0] ?? ""), req.senderId, req.origin, clientId, snapshot.sessionId, snapshot);
+    const conn = new Conn(this, presentationId, castUrl, req.senderId, req.origin, clientId, snapshot.sessionId, snapshot);
     state.conns.set(clientId, conn);
     const label = receiverLabel(snapshot.receiver.label, this.token);
     conn.deliver(envelope("new_session", toSession(snapshot, label), clientId));
+    return conn;
+  }
+
+  /** Creates the DIAL route on the chosen sink; the connection carries receiver_action, then new_session. */
+  private async startDial(req: PresentationRequestInfo, source: string, sink: CastDevice): Promise<PresentationConnectionHandle> {
+    const dial = this.dial!;
+    let created: ReturnType<DialRouteProvider["createRoute"]>;
+    try {
+      created = dial.provider.createRoute(source, sink.id, DialRouteProvider.newPresentationId(), req.origin);
+    } catch (err) {
+      // Chrome maps any failed route creation to PresentationErrorType::UNKNOWN, which Blink raises as OperationError.
+      throw new PresentationError("OperationError", err instanceof DialRouteError ? `${err.code}: ${err.message}` : String(err));
+    }
+    const { route, messages } = created;
+    const conn = this.attachDial(req, route.presentationId, source, route.id, route.clientId);
+    for (const m of messages) conn.deliver(m);
+    return conn;
+  }
+
+  /** `DialMediaRouteProvider::JoinRoute`: the same presentation id, source and origin; no message follows. */
+  private async joinDial(req: PresentationRequestInfo & { presentationId: string }, source: string): Promise<PresentationConnectionHandle> {
+    const route = this.dial!.provider.joinRoute(req.presentationId, source, req.origin);
+    if (route === null) throw new PresentationError("NotFoundError", "No matching route");
+    return this.attachDial(req, route.presentationId, source, route.id, route.clientId);
+  }
+
+  private attachDial(req: PresentationRequestInfo, presentationId: string, source: string, routeId: string, clientId: string): Conn {
+    const state = this.senderState(req.senderId);
+    const previous = state.conns.get(clientId);
+    if (previous !== undefined) {
+      state.conns.delete(clientId);
+      previous.end("closed");
+    }
+    const conn = new Conn(this, presentationId, source, req.senderId, req.origin, clientId, null, null);
+    conn.dialRouteId = routeId;
+    state.conns.set(clientId, conn);
+    this.dialRoutesChanged?.();
     return conn;
   }
 
@@ -272,7 +446,11 @@ export class CastPresentationHandler {
     if (state === undefined) return;
     switch (event.type) {
       case "receiverAvailability": {
-        for (const watch of state.watches.values()) watch.onchange(event.available);
+        for (const watch of state.watches.values()) {
+          if (!watch.hasCast) continue;
+          watch.castAvailable = event.available;
+          this.reportWatch(watch, true);
+        }
         return;
       }
       case "sessionUpdated": {
@@ -323,6 +501,7 @@ export class CastPresentationHandler {
     this.senders.delete(senderId);
     for (const conn of state.conns.values()) conn.end("closed");
     state.watches.clear();
+    this.dialRoutesChanged?.();
   }
 
   /** The next fresh media request id: incremented per use, wrapping back to 1 past 2^31. */
@@ -381,6 +560,11 @@ export class CastPresentationHandler {
   /** One inbound envelope from the page (already checked that the connection is open). */
   /** @internal Called by Conn. */
   dispatch(conn: Conn, raw: string): void {
+    if (conn.dialRouteId !== null) {
+      // The DIAL provider has its own message rules (no clientId check), so the Cast codec is bypassed.
+      this.dial?.provider.sendRouteMessage(conn.dialRouteId, raw);
+      return;
+    }
     const env = parseEnvelope(raw);
     if (env === null) return;
     if (env.clientId !== conn.clientId) return;
@@ -507,6 +691,12 @@ export class CastPresentationHandler {
   /** @internal Called by Conn. */
   pageClosed(conn: Conn): void {
     if (conn.closed) return;
+    if (conn.dialRouteId !== null) {
+      // `DialMediaRouteProvider::DetachRoute` is NOTIMPLEMENTED: the route and the app keep running.
+      conn.end("closed");
+      this.dialRoutesChanged?.();
+      return;
+    }
     if (conn.sessionId !== null) {
       void this.service.handle(this.senderOf(conn.senderId, conn.origin), "leaveSession", { sessionId: conn.sessionId });
     }
@@ -516,6 +706,12 @@ export class CastPresentationHandler {
   /** @internal Called by Conn. */
   pageTerminated(conn: Conn): void {
     if (conn.closed) return;
+    if (conn.dialRouteId !== null) {
+      // The provider reports the termination to every connection of the route, this one included; a route that is
+      // already gone is reported here instead.
+      void this.dial?.provider.terminateRoute(conn.dialRouteId).catch(() => undefined).then(() => conn.end("terminated"));
+      return;
+    }
     if (conn.sessionId !== null) {
       void this.service.handle(this.senderOf(conn.senderId, conn.origin), "stopSession", { sessionId: conn.sessionId });
     }

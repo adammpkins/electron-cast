@@ -93,7 +93,7 @@ test("a sinks observer gets the current list, then each change, with Chrome-styl
   const stop = manager.registerMediaSinksObserver({ onSinksUpdated: (s) => seen.push(s) });
   assert.deepEqual(seen[0]?.map((s) => s.id), ["dev-tv", "dev-speaker", "dev-group"]);
   assert.deepEqual(seen[0]?.map((s) => s.iconType), ["cast", "cast_audio", "cast_audio_group"]);
-  assert.deepEqual(seen[0]?.[0], { id: "dev-tv", name: TV.name, description: TV.model, iconType: "cast", device: TV });
+  assert.deepEqual(seen[0]?.[0], { id: "dev-tv", providerId: "cast", name: TV.name, description: TV.model, iconType: "cast", device: TV });
   const lamp = device({ id: "dev-lamp", name: "Lamp", capabilities: 4 });
   discovery.up(lamp);
   assert.equal(seen.length, 2);
