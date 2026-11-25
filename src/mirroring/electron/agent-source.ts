@@ -196,7 +196,7 @@ export const AGENT_SOURCE = String.raw`
       if (lastFrameClone) lastFrameClone.close();
       lastFrameClone = frame.clone();
       holdFrame(rtp, frame);
-      send({ t: "frame", rtp, refMs, width: frame.displayWidth, height: frame.displayHeight });
+      send({ t: "frame", rtp, refMs, width: frame.displayWidth, height: frame.displayHeight, captureBeginMs: refMs, captureEndMs: Math.max(refMs, arrivalMs) });
     }
   }
 

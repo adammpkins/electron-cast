@@ -247,3 +247,23 @@ test("agent: frames are stamped with the capture time from the frame metadata wh
   assert.equal(frames[0]!.refMs, 1000);
   assert.ok(Math.abs(frames[1]!.refMs - 1033.3) < 1e-6);
 });
+
+test("port backend: the capture begin and end times of a frame reach the encoded frame (FRAME_CAPTURE_BEGIN / FRAME_CAPTURE_END)", () => {
+  const port = new FakePort();
+  const backend = new PortBackend(port, { kind: "tab", mediaSourceId: "x" });
+  const base = performance.timeOrigin;
+  const seen: { begin: number | undefined; end: number | undefined }[] = [];
+  const encoder = backend.createVideoEncoder(
+    { maxFrameRate: 30, startBitrate: 1e6, codecParameter: "vp8", videoCodec: "vp8" } as never,
+    { onEncoded: (_ref, f) => seen.push({ begin: f?.captureBeginTimeMs, end: f?.captureEndTimeMs }), onStatus() {} },
+  );
+  backend.startVideoCapture({} as never, {
+    insertVideoFrame: (f) => { encoder.encodeVideoFrame(f, f.referenceTimeMs!); },
+    onCaptureError() {},
+  });
+  port.emit({ t: "frame", rtp: 90_000, refMs: base + 1000, width: 640, height: 360, captureBeginMs: base + 1000, captureEndMs: base + 1004 });
+  port.emit({ t: "video-chunk", rtp: 90_000, key: true, data: new ArrayBuffer(3), encodeMs: 1 });
+  port.emit({ t: "frame", rtp: 93_000, refMs: base + 1033, width: 640, height: 360 });
+  port.emit({ t: "video-chunk", rtp: 93_000, key: false, data: new ArrayBuffer(3), encodeMs: 1 });
+  assert.deepEqual(seen, [{ begin: 1000, end: 1004 }, { begin: undefined, end: undefined }]);
+});

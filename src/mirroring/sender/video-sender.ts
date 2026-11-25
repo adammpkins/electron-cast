@@ -36,6 +36,9 @@ export interface RawVideoFrame {
   visibleRectEmpty: boolean;
   /** `VideoFrameMetadata::interactive_content`. */
   interactiveContent?: boolean;
+  /** `VideoFrameMetadata::capture_begin_time` and `capture_end_time` (sender clock); they reach `FRAME_CAPTURE_BEGIN/END`. */
+  captureBeginTimeMs?: number;
+  captureEndTimeMs?: number;
 }
 
 export interface VideoSenderConfig {

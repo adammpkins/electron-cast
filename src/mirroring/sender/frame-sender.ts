@@ -52,6 +52,9 @@ export interface SenderEncodedFrame {
   /** -1 when not computed. */
   encoderUtilization: number;
   lossiness?: number;
+  /** `SenderEncodedFrame::capture_begin_time` / `capture_end_time`. */
+  captureBeginTimeMs?: number;
+  captureEndTimeMs?: number;
 }
 
 /** The parts of the openscreen `Sender` the policy needs. */
@@ -206,6 +209,8 @@ export class FrameSender implements SenderObserver {
       referenceTimeMs: frame.referenceTimeMs,
       newPlayoutDelayMs,
       data: frame.data,
+      ...(frame.captureBeginTimeMs !== undefined ? { captureBeginTimeMs: frame.captureBeginTimeMs } : {}),
+      ...(frame.captureEndTimeMs !== undefined ? { captureEndTimeMs: frame.captureEndTimeMs } : {}),
     });
     if (result === "OK") {
       this.lastAccepted = { frameId: frame.frameId, openscreenFrameId };

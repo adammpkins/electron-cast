@@ -291,3 +291,12 @@ test("a dropped frame is described once a second with the figures behind the dec
   assert.match(lines[0]!, /^video frame dropped \(kTooManyFramesInFlight\):.*limit 100 ms.*unacked 120/);
   assert.match(lines[1]!, /1 more drops since the last line/);
 });
+
+test("the capture begin and end times travel with the frame into the sender", () => {
+  const { sender, fs } = make();
+  fs.enqueueFrame(frame(0, { captureBeginTimeMs: 100, captureEndTimeMs: 104 }));
+  fs.enqueueFrame(frame(1));
+  assert.equal(sender.enqueued[0]!.captureBeginTimeMs, 100);
+  assert.equal(sender.enqueued[0]!.captureEndTimeMs, 104);
+  assert.equal("captureBeginTimeMs" in sender.enqueued[1]!, false);
+});

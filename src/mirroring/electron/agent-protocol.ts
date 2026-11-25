@@ -46,7 +46,8 @@ export type EngineToAgent =
 export type AgentToEngine =
   | { t: "ready" }
   | { t: "error"; where: "video" | "audio" | "encoder"; message: string }
-  | { t: "frame"; rtp: number; refMs: number; width: number; height: number }
+  /** `captureBeginMs` / `captureEndMs` are epoch times: when capture began (frame metadata) and when the frame was read. */
+  | { t: "frame"; rtp: number; refMs: number; width: number; height: number; captureBeginMs?: number; captureEndMs?: number }
   | { t: "video-chunk"; rtp: number; key: boolean; data: ArrayBuffer; encodeMs: number }
   /** The frame never produced a chunk (encoder queue full, evicted, unsupported, or swallowed by the encoder). */
   | { t: "video-drop"; rtp: number }
