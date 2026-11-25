@@ -52,6 +52,11 @@ export type EngineToAgent =
   | { t: "encode-audio"; seq: number }
   | { t: "drop-audio"; seq: number }
   | { t: "set-audio"; bps: number }
+  /**
+   * Answer with `wake` after `ms` milliseconds. The engine's delayed tasks use the renderer's timer, which is
+   * Chromium's and so punctual where Node's is not (transport/delayed-tasks.ts).
+   */
+  | { t: "wake"; id: number; ms: number }
   | { t: "stop" };
 
 export type AgentToEngine =
@@ -74,6 +79,8 @@ export type AgentToEngine =
   | { t: "log"; message: string }
   | { t: "audio-buffer"; seq: number; frames: number; recMs: number }
   | { t: "audio-chunk"; seq: number; data: ArrayBuffer }
+  /** The time a `wake` request asked for has come. */
+  | { t: "wake"; id: number }
   | { t: "encoder-status"; kind: "video" | "audio"; status: "initialized" | "unsupported_codec" | "codec_init_failed" | "codec_runtime_error"; message?: string };
 
 /** The slice of Electron's `MessagePortMain` the engine side uses. */

@@ -100,4 +100,6 @@ export interface MirroringBackend {
   suspendVideoDevice(): void;
   resumeVideoDevice(): void;
   processFeedback(resourceUtilization: number): void;
+  /** A backend with a punctual timer lends it to the session's delayed tasks (transport/delayed-tasks.ts `WakeSource`). */
+  requestWake?(delayMs: number, wake: () => void): void;
 }

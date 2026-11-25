@@ -23,7 +23,9 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
     const router = new SenderPacketRouter(environment);
     const backend = options.createBackend();
     backend.log = (message) => observer.logInfo?.(message);
+    if (backend.requestWake !== undefined) environment.setWakeSource({ requestWake: (delayMs, wake) => backend.requestWake?.(delayMs, wake) });
     router.debugLog = (message) => observer.logInfo?.(message);
+    environment.debugLog = (message) => observer.logInfo?.(message);
     let host: OpenscreenSessionHost | undefined;
     let closed = false;
     const close = (): void => {

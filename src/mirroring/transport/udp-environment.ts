@@ -4,8 +4,9 @@
  * (`SendPacket`), packets received only from exactly that endpoint (`SenderPacketRouter::OnReceivedPacket`), and the
  * maximum packet size by address family (`GetMaxPacketSize`).
  *
- * Time is `performance.now()` in milliseconds (a monotonic clock, as `openscreen::Clock::now`); timers are Node timers.
- * Node's `dgram` is the only dependency, so this runs unchanged in an Electron `utilityProcess` or in a test.
+ * Time is `performance.now()` in milliseconds (a monotonic clock, as `openscreen::Clock::now`); delayed tasks go
+ * through a `DelayedTaskQueue`, which is what stands in for Chrome's task runner. Node's `dgram` is the only
+ * dependency, so this runs unchanged in an Electron `utilityProcess` or in a test.
  */
 import { createSocket, type Socket } from "node:dgram";
 import { isIPv6 } from "node:net";
@@ -13,6 +14,7 @@ import { performance } from "node:perf_hooks";
 import { MAX_RTP_PACKET_SIZE_IPV4, MAX_RTP_PACKET_SIZE_IPV6 } from "../protocol/constants.ts";
 import type { StatisticsCollector } from "../stats/statistics-collector.ts";
 import type { SessionEnvironment } from "../sender/sender-session.ts";
+import { DelayedTaskQueue, type WakeSource } from "./delayed-tasks.ts";
 
 export type ReceivedPacketHandler = (arrivalTimeMs: number, packet: Buffer) => void;
 
@@ -22,6 +24,7 @@ export class UdpEnvironment implements SessionEnvironment {
   private remote: { address: string; port: number } | undefined;
   private handler: ReceivedPacketHandler | undefined;
   private closed = false;
+  private readonly tasks = new DelayedTaskQueue(() => this.now());
   /** Called on a socket error that makes the stream unusable (`Environment::OnError`). */
   onSocketError: ((error: Error) => void) | undefined;
   /** `Environment::SetStatisticsCollector`: set by the session while statistics are on. */
@@ -81,9 +84,19 @@ export class UdpEnvironment implements SessionEnvironment {
     this.socket.send(packet, remote.port, remote.address);
   }
 
+  /** The `TaskRunner` under openscreen's `Alarm`: `PostTask` when `atMs` is not in the future, else `PostTaskWithDelay`. */
   schedule(atMs: number, cb: () => void): () => void {
-    const timer = setTimeout(cb, Math.max(0, atMs - this.now()));
-    return () => clearTimeout(timer);
+    return this.tasks.schedule(atMs, cb);
+  }
+
+  /** A timer more punctual than Node's (see delayed-tasks.ts), when the process has one. */
+  setWakeSource(source: WakeSource | undefined): void {
+    this.tasks.wakeSource = source;
+  }
+
+  /** Where the delayed tasks write their statistics (a debug aid). */
+  set debugLog(log: ((message: string) => void) | undefined) {
+    this.tasks.debugLog = log;
   }
 
   /** `SetReceiveBufferSize` / `SetSendBufferSize`. */
@@ -95,6 +108,7 @@ export class UdpEnvironment implements SessionEnvironment {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.tasks.close();
     this.socket.close();
   }
 }
