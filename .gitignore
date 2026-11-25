@@ -8,3 +8,4 @@ site/.vitepress/cache/
 site/.vitepress/dist/
 site/brand/.cache/
 examples/live-iframe/.out/
+examples/live-checks/.out/
