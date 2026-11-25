@@ -77,7 +77,7 @@ test("discovery lists a device as its manufacturer and model only, and reads the
 
 test("a device that also accepts TLS on the Cast port is reported, and nothing is sent on the connection", async () => {
   await withDevice(async (device) => {
-    const result = await runDialTest(options(device, { launch: false }), script([]).io);
+    const result = await runDialTest(options(device, { launch: false, deviceIndex: 1 }), script([]).io);
     assert.match(result.report, /\*\*INFO\*\* TLS connection on port \d+ .*: accepted: TLS handshake completed \(TLSv1\.[23]\)/);
     // The device sees the connection a moment after the client has closed it.
     for (let i = 0; i < 100 && device.tlsConnections === 0; i++) await new Promise((r) => setTimeout(r, 10));
@@ -99,6 +99,41 @@ test("the report names no friendly name, serial number, UDN, MAC, address, host 
   });
 });
 
+test("a 403 on app info is reported as the device's refusal, without a network error code outside the request table", async () => {
+  await withDevice(async (device) => {
+    device.refuseOrigin = true;
+    const s = script([]);
+    const result = await runDialTest(options(device), s.io);
+    const [results = "", requests = ""] = result.report.split("## Requests");
+    assert.match(results, /\*\*INFO\*\* App info: YouTube: GET 403: the device refused requests that carry Chrome's DIAL origin \(Cast devices do this; Chrome treats the app as unavailable over DIAL and reaches them over Cast instead\)/);
+    assert.match(results, /\*\*INFO\*\* App info: Netflix: GET 403: the device refused/);
+    assert.ok(!results.includes("net::Error"), results);
+    assert.ok(!s.printed.join("\n").includes("net::Error"));
+    assert.match(requests, /\| GET http:\/\/192\.0\.2\.1:\d+\/apps\/YouTube \| 403 \(Internal net::Error: -379\) \|/);
+    assert.match(results, /\*\*SKIP\*\* Launch YouTube: the device did not give usable app info/);
+    assert.deepEqual(s.asked, []);
+  });
+});
+
+test("a device that accepts TLS on the Cast port is marked as a Cast device, is not launched on, and ends the run with the DIAL-only note", async () => {
+  await withDevice(async (device) => {
+    const s = script(["y"]);
+    const result = await runDialTest(options(device), s.io);
+    assert.ok(s.printed.includes("  1. Acme Electronics Smart TV 9000  (also a Cast device: shown as Cast, not DIAL)"), s.printed.join("\n"));
+    assert.ok(s.printed.includes("No DIAL-only TV found. This test is for TVs without built-in Chromecast."));
+    assert.deepEqual(s.asked, [], "all devices are Cast devices: nothing is picked or opened");
+    assert.match(result.report, /## Devices found\n\n- 1\. Acme Electronics Smart TV 9000 \(accepts TLS on the Cast port: a Cast device\)/);
+    assert.match(result.report, /\*\*INFO\*\* DIAL-only TV: No DIAL-only TV found/);
+    assert.deepEqual(device.seen.filter((r) => r.method !== "GET"), []);
+
+    // Asked for by number, it is still read, and the launch is still skipped.
+    const named = await runDialTest(options(device, { deviceIndex: 1 }), script(["y"]).io);
+    assert.match(named.report, /\*\*INFO\*\* Cast device: This device accepts TLS on the Cast port, so it is a Cast device\. electron-cast, like Chrome, shows it as a Cast device rather than a DIAL one \(CreateCastSinkFromDialSink\)/);
+    assert.match(named.report, /\*\*SKIP\*\* Launch YouTube: this is a Cast device/);
+    assert.deepEqual(device.seen.filter((r) => r.method !== "GET"), []);
+  }, { cast: true });
+});
+
 test("the scrubber maps an address once and never maps its own output again", () => {
   const scrubber = new Scrubber();
   scrubber.secret("Bedroom Roku", "<friendly name>");
@@ -108,6 +143,13 @@ test("the scrubber maps an address once and never maps its own output again", ()
   assert.equal(out, "GET http://192.0.2.1:8008/apps and again 192.0.2.1, then 192.0.2.2; mac <mac>; <friendly name>; "
     + "uuid <uuid>; http://host.invalid/x; http://[<ipv6>]:80/");
   assert.equal(scrubber.scrub(out), out);
+});
+
+test("a version that looks like an address is not taken for one", () => {
+  const scrubber = new Scrubber();
+  const text = "- OS: Linux 5.15.167.4-microsoft-standard-WSL2 (x64)\n- Browser identity sent: Chrome/142.0.0.0\n- Firmware version: 10.2.3.4\n"
+    + "UA Chrome/142.0.0.0 Windows, version 9.8.7.6, firmware: 1.2.3.4\n- Application-URL: http://10.1.2.3:8008/apps/\n";
+  assert.equal(scrubber.scrub(text), text.replace("10.1.2.3", "192.0.2.1"));
 });
 
 test("app info keeps its shape and loses what is under additionalData", () => {

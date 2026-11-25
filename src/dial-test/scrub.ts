@@ -8,7 +8,13 @@ const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g
 /** A UUID without dashes, as the library writes a sink id. */
 const BARE_UUID = /\b[0-9a-f]{32}\b/gi;
 const MAC = /\b[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}\b/gi;
-const IPV4 = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
+/**
+ * Four dotted numbers are an address only where one is expected. A version (Chrome/142.0.0.0, a kernel release, a
+ * firmware string) looks the same, so the report lines that carry versions, and any value right after "Chrome/" or a
+ * word like version or firmware, are left alone.
+ */
+const VERSION_LINE = /^\s*- (?:OS|Node|electron-cast|Browser identity[^:]*|(?:Software|Firmware|Hardware) version|Model number|Server header): /;
+const IPV4 = /(?<!(?:Chrome\/|[Vv]ersion[:= ]*|[Ff]irmware[:= ]*|[Rr]elease[:= ]*))\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
 const IPV6 = /\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b|\bfe80::[0-9a-f:]*/gi;
 const URL_HOST = /\b(https?:\/\/)(?:[^\s/@<>"']*@)?(\[[0-9a-f:.]+\]|[^\s/:?#<>"'[]+)/gi;
 
@@ -55,7 +61,8 @@ export class Scrubber {
     out = out.replace(UUID, "<uuid>").replace(MAC, "<mac>").replace(BARE_UUID, "<uuid>");
     out = out.replace(IPV6, "<ipv6>");
     // Text that was scrubbed already keeps its documentation addresses.
-    out = out.replace(IPV4, (ip) => (this.ips.has(ip) || !this.mapped.has(ip) ? this.ip(ip) : ip));
+    const address = (ip: string): string => (this.ips.has(ip) || !this.mapped.has(ip) ? this.ip(ip) : ip);
+    out = out.split("\n").map((line) => (VERSION_LINE.test(line) ? line : line.replace(IPV4, address))).join("\n");
     return out;
   }
 
