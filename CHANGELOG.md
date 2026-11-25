@@ -6,6 +6,8 @@
   preload built from `electron-cast/preload`, `createCastManager` from `electron-cast/main` with a fake device, both
   modes. `npm run smoke` runs it locally.
 - `package.json` declares an optional peer dependency on `electron >=35`.
+- A weekly canary (`npm run canary`, `tools/sdk-canary.mjs`) fetches Google's Cast sender SDK for the current Chrome
+  majors and checks it still speaks the message envelope the translator expects. A failed run opens one issue.
 
 ## 0.3.1
 
