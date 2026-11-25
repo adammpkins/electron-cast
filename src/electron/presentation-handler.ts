@@ -10,7 +10,6 @@ import {
   envelope,
   isMediaRequest,
   parseEnvelope,
-  parsePresentationUrl,
   receiverLabel,
   receiverMediaType,
   toMediaEntry,
@@ -18,6 +17,7 @@ import {
   toSession,
 } from "./presentation-envelope.ts";
 import type { ParsedEnvelope } from "./presentation-envelope.ts";
+import { chooseSource } from "./presentation-source.ts";
 
 export interface PresentationRequestInfo { urls: string[]; origin: string; senderId: number }
 
@@ -160,8 +160,10 @@ export class CastPresentationHandler {
 
   /** Is the app available on some receiver? Resolves false for unparseable URLs and failed calls. */
   async getAvailability(req: PresentationRequestInfo & { onchange(value: boolean): void; signal: AbortSignal }): Promise<boolean> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) return false;
+    // Mirroring and remote-playback sources have no sink here, so they are unavailable (see presentation-source.ts)
+    const choice = chooseSource(req.urls);
+    if (choice.kind !== "launch") return false;
+    const parsed = choice.parsed;
     const state = this.senderState(req.senderId);
     const watchId = ++this.watchSeq;
     state.watches.set(watchId, { onchange: req.onchange });
@@ -184,8 +186,11 @@ export class CastPresentationHandler {
 
   /** Launches the app and resolves with a connection carrying receiver_action then new_session. */
   async startPresentation(req: PresentationRequestInfo): Promise<PresentationConnectionHandle> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const choice = chooseSource(req.urls);
+    // PresentationServiceImpl::StartPresentation: "No screens found." (NotFoundError) when nothing can serve the request
+    if (choice.kind === "no_sink") throw new PresentationError("NotFoundError", "No screens found.");
+    if (choice.kind === "unsupported") throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const { parsed } = choice;
     const sender = this.senderOf(req.senderId, req.origin);
     const res = await this.service.handle(sender, "requestSession", {
       appId: parsed.appId,
@@ -205,7 +210,7 @@ export class CastPresentationHandler {
       state.conns.delete(clientId);
       previous.end("closed");
     }
-    const conn = new Conn(this, `${CAST_SESSION_PREFIX}${s.sessionId}`, (req.urls[0] ?? ""), req.senderId, req.origin, clientId, s.sessionId, s);
+    const conn = new Conn(this, `${CAST_SESSION_PREFIX}${s.sessionId}`, choice.url, req.senderId, req.origin, clientId, s.sessionId, s);
     state.conns.set(clientId, conn);
     const label = receiverLabel(s.receiver.label, this.token);
     conn.deliver(envelope("receiver_action", { receiver: toReceiver(s.receiver, label), action: "cast" }, clientId));
@@ -223,8 +228,10 @@ export class CastPresentationHandler {
 
   /** Rejoins an existing session; the connection carries new_session only. */
   async reconnectPresentation(req: PresentationRequestInfo & { presentationId: string }): Promise<PresentationConnectionHandle> {
-    const parsed = parsePresentationUrl((req.urls[0] ?? ""));
-    if (parsed === null) throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const choice = chooseSource(req.urls);
+    if (choice.kind === "no_sink") throw new PresentationError("NotFoundError", "No matching route");
+    if (choice.kind === "unsupported") throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
+    const { parsed } = choice;
     const sender = this.senderOf(req.senderId, req.origin);
     const presentationId = req.presentationId;
     let snapshot: SessionSnapshot;
@@ -259,7 +266,7 @@ export class CastPresentationHandler {
       state.conns.delete(clientId);
       previous.end("closed");
     }
-    const conn = new Conn(this, presentationId, (req.urls[0] ?? ""), req.senderId, req.origin, clientId, snapshot.sessionId, snapshot);
+    const conn = new Conn(this, presentationId, choice.url, req.senderId, req.origin, clientId, snapshot.sessionId, snapshot);
     state.conns.set(clientId, conn);
     const label = receiverLabel(snapshot.receiver.label, this.token);
     conn.deliver(envelope("new_session", toSession(snapshot, label), clientId));

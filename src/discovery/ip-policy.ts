@@ -27,7 +27,7 @@ function ipv6Bytes(text: string): Uint8Array {
   const halves = s.split("::");
   const head = (halves[0] ?? "") === "" ? [] : (halves[0] ?? "").split(":");
   const tail = halves.length < 2 || (halves[1] ?? "") === "" ? [] : (halves[1] ?? "").split(":");
-  const groups = halves.length < 2 ? head : [...head, ...new Array<string>(8 - head.length - tail.length).fill("0"), ...tail];
+  const groups = halves.length < 2 ? head : [...head, ...Array.from({ length: 8 - head.length - tail.length }, () => "0"), ...tail];
   const out = new Uint8Array(16);
   groups.forEach((g, i) => {
     const n = parseInt(g, 16);
