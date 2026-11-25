@@ -108,7 +108,8 @@ test("the first RTCP is a sender report, sent before RTP; RTP is paced in bursts
   env.advance(100);
   const rest = env.takeSent();
   // 20 RTP packets total (+ a second sender report after 500 ms is not yet due).
-  assert.ok(rest.length >= 20 - 3 - 4, "the rest, plus kickstart repeats of the last packet while nothing is acknowledged");
+  // Kickstart repeats of the last packet follow ChooseKickstartPacket (sender_impl.cc) while nothing is acknowledged.
+  assert.ok(rest.length >= 20 - 3 - 4);
   const ids = [...first.slice(1), ...second, ...rest].map((p) => parseRtpPacket(p)!.packetId).slice(0, 20);
   assert.deepEqual(ids, Array.from({ length: 20 }, (_, i) => i));
 });
@@ -126,11 +127,12 @@ test("a checkpoint acknowledges frames, reports cancellations and feeds the band
   assert.equal(sender.checkpoint, 0);
 });
 
-test("a NACK retransmits the packet, with a new sequence number,", () => {
+test("a NACK retransmits the packet, with a new sequence number", () => {
   const { env, sender, ntp } = makeSession();
   sender.enqueueFrame(frame(0, 3 * 1449 - 10)); // 3 packets
   env.advance(30);
   const original = env.takeSent().filter((p) => p[1]! !== 200 && (p[1]! & 0x7f) === 100);
+  // Kickstart repeats of the last packet are expected (sender_impl_unittest.cc ProvidesKickstartPacketsIfReceiverDoesNotACK), so count distinct ids.
   assert.equal(new Set(original.map((p) => parseRtpPacket(p)!.packetId)).size, 3);
   env.advance(200);
   env.takeSent();
@@ -166,6 +168,8 @@ test("payloads decrypt with the negotiated key and mask", () => {
   sender.enqueueFrame(f);
   env.advance(30);
   const rtp = env.takeSent().filter((p) => (p[1]! & 0x7f) === 100);
+  // sender_impl.cc ChooseKickstartPacket: the last packet of the newest frame is resent while the receiver has not acknowledged it
+  // (sender_impl_unittest.cc ProvidesKickstartPacketsIfReceiverDoesNotACK expects the same packet over and over).
   assert.ok(rtp.length >= 1);
   assert.deepEqual(crypto.decrypt(0, [parseRtpPacket(rtp[0]!)!.payload]), Buffer.from(f.data));
 });
@@ -190,7 +194,7 @@ test("a picture loss indicator makes the sender want a key frame until one is en
   assert.equal(sender.needsKeyFrame, false);
 });
 
-test("the in-flight media duration limit refuses frames; the id span limit refuses frame 121 without an ack", () => {
+test("the in-flight media duration limit refuses frames; the id span limit refuses the 121st frame without an ack", () => {
   const { sender } = makeSession({ targetPlayoutDelayMs: 100 });
   // Video: clamp(2*RTT, 81.667 ms, max(81.667, 2/3 of 100 ms)) with no RTT yet is the 81.667 ms floor.
   let result = "OK";
@@ -202,6 +206,8 @@ test("the in-flight media duration limit refuses frames; the id span limit refus
   let r2 = "OK";
   for (let i = 0; i < 125 && r2 === "OK"; i++) r2 = audio.sender.enqueueFrame(frame(i, 10, { rtpTimestamp: 480 * (i + 1), dependency: "key", referencedFrameId: i }));
   assert.equal(r2, "REACHED_ID_SPAN_LIMIT");
+  // sender_impl_unittest.cc RejectsEnqueuingBeforeProtocolDesignLimit: kMaxUnackedFrames (120) frames are accepted, the next is refused;
+  // sender_impl.cc EnqueueFrame refuses when frame_id - checkpoint > kMaxUnackedFrames, and FrameId::first() is 0, leader() is -1.
   assert.equal(audio.sender.nextFrameId, 120);
 });
 
@@ -234,4 +240,34 @@ test("a kickstart packet is resent when the newest frame is not acknowledged", (
   const kick = env.takeSent().filter((p) => (p[1]! & 0x7f) === 100);
   assert.equal(kick.length >= 1, true);
   assert.equal(parseRtpPacket(kick[0]!)!.packetId, 4);
+});
+
+test("a NACK for a packet sent less than one round trip ago is ignored (RTT > 0)", () => {
+  // sender_impl.cc OnReceiverIsMissingPackets: too_recent_a_send_time = rtcp_packet_arrival_time_ - round_trip_time_;
+  // HandleIndividualNack retransmits only when packet_sent_times[id] <= too_recent_a_send_time, else counts it ignored.
+  const { env, sender, ntp } = makeSession();
+  sender.enqueueFrame(frame(0, 3 * 1449 - 10)); // 3 packets; the kickstart only ever resends the last one
+  env.advance(1);
+  const sr = env.takeSent().find((p) => p[1] === 200)!;
+  const lastSr = Number((sr.readBigUInt64BE(8) >> 16n) & 0xffffffffn);
+  env.advance(40);
+  env.takeSent();
+  const block = { ssrc: SENDER_SSRC, packetFractionLostNumerator: 0, cumulativePacketsLost: 0, extendedHighSequenceNumber: 0, jitter: 0, lastStatusReportId: lastSr, delaySinceLastReport: Math.round(0.01 * 65536) };
+  sender.onReceivedRtcpPacket(env.now(), buildReceiverRtcp({ receiverSsrc: RECEIVER_SSRC, senderSsrc: SENDER_SSRC, ntp, sendTimeMs: env.now(), reportBlock: block, checkpointFrameId: -1, playoutDelayMs: 400 }));
+  const rtt = sender.currentRoundTripTimeMs;
+  assert.ok(rtt > 20, `rtt ${rtt}`);
+  const nack = (): Buffer =>
+    buildReceiverRtcp({ receiverSsrc: RECEIVER_SSRC, senderSsrc: SENDER_SSRC, ntp, sendTimeMs: env.now(), checkpointFrameId: -1, playoutDelayMs: 400, nacks: [{ frameId: 0, packetId: 0 }] });
+  const packet0 = (): number => env.takeSent().filter((p) => (p[1]! & 0x7f) === 100 && parseRtpPacket(p)!.packetId === 0).length;
+  sender.onReceivedRtcpPacket(env.now(), nack());
+  env.advance(11);
+  assert.equal(packet0(), 1, "sent long ago, so it is resent");
+  env.advance(rtt / 2);
+  sender.onReceivedRtcpPacket(env.now(), nack());
+  env.advance(11);
+  assert.equal(packet0(), 0, "resent less than one round trip ago, so the NACK is ignored");
+  env.advance(rtt * 2);
+  sender.onReceivedRtcpPacket(env.now(), nack());
+  env.advance(11);
+  assert.equal(packet0(), 1, "more than one round trip later it is resent again");
 });
