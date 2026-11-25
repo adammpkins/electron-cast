@@ -7,7 +7,7 @@ import { CastSessionService, type CastRequestInfo, type DeviceChoice } from "../
 import { CastPresentationHandler, type PresentationConnectionHandle } from "../../src/electron/presentation-handler.ts";
 import { MEDIA_NAMESPACE, escapeHtml, receiverLabel } from "../../src/electron/presentation-envelope.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
-import { FakeDevices, FakeClient, TV, SPEAKER, tick, FAST_SINKS, waitForSinks } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, waitForSinks } from "./fakes.ts";
 
 const YT = "233637DE";
 const MDX = "urn:x-cast:com.google.youtube.mdx";

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CastSessionService } from "../../src/electron/session-service.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, EventLog, tick, TV, SPEAKER, onlyChannels, FAST_SINKS, waitForSinks } from "./fakes.ts";
+import { FakeDevices, FakeClient, EventLog, TV, SPEAKER, onlyChannels, FAST_SINKS, waitForSinks } from "./fakes.ts";
 
 const YT = "233637DE";
 const MDX = "urn:x-cast:com.google.youtube.mdx";

@@ -7,7 +7,7 @@ import { installCastBridge, type ContextBridgeLike, type IpcRendererLike } from 
 import { installChromeCast } from "../../src/polyfill/install.ts";
 import { installPresentationStandIn } from "../../src/polyfill/presentation-standin.ts";
 import { MEDIA_NAMESPACE } from "../../src/electron/presentation-envelope.ts";
-import { FakeDevices, FakeClient, TV, SPEAKER, tick, FAST_SINKS, onlyChannels } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, onlyChannels } from "./fakes.ts";
 
 const ORIGIN = "https://music.youtube.com";
 const MDX = "urn:x-cast:com.google.youtube.mdx";
