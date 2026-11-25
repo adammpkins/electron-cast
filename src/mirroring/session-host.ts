@@ -236,10 +236,12 @@ export class OpenscreenSessionHost implements SenderSessionClient {
 
     if (senders.audioSender !== undefined && audioConfig !== undefined) {
       this.audioSenderCore = senders.audioSender;
+      senders.audioSender.debugLog = (message) => this.deps.observer.logInfo?.(message);
       this.createAudioPipeline(senders.audioSender, audioConfig);
     }
     if (senders.videoSender !== undefined && videoConfig !== undefined) {
       this.videoSenderCore = senders.videoSender;
+      senders.videoSender.debugLog = (message) => this.deps.observer.logInfo?.(message);
       this.createVideoPipeline(senders.videoSender, videoConfig);
     }
     this.deps.observer.didStart?.();

@@ -44,6 +44,7 @@ export class PortBackend implements MirroringBackend {
   private audioConfig: { sampleRate: number; channels: number } | undefined;
   private audioSenderConfig: FrameSenderConfig | undefined;
   private stopped = false;
+  log: ((message: string) => void) | undefined;
 
   constructor(port: AgentPort, source: CaptureSource) {
     this.port = port;
@@ -138,6 +139,9 @@ export class PortBackend implements MirroringBackend {
         );
         break;
       }
+      case "log":
+        if (typeof m.message === "string") this.log?.(m.message);
+        break;
       case "encoder-status":
         (m.kind === "video" ? this.videoCallbacks : this.audioCallbacks)?.onStatus(m.status);
         break;

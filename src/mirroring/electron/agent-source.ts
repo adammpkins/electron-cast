@@ -93,7 +93,7 @@ export const AGENT_SOURCE = String.raw`
         // capture-clock-to-RTP mapping as real frames, so the receiver's playout clock keeps running.
         if (lastFrameClone && lastCapture) {
           const clone = lastFrameClone.clone();
-          const nowMs = epochNow();
+          const nowMs = nextRefMs(epochNow());
           const rtp = rtpFor(lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000);
           lastCapture = { timestamp: lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000, refMs: nowMs };
           holdFrame(rtp, clone);
@@ -167,21 +167,62 @@ export const AGENT_SOURCE = String.raw`
     videoInfo = params;
     videoReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     let lastAcceptedAt = -1e9;
+    captureStats.since = 0;
     for (;;) {
       const { value: frame, done } = await videoReader.read();
       if (done || stopped) { if (frame) frame.close(); return; }
       if (paused) { frame.close(); continue; }
       // The capture may deliver faster than the requested rate (a 60 Hz page); keep the minimum frame interval.
-      const nowMs = performance.now();
-      if (nowMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { frame.close(); continue; }
-      lastAcceptedAt = nowMs;
+      // It is judged on the capture timestamps: frames that arrive bunched after a stall still carry their regular capture
+      // times, and dropping them on arrival time would turn a 30 fps capture into an irregular ~25 fps one.
+      const arrivalMs = epochNow();
+      const captureMs = frame.timestamp / 1000;
+      captureStats.received++;
+      if (captureMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { captureStats.limited++; frame.close(); continue; }
+      if (lastAcceptedAt > -1e8) captureStats.intervals.push(captureMs - lastAcceptedAt);
+      captureStats.arrivalLag.push(arrivalMs - (captureMs + captureOffsetMs(captureMs, arrivalMs)));
+      lastAcceptedAt = captureMs;
+      reportCaptureStats(arrivalMs);
       const rtp = rtpFor(frame.timestamp);
-      lastCapture = { timestamp: frame.timestamp, refMs: epochNow() };
+      // The reference time is the capture time on the epoch clock, not the arrival time: the receiver pairs it with the
+      // RTP timestamp in the sender reports, and a jittery arrival would skew that pairing (Chrome stamps frames with
+      // the capture begin time, VideoFrameMetadata REFERENCE_TIME).
+      const refMs = nextRefMs(captureMs + captureOffsetMs(captureMs, arrivalMs));
+      lastCapture = { timestamp: frame.timestamp, refMs };
       if (lastFrameClone) lastFrameClone.close();
       lastFrameClone = frame.clone();
       holdFrame(rtp, frame);
-      send({ t: "frame", rtp, refMs: epochNow(), width: frame.displayWidth, height: frame.displayHeight });
+      send({ t: "frame", rtp, refMs, width: frame.displayWidth, height: frame.displayHeight });
     }
+  }
+
+  // The capture clock's offset to the epoch clock: the smallest delay seen is the frame that travelled fastest, so it is
+  // the best estimate of the true offset, and it may creep up (0.01 ms per frame) to follow clock drift.
+  // The sender ignores a frame whose reference time does not advance, so a refresh frame stamped with "now" must not
+  // overtake the capture time of the real frame that follows it.
+  let lastRefMs = 0;
+  function nextRefMs(ms) {
+    lastRefMs = ms > lastRefMs ? ms : lastRefMs + 0.001;
+    return lastRefMs;
+  }
+  let offsetMs = null;
+  function captureOffsetMs(captureMs, arrivalMs) {
+    const sample = arrivalMs - captureMs;
+    offsetMs = offsetMs === null ? sample : Math.min(sample, offsetMs + 0.01);
+    return offsetMs;
+  }
+
+  // Debug aid, not in Chrome: how steady the capture is, once every five seconds.
+  const captureStats = { received: 0, limited: 0, intervals: [], arrivalLag: [], since: 0 };
+  function reportCaptureStats(nowMs) {
+    if (captureStats.since === 0) captureStats.since = nowMs;
+    if (nowMs - captureStats.since < 5000) return;
+    const iv = captureStats.intervals.slice().sort((a, b) => a - b);
+    const lag = captureStats.arrivalLag.slice().sort((a, b) => a - b);
+    const at = (a, q) => (a.length ? Math.round(a[Math.min(a.length - 1, Math.floor(a.length * q))] * 10) / 10 : 0);
+    const seconds = (nowMs - captureStats.since) / 1000;
+    send({ t: "log", message: "capture: " + Math.round((captureStats.received / seconds) * 10) / 10 + " fps delivered, " + Math.round((iv.length / seconds) * 10) / 10 + " fps kept, " + captureStats.limited + " dropped by the rate limit; capture interval p50 " + at(iv, 0.5) + " ms, p95 " + at(iv, 0.95) + " ms, max " + at(iv, 1) + " ms; delivery delay p50 " + at(lag, 0.5) + " ms, p95 " + at(lag, 0.95) + " ms, max " + at(lag, 1) + " ms" });
+    captureStats.received = 0; captureStats.limited = 0; captureStats.intervals = []; captureStats.arrivalLag = []; captureStats.since = nowMs;
   }
 
   function configureVideo(width, height) {

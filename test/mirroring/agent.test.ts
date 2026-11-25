@@ -61,8 +61,8 @@ function startAgent() {
     sent, encoders, settle,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
-    capture: async (ts: number) => {
-      now += 33;
+    capture: async (ts: number, gapMs = 33) => {
+      now += gapMs;
       const f = frame(ts);
       const w = waiters.shift();
       if (w) w({ value: f, done: false }); else queued.push(f);
@@ -213,4 +213,26 @@ test("agent: a VP9 encoder keeps its frame rate and gets no screen content hint"
   assert.equal(cfg.bitrateMode, "constant");
   assert.equal("contentHint" in cfg, false);
   assert.equal(cfg.framerate, 30);
+});
+
+test("agent: the rate limit goes by capture time, so frames that arrive bunched after a stall are kept", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0);
+  await a.capture(33_333, 5); // delivered 5 ms after the first, captured 33 ms after it
+  await a.capture(66_667, 5);
+  await a.capture(70_000, 33); // a 3 ms capture interval: too soon, dropped
+  const frames = a.sent.filter((m) => m.t === "frame") as { rtp: number; refMs: number }[];
+  assert.equal(frames.length, 3);
+  assert.deepEqual(frames.map((x) => x.rtp), [90_000, 93_000, 96_000]);
+  assert.ok(frames[1]!.refMs > frames[0]!.refMs && frames[2]!.refMs > frames[1]!.refMs, "reference times increase");
+});
+
+test("agent: capture statistics are reported every five seconds", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  for (let i = 0; i < 40; i++) await a.capture(i * 133_333, 133);
+  const logs = a.sent.filter((m) => m.t === "log") as { message: string }[];
+  assert.ok(logs.length >= 1);
+  assert.match(logs[0]!.message, /^capture: [\d.]+ fps delivered, [\d.]+ fps kept, 0 dropped by the rate limit; capture interval p50 133\.3 ms/);
 });

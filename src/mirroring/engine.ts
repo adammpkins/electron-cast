@@ -22,6 +22,7 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
     const environment = new UdpEnvironment(params.receiverAddress);
     const router = new SenderPacketRouter(environment);
     const backend = options.createBackend();
+    backend.log = (message) => observer.logInfo?.(message);
     let host: OpenscreenSessionHost | undefined;
     let closed = false;
     const close = (): void => {

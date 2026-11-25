@@ -73,6 +73,8 @@ export interface AudioEncoderCallbacks {
 
 /** Everything a session owns. `stopAll` releases captures and encoders once, when the session ends. */
 export interface MirroringBackend {
+  /** Where a backend may write diagnostics (the observer's log). */
+  log?: ((message: string) => void) | undefined;
   stopAll?(): void;
   createAudioEncoder(config: FrameSenderConfig, callbacks: AudioEncoderCallbacks): AudioEncoderPort;
   createVideoEncoder(config: FrameSenderConfig, callbacks: VideoEncoderCallbacks): VideoEncoderPort;
