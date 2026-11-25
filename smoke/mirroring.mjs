@@ -15,7 +15,7 @@ import { FakeReceiver } from "../test/mirroring/fake-receiver.ts";
 const mirrorPage = (width, height) => `<!doctype html><meta charset=utf-8><body style="margin:0"><canvas id=c width=${width} height=${height}></canvas><script>
   const c = document.getElementById("c"), g = c.getContext("2d");
   let n = 0;
-  (function draw() { n++; g.fillStyle = "hsl(" + (n * 3 % 360) + ",70%,50%)"; g.fillRect(0, 0, ${width}, ${height});
+  (function draw() { n++; g.fillStyle = "hsl(" + (n * 0.1 % 360) + ",70%,50%)"; g.fillRect(0, 0, ${width}, ${height});
     g.fillStyle = "#fff"; g.font = "48px sans-serif"; g.fillText("frame " + n, 40, ${Math.round(height / 2)}); requestAnimationFrame(draw); })();
   const ctx = new AudioContext(); const osc = ctx.createOscillator(); osc.connect(ctx.destination); osc.start();
   ctx.resume().catch(() => {});
@@ -143,7 +143,9 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   }
   assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
   assert.equal(s.invalidFrames, 0);
-  assert.ok(s.videoKeyFrames >= 1);
+  // A key frame is asked for once at the start; more would be bitrate spikes. (libvpx VP9 cuts a key frame by itself at a
+  // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.)
+  assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= 2, `${s.videoKeyFrames} key frames reached the receiver`);
   pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder) and Opus frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
 
   await cast.terminateRoute(route.id);
