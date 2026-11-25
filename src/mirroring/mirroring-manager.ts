@@ -227,11 +227,19 @@ export class MirroringManager {
    * `CastActivityManager::DoLaunchSession`: a route launched from a frame ends the one that frame already has, of any
    * kind. Also what a Presentation API route's launch does to a mirroring route of the same page.
    */
-  terminateRoutesOfTab(webContentsId: number): void {
+  private terminateRoutesOfTab(webContentsId: number): void {
+    this.stopMirroringRoutesOfTab(webContentsId);
+    this.options.terminateRoutesOfPage?.(webContentsId);
+  }
+
+  /**
+   * End the mirroring routes of a page, and only those: what a Cast session launched by the page does to them. It must
+   * not call `terminateRoutesOfPage`, which would end the session that was just launched.
+   */
+  stopMirroringRoutesOfTab(webContentsId: number): void {
     for (const entry of [...this.entries.values()]) {
       if (entry.activity.webContentsId === webContentsId) entry.activity.stopMirroring();
     }
-    this.options.terminateRoutesOfPage?.(webContentsId);
   }
 
   dispose(): void {

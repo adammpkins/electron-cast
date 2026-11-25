@@ -238,8 +238,9 @@ test("a page that becomes a mirroring source, by a launch or a switch, loses its
   await manager.startMirroring("dev-2", { castMode: "desktop_mirror", desktopSourceId: "screen:0:0" });
   assert.deepEqual(ended, [5, 6], "a desktop source belongs to no page");
   // The other direction: a Cast session launched from the mirrored page ends its mirroring route.
-  manager.terminateRoutesOfTab(6);
+  manager.stopMirroringRoutesOfTab(6);
   assert.equal(manager.routes().length, 1);
   assert.equal(manager.routes()[0]!.webContentsId, undefined);
+  assert.deepEqual(ended, [5, 6], "and ends no session of the page, which would be the one just launched");
   manager.dispose();
 });

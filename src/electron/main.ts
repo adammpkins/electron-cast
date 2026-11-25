@@ -226,7 +226,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     allowOrigin: options.allowOrigin,
     // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
     // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
-    onSessionLaunched: (senderId) => mirroring?.terminateRoutesOfTab(senderId),
+    onSessionLaunched: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
