@@ -141,7 +141,9 @@ electron-cast does what Chrome does on the Presentation API path. Where it does 
 | DIAL discovery and launch (`cast-dial:` sources from the SDK's `dialRequest`) | Yes | Yes | SSDP, availability, the picker, launch and stop over HTTP ([DESIGN](docs/DESIGN.md#dial-srcdial)). A device that is also a Cast sink is listed as Cast only, as in Chrome; a DIAL-only device is not promoted to a Cast channel. `dial: false` turns it off. Unit tests only so far |
 | Tab, desktop and file mirroring | Yes | In progress | Mirroring sources are reported unavailable until then |
 | Remote Playback API (`video.remote`) | Yes | Not done: needs Electron | Blink's `RemotePlayback` needs support in Electron; electron-cast reports `remote-playback:` sources unavailable |
-| Wired display (presenting to a second monitor) and the Presentation Receiver API | Yes | In progress (`feat/wired-display`) | |
+| Wired display (presenting to a second monitor) | Yes | Yes (`wiredDisplay` option) | A page's https (or localhost) `PresentationRequest` opens fullscreen in a sandboxed receiver window on the chosen screen; a request that also has a Cast URL gets one picker for both kinds ([DESIGN](docs/DESIGN.md#wired-displays)). Unit tests with fakes; tried live on one second display |
+| Presentation Receiver API (`navigator.presentation.receiver` on the presented page) | Yes | Yes | `connectionList`, `connectionavailable`, messages in both directions, `close`, `terminate` |
+| Binary messages on a presentation connection (`ArrayBuffer`, `Blob`, `binaryType`) | Yes | Yes | Carried to wired displays; dropped for Cast devices, as Chrome's Cast provider does |
 | Access-code casting | Yes | Under study (`feat/access-code`) | |
 | `mode: "chromecast"`, a legacy `chrome.cast` polyfill | n/a | Frozen | Gets no new features; use the default mode ([notes](docs/FAQ.md#what-is-mode-chromecast)) |
 

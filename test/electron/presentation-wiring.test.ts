@@ -232,8 +232,11 @@ test("start opens a connection whose envelope messages reach the page, and page 
   const before = clients[0]!.sent.length;
   psend(other, "conn-1", JSON.stringify({ type: "app_message", message: { sessionId, namespaceName: MDX, message: "x" }, sequenceNumber: 2, clientId: "c1" }));
   psend(wc, "conn-1", 42);
+  // Chrome's CastSessionClientImpl::OnMessage ignores a message that is not text, so bytes to a Cast device are dropped
+  psend(wc, "conn-1", new Uint8Array([1, 2, 3]));
+  psend(wc, "conn-1", new ArrayBuffer(4));
   await tick();
-  assert.equal(clients[0]!.sent.length, before, "a send from another webContents, or a non-string, is ignored");
+  assert.equal(clients[0]!.sent.length, before, "a send from another webContents, or a non-string, or bytes, is ignored");
 
   assert.deepEqual(await pcall(wc, "terminate", { connectionId: "conn-1" }), { ok: true, value: undefined });
   await tick();

@@ -1,8 +1,8 @@
-import { CastSessionService, type CastClientLike, type DeviceSource, type CastRequestInfo, type DeviceChoice } from "./session-service.ts";
+import { CastSessionService, type CastClientLike, type DeviceSource, type CastRequestInfo, type DeviceChoice, type DisplayChoice } from "./session-service.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
-import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
+import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
@@ -11,6 +11,9 @@ import {
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
+import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-presentation.ts";
+import type { WiredDisplaySink } from "./wired-display/displays.ts";
+import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
@@ -24,11 +27,16 @@ const PAGE_METHODS: ReadonlySet<string> = new Set<BridgeMethod>([
   "leaveSession", "setReceiverVolume", "setReceiverMuted",
 ]);
 
-export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
+export type { CastRequestInfo, DeviceChoice, DisplayChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type { CastSinkOptions, ChannelParams, SinkRetryOptions } from "./sink-service.ts";
 export type { DialHttp, DialHttpOptions, DialRegistryOptions } from "../dial/index.ts";
+export {
+  createReceiverWindows, isWiredDisplaySource, availableDisplays, wiredDisplaySinks,
+  type WiredDisplayApi, type WiredDisplayOptions, type WiredDisplayRequest, type WiredDisplaySink, type WiredDisplayRoute,
+  type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
+} from "./wired-display/index.ts";
 export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
@@ -75,7 +83,7 @@ export interface IpcMainLike {
 export interface CastManagerOptions {
   ipcMain: IpcMainLike;
   /** `picker` (optional to declare) streams device changes while the picker is open; see {@link DevicePickerContext}. */
-  selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
+  selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice | DisplayChoice>;
   allowOrigin?(origin: string): boolean;
   discovery?: DeviceSource & { start(): Promise<void>; stop(): void };  // default new CastDiscovery()
   createClient?(device: CastDevice, params: ChannelParams): CastClientLike; // default new CastClient({ host, port, timeouts })
@@ -106,6 +114,12 @@ export interface CastManagerOptions {
    * DIAL sinks (they have port 0 and no Cast capabilities); only the Presentation API path can start a DIAL route.
    */
   dial?: boolean | { registry?: DialRegistryOptions; http?: DialHttp; httpOptions?: DialHttpOptions; settleMs?: number; log?: (message: string) => void };
+  /**
+   * Show a page's presentation on another screen, as Chrome's wired display provider does (presentation mode only).
+   * Chrome has it always on; here the app passes Electron's `screen` and a window factory, because this package never
+   * imports Electron. See {@link WiredDisplayOptions}.
+   */
+  wiredDisplay?: WiredDisplayOptions;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -121,6 +135,8 @@ export interface CastManager extends CastManagerApi {
    */
   settled(options?: { retries?: boolean }): Promise<void>;
   dispose(): Promise<void>;
+  /** The wired display sinks and routes; present when the `wiredDisplay` option was given. */
+  readonly wiredDisplay?: WiredDisplayApi;
 }
 
 /** Availability watches kept per frame; the page never releases one, so the oldest are dropped. */
@@ -314,10 +330,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       // the webContents or frame was destroyed between the check and the send
     }
   };
+  /**
+   * Starts whose URLs a display and a Cast device can both serve, while their picker is open. The one picker lists both kinds
+   * of sink, as Chrome's dialog does; a display chosen in it is recorded here and the Cast flow is told the user cancelled.
+   */
+  const mixedStarts = new Map<number, { displays: WiredDisplaySink[]; chosen: string | null }>();
   const service = new CastSessionService({
     devices: discovery,
     createClient,
-    selectDevice: options.selectDevice,
+    async selectDevice(devices, request, picker) {
+      const mixed = mixedStarts.get(request.senderId);
+      const choice = await options.selectDevice(devices, mixed === undefined ? request : { ...request, displays: mixed.displays }, picker);
+      if (typeof choice === "object" && choice !== null && "display" in choice) {
+        if (mixed !== undefined && mixed.displays.some((d) => d.id === choice.display)) mixed.chosen = choice.display;
+        return null;
+      }
+      return choice;
+    },
     allowOrigin: options.allowOrigin,
     sinks: options.sinks,
     ...(dial !== undefined && dialSource !== undefined ? {
@@ -386,6 +415,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     return service.handle({ id, origin }, method, params);
   });
 
+  const wired = options.wiredDisplay !== undefined && options.presentation !== false ? createWiredDisplay(options.wiredDisplay) : undefined;
+
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
   const setUpPresentation = () => {
     const ipc = options.ipcMain;
@@ -428,6 +459,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         return { ok: false, code: "AbortError", description: "The page went away" };
       }
       slot.conn = conn;
+      // A wired display connection starts out connecting, as Blink's does, and connects when the receiver page is ready
+      const local = conn as Partial<LocalConnectionHandle>;
+      if (typeof local.connecting === "boolean") {
+        (conn as LocalConnectionHandle).onconnect = () => sendTo(sid, { type: "statechange", connectionId, state: "connected" });
+      }
       conn.onclose = (state) => {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
         sendTo(sid, { type: "statechange", connectionId, state });
@@ -441,9 +477,56 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         return { ok: true as const, value: { id: conn.id, url: conn.url } };
       }
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
-      conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
-      return { ok: true, value: { id: conn.id, url: conn.url } };
+      if (typeof local.connecting === "boolean") {
+        (conn as LocalConnectionHandle).onmessage = (data) => sendTo(sid, { type: "message", connectionId, ...messageFields(data) });
+      } else {
+        conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
+      }
+      return { ok: true, value: { id: conn.id, url: conn.url, ...(local.connecting === true ? { state: "connecting" } : {}), ...(typeof local.connecting === "boolean" ? { local: true } : {}) } };
     };
+
+    /** A start() whose URLs only a display can show: the app picks a display, a window opens on it. */
+    const startOnDisplay = async (sid: number, origin: string, urls: string[]): Promise<PresentationConnectionHandle> => {
+      const w = wired!;
+      const wc = senders.get(sid)?.wc;
+      const sinks = w.sinksFor(wc);
+      const request = { urls: [...urls], origin, senderId: sid, observeSinks: (l: Parameters<typeof w.observeSinksFor>[1]) => w.observeSinksFor(wc, l) };
+      const choice = await w.selectDisplay(sinks, request);
+      if (choice === null) throw new PresentationError("AbortError", "The user cancelled the request");
+      return w.controllers.start(request, choice);
+    };
+    /** A URL the Cast provider serves (a Cast app URL), or the DIAL provider (a `cast-dial:` URL, when DIAL is on). */
+    const providerUrl = (u: string): boolean => parsePresentationUrl(u) !== null || (dial !== undefined && isDialSource(u));
+    /** The URLs of a request that the Cast and DIAL providers serve. */
+    const castUrlsOf = (urls: string[]): string[] => urls.filter(providerUrl);
+    /**
+     * A start() whose URLs a display and a Cast device can both serve: one picker offers both kinds and the sink it returns
+     * decides (a display starts a wired display presentation, a device the Cast flow). With no displays or no devices there
+     * is nothing to choose between and the flow of the one kind that exists runs.
+     */
+    const startMixed = async (sid: number, origin: string, urls: string[]): Promise<PresentationConnectionHandle> => {
+      const w = wired!;
+      const wc = senders.get(sid)?.wc;
+      const displays = w.sinksFor(wc);
+      const castUrls = castUrlsOf(urls);
+      if (displays.length === 0 || service.devices().length + (dial?.devices().length ?? 0) === 0) {
+        return displays.length > 0 ? startOnDisplay(sid, origin, urls) : h.startPresentation({ urls: castUrls, origin, senderId: sid });
+      }
+      const mixed = { displays, chosen: null as string | null };
+      mixedStarts.set(sid, mixed);
+      try {
+        return await h.startPresentation({ urls: castUrls, origin, senderId: sid });
+      } catch (err) {
+        if (mixed.chosen === null) throw err;
+        return w.controllers.start({ urls: [...urls], origin, senderId: sid }, mixed.chosen);
+      } finally {
+        mixedStarts.delete(sid);
+      }
+    };
+
+    /** Only a display serves these URLs: one is a standard presentation source and none is a Cast or DIAL one. */
+    const displayOnly = (urls: string[]): boolean =>
+      wired !== undefined && urls.some((u) => isWiredDisplaySource(u)) && !urls.some(providerUrl);
 
     ipc.handle(`${channel}:presentation`, async (event, method, params) => {
       const origin = originOf(event.senderFrame);
@@ -467,6 +550,39 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             }
             const ac = new AbortController();
             watches.set(watchId, { ac, sid });
+            if (wired !== undefined && p.urls.some((u) => isWiredDisplaySource(u))) {
+              // Blink ORs the sources of a request: available when displays exist for a standard source, or the
+              // request's Cast URLs have a device. Displays are not hidden here (only the dialog hides one).
+              const castUrls = p.urls.filter((u) => !isWiredDisplaySource(u));
+              let displays = false;
+              let cast = false;
+              let ready = false;
+              let last = false;
+              const update = (): void => {
+                const next = displays || cast;
+                if (!ready || next === last) return;
+                last = next;
+                sendTo(sid, { type: "availability", watchId, value: next });
+              };
+              const stop = wired.provider.observeSinks((sinks) => {
+                displays = sinks.length > 0;
+                update();
+              });
+              ac.signal.addEventListener("abort", stop, { once: true });
+              if (ac.signal.aborted) stop();
+              if (castUrls.length > 0) {
+                cast = await h.getAvailability({
+                  urls: castUrls, origin, senderId: sid, signal: ac.signal,
+                  onchange: (value) => {
+                    cast = value;
+                    update();
+                  },
+                });
+              }
+              ready = true;
+              last = displays || cast;
+              return { ok: true, value: { available: last } };
+            }
             const available = await h.getAvailability({
               urls: p.urls,
               origin,
@@ -501,8 +617,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             }
             {
               const urls = p.urls;
-              const started = await open(sid, p.connectionId, () => h.startPresentation({ urls, origin, senderId: sid }));
-              if (started.ok) launchedFrom.set(sid, started.value.id.slice("cast-session_".length));
+              // A display-only request opens a window on a display; a request a display and a sink can both serve goes to
+              // the one picker; the rest is the Cast (and DIAL) provider's
+              if (displayOnly(urls)) return await open(sid, p.connectionId, () => startOnDisplay(sid, origin, urls));
+              const started = wired !== undefined && urls.some((u) => isWiredDisplaySource(u))
+                ? await open(sid, p.connectionId, () => startMixed(sid, origin, urls))
+                : await open(sid, p.connectionId, () => h.startPresentation({ urls, origin, senderId: sid }));
+              // CastActivityManager's earlier-route rule is for Cast sessions only
+              if (started.ok && started.value.id.startsWith("cast-session_")) launchedFrom.set(sid, started.value.id.slice("cast-session_".length));
               return started;
             }
           case "reconnect":
@@ -511,8 +633,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             }
             {
               const { urls, presentationId } = p;
+              // A local presentation (a display) is joined again from any page, by its id; for a URL only a display
+              // serves, an id that is not local is the provider's unknown error, which the page sees as NotFoundError
+              if (wired !== undefined && (displayOnly(urls) || wired.provider.local.isLocalPresentation(presentationId))) {
+                return await open(sid, p.connectionId, async () => wired.controllers.reconnect({ urls, senderId: sid }, presentationId));
+              }
               return await open(sid, p.connectionId,
-                () => h.reconnectPresentation({ urls, origin, senderId: sid, presentationId }));
+                () => h.reconnectPresentation({ urls: wired !== undefined && castUrlsOf(urls).length > 0 ? castUrlsOf(urls) : urls, origin, senderId: sid, presentationId }));
             }
           case "close":
           case "terminate": {
@@ -532,11 +659,20 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     });
 
     const onSend = (event: IpcMainEventLike, connectionId: unknown, data: unknown): void => {
-      if (typeof connectionId !== "string" || typeof data !== "string") return;
+      if (typeof connectionId !== "string") return;
       const c = connections.get(connectionId);
       if (c === undefined || c.sid !== senderIdOf(event.sender, event.senderFrame) || c.conn === null) return;
-      if (data.length > MAX_MESSAGE_CHARS) return;
-      c.conn.send(data);
+      const isLocal = typeof (c.conn as Partial<LocalConnectionHandle>).connecting === "boolean";
+      if (typeof data === "string") {
+        // The stand-in refuses an oversized send() with a RangeError; this is for a page that does not use it
+        if (data.length <= (isLocal ? MAX_MESSAGE_SIZE : MAX_MESSAGE_CHARS)) c.conn.send(data);
+        return;
+      }
+      const bytes = asBytes(data);
+      if (bytes === null || bytes.byteLength > MAX_MESSAGE_SIZE) return;
+      // A wired display carries bytes (PresentationConnectionMessage.data). A Cast connection drops them, as Chrome's
+      // CastSessionClientImpl::OnMessage does with anything that is not text.
+      if (isLocal) (c.conn as LocalConnectionHandle).send(bytes);
     };
     on(`${channel}:presentation:send`, onSend);
 
@@ -547,6 +683,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         defaults.clear(sid);
         launchedFrom.delete(sid);
         h.senderGone(sid);
+        wired?.controllers.senderGone(sid);
         for (const [id, c] of connections) if (c.sid === sid) connections.delete(id);
         for (const [id, w] of watches) {
           if (w.sid !== sid) continue;
@@ -733,6 +870,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   let disposed = false;
   return {
     ...api,
+    ...(wired !== undefined ? { wiredDisplay: wired.api } : {}),
     async start() {
       await discovery.start();
       dial?.start();
@@ -749,6 +887,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       presentation?.dispose();
       if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, castChanged);
       dial?.stop();
+      wired?.dispose();
       discovery.stop();
       await service.dispose();
       senders.clear();

@@ -320,3 +320,56 @@ Differences from Chrome:
   declined start is not wired to the page (nothing it sends reaches the page that has the window now). If the request
   changed, or the page navigated, while the device was still being asked about the app, the start is `cancelled` before
   anything is launched.
+
+## Wired displays
+
+With the `wiredDisplay` option, other screens are presentation sinks, as Chrome's `WiredDisplayMediaRouteProvider`
+makes them: a page's `PresentationRequest` for an https URL (not the legacy Cast URL) or http on localhost can start on
+a display, which opens that page fullscreen in a locked-down receiver window; the presented page gets
+`navigator.presentation.receiver`. The package never imports Electron, so the app passes `screen`, `BrowserWindow` and
+a receiver window factory. Rules and their Chromium counterparts: [DESIGN.md](DESIGN.md#wired-displays).
+
+<!-- no-check -->
+```ts
+import { app, BrowserWindow, ipcMain, screen, session } from "electron";
+import { join } from "node:path";
+import { createCastManager, createReceiverWindows } from "electron-cast/main";
+
+const receivers = createReceiverWindows({
+  BrowserWindow, session, ipcMain,
+  preloadDir: join(app.getPath("userData"), "electron-cast-receiver"),   // the generated receiver preload goes here
+});
+const manager = createCastManager({
+  ipcMain,
+  selectDevice,   // may now answer { display: id } when request.displays is set (below)
+  wiredDisplay: {
+    screen,
+    BrowserWindow,   // finds the page's own display, which the picker leaves out
+    createReceiverWindow: receivers.factory,
+    async selectDisplay(sinks, request) {   // the picker for a request only a display can show
+      return (await myDisplayPicker(sinks, request.observeSinks))?.id ?? null;
+    },
+  },
+});
+manager.wiredDisplay?.registerMediaRoutesObserver({ onRoutesUpdated: (routes) => menu.setPresentations(routes) });
+```
+
+- **The pickers.** A request whose URLs only a display serves calls `selectDisplay(sinks, request)` (a
+  `WiredDisplayRequest`; `observeSinks` follows the list while the picker is open), which resolves a sink id or `null`.
+  A request that also has a Cast (or `cast-dial:`) URL is one picker, as Chrome's dialog lists both kinds of sink: when
+  displays and devices both exist, `selectDevice` gets `request.displays` and may answer a `DisplayChoice`
+  (`{ display: id }`), or a device as usual.
+- **Sinks and routes** (`manager.wiredDisplay`, a `WiredDisplayApi`): `getSinks`, `registerMediaSinksObserver`,
+  `getRoutes`, `registerMediaRoutesObserver` and `terminateRoute`, which closes the receiver window. A
+  `WiredDisplaySink` is `wired_display_<id>`, "Display N", with its `display`; a `WiredDisplayRoute` has the
+  presentation URL, `Presenting (<host>)` and `isLocalPresentation: true`. They are kept apart from the Cast and DIAL
+  sinks of `registerMediaSinksObserver`.
+- **Messages** are `PresentationMessage`s, a string or bytes, up to 64 MiB either way.
+
+| Export | What it is |
+|---|---|
+| `createReceiverWindows(options)` | The Electron part: a `ReceiverWindows` whose `factory` opens receiver windows, and `dispose()`. `ReceiverWindowsOptions`: `BrowserWindow`, `session`, `ipcMain`, `preloadDir`, and optional `channel` and `platform`. Once per `ipcMain` and channel. |
+| `isWiredDisplaySource(url)` | Whether a display can show the URL (`IsValidStandardPresentationSource`). |
+| `availableDisplays(all, primary)`, `wiredDisplaySinks(all, primary)` | The displays that are sinks, in Chrome's order (primary first, then top-left; none for a single or mirrored setup), and their sinks. |
+| `WiredDisplayOptions`, `WiredDisplayRequest`, `WiredDisplayApi`, `WiredDisplaySink`, `WiredDisplayRoute`, `DisplayChoice` | The types above. |
+| `ScreenLike`, `DisplayLike`, `WindowLike` | The parts of Electron's `screen`, `Display` and `BrowserWindow` that are used. |

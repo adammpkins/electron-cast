@@ -110,7 +110,7 @@ function installPresentationBridge(options: CastBridgeOptions, channel: string):
       );
     },
     /** Page -> main: one message on an open connection; the reply comes back in-band. */
-    send(connectionId: string, data: string): void {
+    send(connectionId: string, data: string | Uint8Array): void {
       send(`${channel}:presentation:send`, connectionId, data);
     },
     /** Relay `<channel>:presentation:event` payloads to the page, dropping the IPC event object. */

@@ -4,7 +4,8 @@
 
 This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
 channels, the sessions on them are followed whoever started them, the app can cast and control media from its own
-UI, and DIAL devices are found and cast to next to Cast devices. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
+UI, DIAL devices are found and cast to next to Cast devices, and a page can present on another screen (a wired
+display) with the Presentation Receiver API on the other end. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
 is frozen and behaves as before for pages; it shares the device list.
 
 ### Added
@@ -75,6 +76,33 @@ is frozen and behaves as before for pages; it shares the device list.
   `{ retries: true }`); the type `ChannelParams`.
 - `isPubliclyRoutable`, `isLoopback`, `isCastAddressAllowed` and `parseIpBytes` are exported from the discovery layer
   (ports of `net::IPAddress`). `APP_AVAILABILITY_REFRESH_MS` is exported.
+- **Wired displays, as Chrome's `WiredDisplayMediaRouteProvider` has them.** New `wiredDisplay` option on
+  `createCastManager` (presentation mode): other screens are presentation sinks (`wired_display_<id>`, "Display N"). A
+  `PresentationRequest` whose URL is https (not the legacy Cast URL) or http on localhost can start on a display: the
+  page opens fullscreen in a receiver window that has its own in-memory session (cleared and reused, not one per
+  presentation), no menu or developer tools, no permissions except fullscreen, and ends the presentation if it
+  navigates away. The receiver is sandboxed as Chrome's is (`kPresentationReceiverSandboxFlags`: no modals, popups or
+  top-level navigation) by a `Content-Security-Policy: sandbox` header on every receiver document, so an iframe's
+  `alert()` is refused too. A display connection starts `connecting` and becomes `connected` when the receiver page is
+  ready, as Blink's does.
+  - The receiver page gets `navigator.presentation.receiver` (`connectionList`, `connectionavailable`, `send`, `close`,
+    `terminate`), and the controller can `reconnect(id)`. Closing the window, removing the display or `terminate()`
+    ends the presentation for every controller; a controller that goes away only leaves it.
+  - The display a page is on is left out of the picker by default, found with the new `BrowserWindow` option and
+    `screen.getDisplayMatching`, and `request.observeSinks` follows the window as it moves (`displayOf` overrides it).
+  - A request that lists both a Cast (or `cast-dial:`) URL and a page URL is one picker, as Chrome's dialog lists both
+    kinds of sink: `selectDevice` gets `request.displays` and may answer `{ display }` (new type `DisplayChoice`), and the
+    request starts on the sink it returns. Its `getAvailability()` is true when either kind has a sink.
+  - New exports: `createReceiverWindows` (the Electron `BrowserWindow` part, taking `BrowserWindow`, `session`,
+    `ipcMain` and a folder for the generated receiver preload; calling it twice on one `ipcMain` and channel throws),
+    the display rules (`isWiredDisplaySource`, `availableDisplays`, `wiredDisplaySinks`), and `manager.wiredDisplay`
+    (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+- Presentation mode: `PresentationConnection.send()` takes ArrayBuffer, ArrayBufferView and Blob as well as strings,
+  and `binaryType` (`arraybuffer` or `blob`) picks what `message` events carry, as in Chrome. Binary goes to wired
+  displays, in both directions. To a Cast device it is dropped without an error, as Chrome's
+  `CastSessionClientImpl::OnMessage` ignores messages that are not text. One 64 MiB cap holds for text and bytes in both
+  directions; a larger `send()` throws `RangeError`, and a detached ArrayBuffer is a `TypeError`. Before,
+  `send()` threw a `TypeError` for anything but a string.
 
 ### Changed
 
@@ -125,7 +153,7 @@ is frozen and behaves as before for pages; it shares the device list.
 ### Documentation
 
 - A rewritten README with a Chrome parity table (including what is out of scope, such as Chrome's Global Media
-  Controls panel, and what is in progress: mirroring, wired display and the Presentation Receiver API, and
+  Controls panel, and what is in progress: mirroring and
   access-code casting), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
   receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting
   and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING.
