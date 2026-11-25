@@ -14,7 +14,9 @@ unchanged.
 npm install electron-cast
 ```
 
-Requires Electron 35 or later (for `contextBridge.executeInMainWorld`).
+Requires Electron 35 or later (for `contextBridge.executeInMainWorld`; the preload fails on 34). CI loads the built
+package in a real Electron 35, 40 and the latest stable on Linux, Windows and macOS (`npm run smoke` runs it locally
+once you have installed Electron).
 
 ## Use
 
@@ -52,8 +54,9 @@ installCastBridge({ contextBridge, ipcRenderer });
 ```
 
 Import from `electron-cast/preload`, not the package root: the root also exports the main-process code, which needs
-Node's `tls` and `dgram` and cannot load in a sandboxed preload. The preload entry has no imports of its own, so a
-bundler can inline it.
+Node's `tls` and `dgram` and cannot load in a sandboxed preload. The preload entry imports nothing Node-only, but a
+sandboxed preload cannot load other files either, so bundle it into your preload (esbuild, for example, as
+`smoke/build-preloads.mjs` does).
 
 That's all. The page loads Google's Cast SDK as usual, and its cast button drives sessions through IPC to the main
 process.

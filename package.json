@@ -53,11 +53,21 @@
     "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",
     "check": "npm run typecheck && npm run lint && npm test",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "smoke": "npm run build && node smoke/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "oxlint": "^1.89.0",
     "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "electron": ">=35"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
   }
 }

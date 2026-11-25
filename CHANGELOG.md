@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- CI now runs a smoke test in a real Electron (35, 40 and the latest stable, on Linux, Windows and macOS): a sandboxed
+  preload built from `electron-cast/preload`, `createCastManager` from `electron-cast/main` with a fake device, both
+  modes. `npm run smoke` runs it locally.
+- `package.json` declares an optional peer dependency on `electron >=35`.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which

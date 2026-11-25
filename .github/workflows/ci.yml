@@ -21,3 +21,35 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+
+  # Loads the built package in a real Electron (sandboxed preload, real ipcMain and contextBridge); only the network is faked.
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 35 is the oldest supported (contextBridge.executeInMainWorld); "latest" tracks the current stable
+        electron: ["35", "40", latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm i --no-save electron@${{ matrix.electron }}
+      - name: Allow Electron's sandbox on Linux
+        if: runner.os == 'Linux'
+        run: |
+          # Keep the real sandbox (the smoke test checks the preload ran sandboxed) rather than using --no-sandbox
+          sudo chown root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Smoke test (Linux, under a virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run smoke
+      - name: Smoke test
+        if: runner.os != 'Linux'
+        run: npm run smoke
