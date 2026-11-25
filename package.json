@@ -97,6 +97,7 @@
     "prepack": "npm run build",
     "smoke": "npm run build && node smoke/run.mjs",
     "live:iframe": "node examples/live-iframe/run.mjs",
+    "live:checks": "node examples/live-checks/run.mjs",
     "probe:discovery": "node tools/probe-discovery.mjs"
   },
   "devDependencies": {
