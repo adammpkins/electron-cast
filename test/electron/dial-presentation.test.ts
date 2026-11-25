@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import { createCastManager, type CastManagerOptions, type IpcMainEventLike, type IpcMainLike } from "../../src/electron/main.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import { FakeDevices, FakeClient, FAST_SINKS, TV, device, tick } from "./fakes.ts";
-import { APP_URL, DEVICE_IP, FakeHttp, SINK_ID, UDN, appInfoXml, descriptionXml, ok, ssdpAnswer, DESCRIPTION_URL } from "../dial/fixtures.ts";
+import { APP_URL, DEVICE_IP, FakeHttp, SINK_ID, UDN, appInfoXml, descriptionXml, httpError, ok, ssdpAnswer, DESCRIPTION_URL } from "../dial/fixtures.ts";
 
 const ORIGIN = "https://www.youtube.com";
 const DIAL_URL = "cast-dial:YouTube?dialPostData=pair%3D1&clientId=c1";
@@ -439,4 +439,38 @@ test("many availability watches share one listener on the DIAL service", async (
   } finally {
     process.off("warning", onWarning);
   }
+});
+
+// DialMediaRouteProvider::HandleStopAppResult: a stop the device refuses, for an app that is still running, raises the
+// issue "Use remote to stop casting" for the sink (the route is forgotten and the user stops it on the TV)
+test("a DIAL stop the TV refuses raises Use remote to stop casting for the sink, and a stop that works raises nothing", async () => {
+  const { manager, pcall, psend, http } = await setup();
+  const issues: { title: string; severity: string; sinkId?: string }[] = [];
+  manager.registerIssuesObserver({ onIssue: (i) => issues.push(i.info), onIssuesCleared: () => {} });
+  const wc = new FakeWebContents(1);
+  const r = await pcall(wc, "start", { connectionId: "k1", urls: [DIAL_URL] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  psend(wc, "k1", envelope("client_connect", { clientId: "c1" }));
+  await tick(20);
+  const ask = wc.messages("k1").find((m) => m.type === "custom_dial_launch");
+  psend(wc, "k1", envelope("custom_dial_launch", { doLaunch: true, launchParameter: "v=1" }, ask.sequenceNumber));
+  await tick(20);
+
+  await manager.terminateRoute(manager.getRoutes()[0]!.id);
+  await tick(20);
+  assert.equal(issues.length, 0, "a stop that worked raises nothing");
+
+  const second = await pcall(wc, "start", { connectionId: "k2", urls: [DIAL_URL] });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  psend(wc, "k2", envelope("client_connect", { clientId: "c1" }));
+  await tick(20);
+  const ask2 = wc.messages("k2").find((m) => m.type === "custom_dial_launch");
+  psend(wc, "k2", envelope("custom_dial_launch", { doLaunch: true, launchParameter: "v=1" }, ask2.sequenceNumber));
+  await tick(20);
+  http.reply("DELETE", `http://${DEVICE_IP}:8008/apps/YouTube/run`, httpError(500));
+  http.reply("GET", RUN_URL, ok(appInfoXml("running")));
+  await manager.terminateRoute(manager.getRoutes()[0]!.id).catch(() => {});
+  await tick(20);
+  assert.deepEqual(issues.map((i) => [i.title, i.severity, i.sinkId]), [["Use remote to stop casting", "warning", SINK_ID]]);
+  await manager.dispose();
 });

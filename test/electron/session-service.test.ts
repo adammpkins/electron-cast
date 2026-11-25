@@ -1,3 +1,4 @@
+import type { RouterIssues } from "../../src/electron/issues.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceChoice } from "../../src/electron/session-service.ts";
@@ -19,7 +20,7 @@ function setup(opts: {
   tweak?: (c: FakeClient) => void;
   sinks?: Record<string, unknown>;
   onSessionLaunched?: (senderId: number) => void;
-  onLaunchStatus?: (device: CastDevice, status: "pending_authorization" | "allowed") => void;
+  issues?: RouterIssues;
 } = {}) {
   const devices = opts.devices ?? new FakeDevices();
   const log = new EventLog();
@@ -40,7 +41,7 @@ function setup(opts: {
     },
     allowOrigin: opts.allowOrigin,
     onSessionLaunched: opts.onSessionLaunched,
-    onLaunchStatus: opts.onLaunchStatus,
+    ...(opts.issues === undefined ? {} : { issues: opts.issues }),
     emit: log.emit,
   }));
   return { service, devices, log, clients, picks };
@@ -758,10 +759,16 @@ test("a launch the user declines, or that notifications block, fails with Chrome
 });
 
 test("a launch that waits for the user's approval reports pending authorization and allowed, then goes on", async () => {
+  // The launch status is wired once: the session service raises and clears Chrome's pending-authorization issue
   const seen: string[] = [];
+  const issues = {
+    pendingUserAuth: (sink: { id: string }) => seen.push(`${sink.id} pending_authorization`),
+    userAllowed: (sinkId: string) => seen.push(`${sinkId} allowed`),
+    launchFailed() {},
+  } as unknown as RouterIssues;
   const { service } = setup({
     tweak: (c) => { c.launchStatuses = ["pending_authorization", "allowed"]; },
-    onLaunchStatus: (d, status) => seen.push(`${d.id} ${status}`),
+    issues,
   });
   await init(service);
   const r = await service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });

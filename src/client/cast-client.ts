@@ -68,11 +68,17 @@ interface PendingRequest {
 interface LaunchWaiter {
   appId: string;
   requestId: number;
-  onStatus: ((status: "pending_authorization" | "allowed") => void) | undefined;
+  onStatus: ((status: LaunchStatus) => void) | undefined;
   timer: NodeJS.Timeout;
   resolve: (app: ReceiverApplication) => void;
   reject: (err: unknown) => void;
 }
+
+/**
+ * The two `LAUNCH_STATUS` values a receiver sends while its user decides on a cast request
+ * (`GetLaunchSessionResponse`: `USER_PENDING_AUTHORIZATION`, `USER_ALLOWED`). Any other status fails the launch.
+ */
+export type LaunchStatus = "pending_authorization" | "allowed";
 
 /** What a LAUNCH asks for beyond the app id; Chrome takes these from the Cast presentation URL. */
 export interface LaunchOptions {
@@ -86,7 +92,7 @@ export interface LaunchOptions {
    * Called when the receiver reports that the user must approve the cast (`pending_authorization`, LAUNCH_STATUS
    * USER_PENDING_AUTHORIZATION) and when they have (`allowed`, USER_ALLOWED). The launch timeout is not extended.
    */
-  onStatus?: (status: "pending_authorization" | "allowed") => void;
+  onStatus?: (status: LaunchStatus) => void;
 }
 
 /** cast_message_handler.h `kRequestTimeout`. */

@@ -4,7 +4,7 @@
 import { castUrlAppIds, classifyPresentationUrl } from "./presentation-source.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { isDesktopMirroringSource, type CastAppInfo, type MirroringSource } from "../mirroring/routing.ts";
-import type { CommandLineLike } from "../mirroring/encoding-support.ts";
+import { allowAllSitesToInitiateMirroring, type CommandLineLike } from "./switches.ts";
 
 /** `media_router::kAutoJoinPresentationId` (components/media_router/common/media_source.h). */
 export const AUTO_JOIN_PRESENTATION_ID = "auto-join";
@@ -19,24 +19,6 @@ export const PRESENTATION_API_ALLOWLIST: readonly string[] = [
   "https://music.youtube.com",
 ];
 
-/** The feature `kAllowAllSitesToInitiateMirroring` (chrome/browser/media/router/media_router_feature.cc), off by default. */
-export const ALLOW_ALL_SITES_FEATURE = "AllowAllSitesToInitiateMirroring";
-
-/** `--enable-features=A,B:params` / `--disable-features=...`: the feature names (a name in both lists is disabled). */
-function featureOn(commandLine: CommandLineLike | undefined, feature: string, enabledByDefault: boolean): boolean {
-  const names = (switchName: string): Set<string> => {
-    const out = new Set<string>();
-    if (commandLine === undefined || !commandLine.hasSwitch(switchName)) return out;
-    for (const item of commandLine.getSwitchValue(switchName).split(",")) {
-      const name = item.trim().split(/[:<]/)[0]!.replace(/^[*!]/, "");
-      if (name !== "") out.add(name);
-    }
-    return out;
-  };
-  if (names("disable-features").has(feature)) return false;
-  return names("enable-features").has(feature) || enabledByDefault;
-}
-
 /**
  * `GetOrigins` of `CastMediaRouteProvider` for a site-initiated mirroring source: an allowlisted origin, or any origin
  * when `kAllowAllSitesToInitiateMirroring` is on. For every other origin the sinks of the source are empty, so the page
@@ -44,7 +26,7 @@ function featureOn(commandLine: CommandLineLike | undefined, feature: string, en
  * compares it: scheme, host and port.
  */
 export function siteInitiatedMirroringAllowed(origin: string, commandLine?: CommandLineLike): boolean {
-  if (featureOn(commandLine, ALLOW_ALL_SITES_FEATURE, false)) return true;
+  if (allowAllSitesToInitiateMirroring(commandLine)) return true;
   let canonical: string;
   try {
     canonical = new URL(origin).origin;

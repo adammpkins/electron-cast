@@ -12,6 +12,7 @@ import { MirroringManager } from "../../src/mirroring/mirroring-manager.ts";
 import type { SessionParameters } from "../../src/mirroring/session-host.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import { parseCastMediaSource } from "../../src/electron/cast-media-source.ts";
+import { castMirroringPlayoutDelayMs } from "../../src/electron/switches.ts";
 import { siteMirroringSource } from "../../src/electron/mirroring-to-flinging.ts";
 import { sleep, startHarness } from "../mirroring/session-harness.ts";
 
@@ -33,11 +34,12 @@ class FakeClient extends EventEmitter implements MirroringClient {
 const TV: CastDevice = { id: "dev-1", name: "dev-1", model: "Fake", host: "127.0.0.1", addresses: ["127.0.0.1"], port: 8009, capabilities: 5, isGroup: false, statusText: "", instanceName: "dev-1", txt: {} };
 
 /** The parameters the mirroring service is started with for a page's URL, the way main.ts builds its source. */
-async function paramsFor(url: string): Promise<SessionParameters> {
+async function paramsFor(url: string, defaultTargetPlayoutDelayMs?: number): Promise<SessionParameters> {
   let params: SessionParameters | undefined;
   const manager = new MirroringManager({
     findDevice: () => TV,
     createClient: () => new FakeClient(),
+    ...(defaultTargetPlayoutDelayMs === undefined ? {} : { defaultTargetPlayoutDelayMs }),
     createService: (p) => {
       params = p;
       return { onMessage() {}, stop() {} };
@@ -116,4 +118,26 @@ test("streamingCaptureAudio=0 makes a session video-only even where the app requ
     types.push(type);
   }
   assert.deepEqual(types, ["video_only", "audio_video"]);
+});
+
+// MirroringActivity::StartSession: `target_playout_delay_ = cast_source->target_playout_delay().has_value() ? that :
+// GetCastMirroringPlayoutDelay()` (the --cast-mirroring-target-playout-delay switch), and only after both does
+// MirrorSettings fall back to CHROME_MIRRORING_PLAYOUT_DELAY and the default.
+test("the URL's playout delay wins over --cast-mirroring-target-playout-delay, which wins over the service's own default", async () => {
+  assert.equal((await paramsFor("cast:0F5096E8?streamingTargetPlayoutDelayMillis=450", 300)).targetPlayoutDelayMs, 450);
+  assert.equal((await paramsFor("cast:0F5096E8", 300)).targetPlayoutDelayMs, 300);
+  assert.equal((await paramsFor("cast:0F5096E8")).targetPlayoutDelayMs, undefined);
+});
+
+test("the switch's value reaches the OFFER of a session whose URL has no delay", async () => {
+  const commandLine = { hasSwitch: (n: string) => n === "cast-mirroring-target-playout-delay", getSwitchValue: () => "320" };
+  const params = await paramsFor("cast:0F5096E8", castMirroringPlayoutDelayMs(commandLine));
+  assert.equal(params.targetPlayoutDelayMs, 320);
+  const h = await startHarness({ type: params.type, targetPlayoutDelayMs: params.targetPlayoutDelayMs! });
+  try {
+    await sleep(300);
+    assert.deepEqual(delays(h.receiver.lastOffer), [320]);
+  } finally {
+    h.close();
+  }
 });

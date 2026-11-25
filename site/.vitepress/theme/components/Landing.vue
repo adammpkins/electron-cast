@@ -210,7 +210,7 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">Chrome's rules for URLs, the channel and mirroring from a page</th>
-                <td colspan="3">Presentation URL parameters, sink order, the channel's CONNECT, LAUNCH and timers, switching a mirrored tab to a Cast session, and a page that starts mirroring (docs.google.com, meet.google.com, music.youtube.com): ported from Chromium and unit-tested. Not yet tried on a real device.</td>
+                <td colspan="3">Presentation URL parameters, sink order, the channel's CONNECT, LAUNCH and timers, switching a mirrored tab to a Cast session, a page that starts mirroring (docs.google.com, meet.google.com, music.youtube.com), the issues Chrome's Cast dialog shows, Chrome's switches and the media router log: ported from Chromium and unit-tested. Not yet tried on a real device.</td>
               </tr>
             </tbody>
           </table>

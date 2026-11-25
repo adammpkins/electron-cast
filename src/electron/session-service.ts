@@ -6,6 +6,7 @@ import { CastLaunchError, CastTimeoutError } from "../client/index.ts";
 import type { LaunchOptions } from "../client/index.ts";
 import { launchFieldsOf } from "./launch-fields.ts";
 import type { LaunchFields } from "./launch-fields.ts";
+import { classifyLaunchFailure, originNameForDisplay, type RouterIssues } from "./issues.ts";
 import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
@@ -145,12 +146,12 @@ export interface CastSessionServiceOptions {
    */
   onSessionLaunched?(senderId: number): void;
   /**
-   * The receiver asks the user to approve a launch (`pending_authorization`, LAUNCH_STATUS USER_PENDING_AUTHORIZATION)
-   * or reports that they did (`allowed`, USER_ALLOWED). Chrome shows a notification issue for the first and clears the
-   * sink's issue on the second (`CastActivityManager::SendPendingUserAuthNotification`, `ClearTopIssueForSink`); the
-   * launch timeout keeps running meanwhile.
+   * Where Chrome raises its issues (`CastActivityManager` and `MediaRouterUI`); none are raised without it. A launch the
+   * receiver holds for its user's approval (`pending_authorization`, LAUNCH_STATUS USER_PENDING_AUTHORIZATION) raises the
+   * sink's notification and `allowed` (USER_ALLOWED) clears it (`SendPendingUserAuthNotification`, `ClearTopIssueForSink`);
+   * the launch timeout keeps running meanwhile.
    */
-  onLaunchStatus?(device: CastDevice, status: "pending_authorization" | "allowed"): void;
+  issues?: RouterIssues;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -497,6 +498,14 @@ export class CastSessionService {
    */
   addSinkByAddress(device: AccessCodeDevice): Promise<AddSinkResult> {
     return this.accessCode.addSinkByAddress(device);
+  }
+
+  /**
+   * `CastMediaSinkServiceImpl::Start`: `OpenChannels(GetFixedIPSinksFromCommandLine(), SinkSource::kMdns)`: a channel to each
+   * of `--cast-device-ips` at once (no randomized delay), retried as a discovered device's is.
+   */
+  openFixedSinks(devices: CastDevice[]): void {
+    for (const device of devices) void this.sinkService.openSink(device, { source: "discovery" });
   }
 
   /** Change `enabled` and `deviceDuration` while running, as Chrome applies its policies. */
@@ -1096,15 +1105,31 @@ export class CastSessionService {
       if (appParams === null) appParams = undefined;
     }
     let app: ReceiverApplication;
+    const issues = this.options.issues;
     try {
       app = await client.launch(appId, {
         ...(request.launch.supportedAppTypes === undefined ? {} : { supportedAppTypes: request.launch.supportedAppTypes }),
         ...(appParams === undefined ? {} : { appParams }),
         // The request bound is the page's launch timeout; the channel's wait is the same, capped at two minutes
         timeoutMs: request.timeoutMs,
-        onStatus: (status) => this.options.onLaunchStatus?.(device, status),
+        // CastActivityManager::HandleLaunchSessionResponse: the receiver's "waiting for its user" and "user allowed" statuses
+        ...(issues === undefined ? {} : {
+          onStatus: (status) => {
+            if (status === "pending_authorization") issues.pendingUserAuth({ id: device.id, name: device.name });
+            else issues.userAllowed(device.id);
+          },
+        }),
       });
     } catch (err) {
+      if (issues !== undefined && !discard.value && !cancelled.value) {
+        // The provider's issue first (HandleLaunchSessionResponseFailures), then the dialog's (OnRouteResponseReceived)
+        const failure = classifyLaunchFailure(err);
+        const sink = { id: device.id, name: device.name };
+        issues.launchFailed(failure, device.id, "", describe(err));
+        if (failure === "timed_out") issues.uiRouteTimeout("presentation", device.id, originNameForDisplay(sender.origin));
+        else if (failure === "user_not_allowed") issues.uiUserNotAllowed(sink);
+        else if (failure === "notification_disabled") issues.uiNotificationDisabled(sink);
+      }
       // HandleLaunchSessionResponse: the messages of the failures, and TIMED_OUT for a launch that never answered
       if (err instanceof CastTimeoutError) throw new MappedError("timeout", "Failed to launch session due to timeout.");
       if (err instanceof CastLaunchError) throw new MappedError("session_error", err.description);

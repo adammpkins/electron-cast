@@ -9,7 +9,7 @@
  * whatever {@link MirroringServiceFactory} returns (the library's engine, in a utility process or in-process).
  */
 import type { CastDevice } from "../discovery/index.ts";
-import type { ReceiverApplication, ReceiverStatus } from "../client/index.ts";
+import type { LaunchOptions, LaunchStatus, ReceiverApplication, ReceiverStatus } from "../client/index.ts";
 import { CAST_REMOTING_NAMESPACE, CAST_WEBRTC_NAMESPACE } from "./protocol/constants.ts";
 import { chooseAppId, mirroringNamespace, routeDescription, scrubbedLogMessage, sessionTypeFor, type MirroringSource } from "./routing.ts";
 import type { MirroringError, SessionParameters } from "./session-host.ts";
@@ -22,7 +22,7 @@ export interface MirroringClient {
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
-  launch(appId: string): Promise<ReceiverApplication>;
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication>;
   stop(sessionId: string): Promise<ReceiverStatus>;
   connectTransport(transportId: string): void;
   closeTransport(transportId: string): void;
@@ -109,6 +109,10 @@ export interface MirroringActivityOptions {
   /** The app's command line, where `--disable-cast-letterboxing` is looked for. */
   commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
+  /** The receiver's `LAUNCH_STATUS` while its user decides (`HandleLaunchSessionResponse`'s middle stages). */
+  onLaunchStatus?(status: LaunchStatus): void;
+  /** The launch request failed (not a later failure of the mirroring session): `HandleLaunchSessionResponseFailures`. */
+  onLaunchFailed?(error: unknown): void;
   /**
    * `MediaRouterDebugger::ShouldFetchMirroringStats`, asked when the session starts: whether the receiver's RTCP event
    * log is collected and analyzed, and the statistics fetched every 500 ms.
@@ -146,6 +150,8 @@ export class MirroringActivity {
   private tabId: number | undefined;
   private readonly onSourceChanged: ((oldId: number, newId: number) => void) | undefined;
   private readonly freezeDelayMs: number;
+  private readonly onLaunchStatus: ((status: LaunchStatus) => void) | undefined;
+  private readonly onLaunchFailed: ((error: unknown) => void) | undefined;
   private freezeTimer: ReturnType<typeof setTimeout> | undefined;
   /** `media_status_->can_play_pause` and `play_state == PAUSED`, as `MirroringMediaControllerHostImpl` reads them. */
   private mirroringStarted = false;
@@ -165,6 +171,8 @@ export class MirroringActivity {
     this.tabId = options.webContentsId;
     this.onSourceChanged = options.onSourceChanged;
     this.freezeDelayMs = options.freezeDelayMs ?? FREEZE_DELAY_MS;
+    this.onLaunchStatus = options.onLaunchStatus;
+    this.onLaunchFailed = options.onLaunchFailed;
     this.commandLine = options.commandLine;
     // One id for what is sent and what is accepted, as in Chrome: both are `message_handler_->source_id()`. A receiver
     // addresses its replies to the source id of the message it answers, so a second id would drop every ANSWER.
@@ -214,9 +222,10 @@ export class MirroringActivity {
     await this.client.connect();
     let app: ReceiverApplication;
     try {
-      app = await this.client.launch(appId);
+      app = await this.client.launch(appId, this.onLaunchStatus === undefined ? undefined : { onStatus: this.onLaunchStatus });
     } catch (err) {
       this.stopMirroring();
+      this.onLaunchFailed?.(err);
       throw err;
     }
     if (this.state === "stopped") {

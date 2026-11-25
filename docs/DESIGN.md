@@ -141,7 +141,7 @@ tested against a fake receiver and **not yet tried on a real device**.
 | CONNECT carries `userAgent`, `connType` (0 strong, 2 invisible), `origin: {}` and `senderInfo` (`sdkType` 2, `version` and `browserVersion`, `platform` 3 on Windows, 4 on macOS, 6 on Linux, `connectionType` 1, and `systemVersion`, the first parentheses of the user agent) | `sender-info.ts` `connectFields` | `cast_message_util.cc`: `CreateVirtualConnectionRequest`, `GetVirtualConnectPlatformValue` |
 | The connection to `receiver-0` is strong. The app's transport is strong too, and invisible only when the presentation URL says `invisibleSender=true` | `CastClient.connect`, `connectTransport(id, { invisible })` | `cast_message_util.cc`: `GetConnectionType`; `cast_activity_manager.cc`: `EnsureConnection`; `cast_media_source.cc`: `invisibleSender` |
 | LAUNCH carries `language` (the locale), `supportedAppTypes` (`["WEB"]` when the URL names none) and `appParams` (the URL's JSON, left out when empty or `null`; text that is not JSON fails the launch with "Invalid JSON Format of appParams" before anything is sent) | `CastClient.launch`, `session-service.ts` `launchOn` | `cast_message_util.cc`: `CreateLaunchRequest`; `cast_activity_manager.cc`: `LaunchSession`; `cast_media_source.cc`: `SupportedAppTypesFromString` |
-| `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` and `USER_ALLOWED` keep the launch open and are reported (`onLaunchStatus` of the session service, `LaunchOptions.onStatus` of the client). **The launch timeout is not extended**: its timer is started once, so a user who takes longer than the timeout makes the launch time out. Any other status fails the launch | `CastClient.handleLaunchStatus` | `cast_message_util.cc`: `GetLaunchSessionResponse`; `cast_message_handler.cc`: `AddLaunchRequest`; `cast_activity_manager.cc`: `HandleLaunchSessionResponseMiddleStages`, `SendPendingUserAuthNotification` |
+| `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` and `USER_ALLOWED` keep the launch open and are reported (`LaunchOptions.onStatus` of the client; the session service and the mirroring manager raise and clear the sink's pending-authorization issue from it, once each: the Cast session launch and the mirroring launch are different paths). **The launch timeout is not extended**: its timer is started once, so a user who takes longer than the timeout makes the launch time out. Any other status fails the launch | `CastClient.handleLaunchStatus` | `cast_message_util.cc`: `GetLaunchSessionResponse`; `cast_message_handler.cc`: `AddLaunchRequest`; `cast_activity_manager.cc`: `HandleLaunchSessionResponseMiddleStages`, `SendPendingUserAuthNotification` |
 | `LAUNCH_ERROR` with `extendedError` `USER_NOT_ALLOWED` or `USER_NOTIFICATIONS_DISABLED` are told apart (`CastLaunchError.failure`), and the page's request rejects with Chrome's text: "Failed to launch session as the user declined the cast request.", "Failed to launch session as the notifications are disabled on the receiver device.", "Failed to launch session due to timeout.", otherwise "Failed to launch session. " and the receiver's `error`. The page sees an `OperationError` (Chrome's `PresentationErrorType::UNKNOWN`) with that text | `CastClient.launch`, `session-service.ts` | `cast_activity_manager.cc`: `HandleLaunchSessionResponse`, `HandleLaunchSessionResponseFailures`; `start_presentation_context.cc`: `HandleRouteResponse`; `media_router_desktop.cc`: `RouteResponseReceived` |
 | A launch waits for the URL's `launchTimeout` (60 s by default), never more than 2 minutes. Other requests (app availability, stop, volume, and status) wait 5 s | `CastClient` `launch`, `request` | `cast_media_source.h`: `kDefaultLaunchTimeout`; `cast_message_handler.cc`: `kLaunchMaxTimeout`; `cast_message_handler.h`: `kRequestTimeout` |
 | Keep-alive: a PING after 5 s of silence, once (the timer is one-shot and the next message received starts it again); every message received restarts the ping and liveness timers; a keep-alive write that completes restarts the liveness timer only; one that fails closes the channel. A payload containing `PING` is answered with `PONG`, anything else in the heartbeat namespace is taken as a `PONG` | `CastClient.startHeartbeat`, `resetTimers`, `sendKeepAlive` | `keep_alive_handler.cc`: `Start`, `HandleMessage`, `ResetTimers`, `SendKeepAliveMessageComplete`, `LivenessTimeout`; `cast_message_util.cc`: `CreateKeepAliveMessage` |
@@ -555,7 +555,8 @@ Differences from Chrome, and why:
 - **The `Origin` product.** `package:Google-Chrome.<major>.<OS>` is the syntax in `GetFakeOriginForDialLaunch`'s
   comment; `<major>` comes from the Chromium that Electron ships (`0` outside Electron).
 - **Stop failures.** Chrome posts an issue (`IDS_MEDIA_ROUTER_ISSUE_CANNOT_TERMINATE`); the provider emits an `issue`
-  event and rejects `terminateRoute`, and the connection still ends.
+  event, which `createCastManager` raises as Chrome's "Use remote to stop casting" warning for the sink (see "Issues,
+  policies and switches"), and rejects `terminateRoute`, and the connection still ends.
 - **Volume.** A DIAL route has none, as in Chrome (`BindMediaController` is `NOTIMPLEMENTED`).
 - **Errors never throw.** Chrome only logs a DIAL discovery error (`DialMediaSinkServiceImpl::OnDialError`) and a failed
   socket is closed while the others carry on (`DialSocket::CheckResult`, `DialServiceImpl::NotifyOnError`, which
@@ -800,6 +801,80 @@ Where electron-cast differs from Chrome here:
 - Chrome's metrics, its `chrome://media-router-internals` log (here the optional `accessCode.log`), its offline check
   (`SERVICE_NOT_PRESENT`) and the dialog that goes on to start a route are not here: the app starts a cast through its own
   picker once the device is listed.
+
+### Issues, policies and switches (`issues.ts`, `switches.ts`, `logger.ts`)
+
+Not yet tried on a real device. Chromium `main` (November 2026).
+
+**Issues.** `IssueManager` (`components/media_router/browser/issue_manager.cc`) is ported whole: issues are deduplicated by
+value (`IssueInfo::operator==`), the top issue is the oldest (the lowest id), an observer is told of the top issue
+when it changes (`onIssue`) or when none is left (`onIssuesCleared`) and of the current one when it registers, a
+notification goes after 60 s and a warning after 300 s, and `AddPermissionRejectedIssue` replaces every issue and has no
+timeout. The main-process API is `registerIssuesObserver`, `clearIssue` and `clearTopIssueForSink`. The titles are
+Chrome's English strings (`media_router_strings.grdp`); there is no localization.
+
+Where Chrome raises an issue, and where this library does:
+
+| Chrome | Issue | Here |
+|---|---|---|
+| `CastActivityManager::SendFailedToCastIssue` (a failed launch, `HandleLaunchSessionResponseFailures`) | warning "Failed to cast. Please try again." (not for a declined request or disabled notifications) | A failed launch in `session-service.ts` (page and `startCasting` paths) and in `mirroring-manager.ts` |
+| `SendPendingUserAuthNotification`, and `kUserAllowed` clearing it (`ClearTopIssueForSink`) | notification "Accept cast request on <device>" | `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` / `USER_ALLOWED` of the launch |
+| `MediaRouterUI::SendIssueForRouteTimeout`, `SendIssueForUserNotAllowed`, `SendIssueForNotificationDisabled` | notification (timeout), warnings | The same launch failures, by `extendedError` (`USER_NOT_ALLOWED`, `USER_NOTIFICATIONS_DISABLED`) or a timeout; a DIAL launch that times out raises the timeout one |
+| `MediaRouterUI::SendIssueForUnableToCast` | warning | `startCasting` rejecting with `unable_to_cast` |
+| `MediaRouterUI::SendIssueForScreenPermission` (macOS) | warning | `startCasting` for `desktop_mirror` when `getMediaAccessStatus("screen")` is not `granted`; see S12 below |
+| `CastActivityManager::MaybeShowIssueAtLaunch` (macOS, desktop audio) | notification | A desktop mirroring launch on macOS without audio |
+| `DialMediaRouteProvider::HandleStopAppResult` | warning "Use remote to stop casting" | The provider's `issue` event, which `createCastManager` now sends to the issue manager (the event itself stays) |
+| `MediaRouterDesktop::OnLocalDiscoveryPermissionRejected` | the permission-rejected issue | A discovery source's `permissionRejected` event, behind `ShowCastPermissionRejectedError` |
+| `MediaRouterUI::CreateRoute` | `ClearAllIssues` | When a device is chosen and before a route is started |
+
+Chrome raises nothing in the access code paths and nothing for a mirroring session that fails after the launch (only the
+log, checked in `access_code_cast_sink_service.cc` and `mirroring_activity.cc`), so none is raised here either.
+
+Differences: (1) A presentation route is the Cast session id here, which exists only once the launch succeeded, so the
+"Failed to cast" issue of a failed page launch has an empty `routeId` and repeated failures for one sink are one issue (a
+mirroring route has Chrome's id). (2) A presentation `startCasting` rejects with the codes the bridge already had;
+`user_not_allowed` and `notification_disabled` are raised as issues but not as new rejection codes. (3) Issue ids are a
+process-wide counter, as in Chrome, so two managers in one process share it.
+
+**Policies and switches.** An Electron app has no enterprise policy store, so each policy is an option of
+`createCastManager`, and a Chrome switch or feature is read from `app.commandLine` (the `commandLine` option, which
+defaults to `mirroring.electron.app.commandLine`; a feature named in both `--enable-features` and `--disable-features` is
+disabled).
+
+| Chrome | electron-cast |
+|---|---|
+| `MediaRouterCastAllowAllIPs` policy, else `CastAllowAllIPs` feature (`GetCastAllowAllIPsPref`) | `sinks.allowAllIps` when given, else `--enable-features=CastAllowAllIPs` |
+| `AccessCodeCastEnabled`, `AccessCodeCastDeviceDuration` policies | The `accessCode` options `enabled` and `deviceDuration` (and `configureAccessCode`), as before |
+| `EnableMediaRouter` policy, `MediaRouter` feature (`MediaRouterEnabled`) | `--disable-features=MediaRouter`: `start()` discovers nothing and `addSinkByAddress` is refused. Read once, as Chrome does not support turning the router on or off while running. The policy is not read: not creating the manager is the app's way to turn the router off |
+| `ShowCastPermissionRejectedError` | `--disable-features=ShowCastPermissionRejectedError` stops the permission-rejected issue |
+| `CastDesktopMirroringKeepLocalAudio` (Windows) | `--disable-features=CastDesktopMirroringKeepLocalAudio` mutes the local output while desktop mirroring, as the other platforms do |
+| `--cast-mirroring-target-playout-delay` (1 to 1000 ms) | Read at each mirroring route whose source has no delay of its own: the URL's `streamingTargetPlayoutDelayMillis` (or the `targetPlayoutDelayMs` of `startCasting`) wins, as `MirroringActivity::StartSession` takes `cast_source->target_playout_delay()` before `GetCastMirroringPlayoutDelay()`; `CHROME_MIRRORING_PLAYOUT_DELAY` and the 200 ms default apply only when neither is set |
+| `--cast-device-ips` (`GetFixedIPSinksFromCommandLine`) | A channel is opened to each address at `start()`, as a discovered device's |
+| `--cast-developer-certificate-path` | The PEM certificates are trusted as device authentication roots besides Google's |
+| `CastMessageLogging` | Not ported: it logs every app message of a route; the log API below has no per-message hook yet |
+| `AllowAllSitesToInitiateMirroring` | `--enable-features=AllowAllSitesToInitiateMirroring` lets any origin start mirroring through a Cast Streaming presentation URL, not only `kPresentationApiAllowlist` (`allowAllSitesToInitiateMirroring` in `switches.ts`; see [Site-initiated mirroring](#site-initiated-mirroring-and-mirroring-to-flinging)) |
+| `DelayMediaSinkDiscovery` | Does not apply: it holds discovery back until a user gesture in the browser; here discovery starts at `start()`, and the app decides when to call it |
+| `FallbackToAudioTabMirroring` | Does not apply: it adds tab mirroring to the cast modes of a dialog; the app builds its own |
+| `RedirectionMediaRouteProvider` | Does not apply: media remoting redirection is not ported |
+| `MediaRouterShowCastSessionsStartedByOtherDevices` (profile pref) | Does not apply: it only filters what the dialog shows; `getRoutes` returns them all and the app filters |
+| `MediaRouterMediaRemotingEnabled`, `MediaRouterReceiverIdHashToken` | Not part of S10 here (remoting is not offered; the token is S3) |
+
+**S11, local discovery permission.** Chrome starts discovery on a user gesture and shows the permission-rejected issue when
+the OS refuses it (`DualMediaSinkService::OnDiscoveryPermissionRejected`, `DnsSdRegistry::ServicesPermissionRejected`).
+Node cannot tell why a multicast socket sees nothing, and the Windows firewall check
+(`CastMediaSinkService::CanFirewallUseLocalPorts`, a Windows API call) needs native code, which this library does not have. So
+the issue and its gate are ported and raised when a discovery source emits `permissionRejected` (a custom source that
+can detect it, such as one backed by a native module); the built-in mDNS discovery never does. A blocked firewall or a
+denied macOS local-network permission still shows an empty list.
+
+**S12, the screen capture permission.** `MediaRouterUI::CreateRoute` refuses a desktop capture on macOS without the Screen
+Recording permission and raises the issue. Pass `mirroring.electron.systemPreferences` (Electron's) and
+`startCasting` for `desktop_mirror` does the same; the check is for macOS only, as Chrome's.
+
+**S13, diagnostics.** `MediaRouterLogger` is `LoggerImpl` (1000 entries, the same truncation of the fields): discovery,
+route and mirroring events are written to it and `getLogs`, `registerLogObserver` read it, and `getCastProviderState` is
+`CastMediaRouteProvider::GetState`. The sink service status page of Chrome (`media_sink_service_status.cc`) no longer
+exists in Chromium `main`, so there is no port of it; `getSinks` already reports the sinks.
 
 ## Wired displays
 
