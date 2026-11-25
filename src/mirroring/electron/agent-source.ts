@@ -10,8 +10,10 @@
  * raw frames are encoded (the drop decision of `VideoSender::InsertRawVideoFrame`); the agent only holds a few
  * frames for it. A `VideoFrame` goes straight into the encoder; its pixels are read once per encoded frame, to
  * estimate the frame's complexity (media/cast/encoding/frame_complexity_estimator.cc), which stands in for the
- * quantizer WebCodecs does not report, unless the engine finds the quantizer in the encoded frame (H.264). The engine also tells the agent the capture size to encode at
- * (`capture-size`): the encoder scales frames to its configured size.
+ * quantizer WebCodecs does not report, unless the engine finds the quantizer in the encoded frame (H.264, HEVC, VP8,
+ * VP9). The engine also tells the agent the capture size to encode at (`capture-size`): the encoder scales frames to
+ * its configured size, and a new size has to last 250 ms before the encoder is rebuilt for it
+ * (`resize_debounce_timer_` of media/cast/encoding/media_video_encoder_wrapper.cc).
  *
  * Messages are those of agent-protocol.ts.
  */
@@ -57,6 +59,9 @@ export const AGENT_SOURCE = String.raw`
   let lastRtp = 0;
   let captureSize = null;              // { width, height } the engine's capture size oracle wants encoded, null for the source size
   let encodeChain = Promise.resolve(); // encodes run one after another: the complexity estimate awaits a pixel copy
+  let resizeTarget = null;             // { width, height } the encoder is waiting to be rebuilt for (target_resize_size_)
+  let resizeTimer = null;              // resize_debounce_timer_
+  const RESIZE_DEBOUNCE_MS = 250;
   let estimating = true;               // false while the engine reads the encoder's quantizer instead (encoder_reports_qp_)
   let lastEncodedTimestamp = null;     // capture clock (us) of the frame encoded before, for GetFrameDuration
   let firstTimestamp = null;
@@ -91,6 +96,7 @@ export const AGENT_SOURCE = String.raw`
         // A new offer made a new encoder: the old one (another codec, or the same one that failed) is dropped and the
         // next frame configures the one the offer chose.
         videoCodec = { codec: m.codec, string: m.codecString || m.codec, hardware: m.hardware === true };
+        cancelResize();
         if (videoEncoder) {
           if (videoEncoder.state !== "closed") { try { videoEncoder.close(); } catch {} }
           videoEncoder = null;
@@ -505,6 +511,43 @@ export const AGENT_SOURCE = String.raw`
     keyNext = true;
   }
 
+  function cancelResize() {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = null;
+    resizeTarget = null;
+  }
+
+  // MediaVideoEncoderWrapper::EncodeVideoFrame, for a frame of another size than the encoder's: the encoder is rebuilt
+  // only once a size has lasted 250 ms, so a size that keeps changing (a window being dragged, the capture size oracle
+  // stepping) does not cost an encoder and a key frame per step. The wait starts over only for a size other than the
+  // one already waited for. Frames are not held back meanwhile: the running encoder takes them and scales them to the
+  // size it has.
+  function debounceResize(width, height) {
+    if (resizeTarget && resizeTarget.width === width && resizeTarget.height === height) return;
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTarget = { width, height };
+    // The timer fires whether or not frames arrive, as Chrome's does. Its work takes its turn among the encodes; a
+    // frame that cancels or restarts the wait before that turn comes wins.
+    const timer = resizeTimer = setTimeout(() => {
+      encodeChain = encodeChain.then(() => (resizeTimer === timer ? reconstructEncoderForNewSize(width, height) : undefined));
+    }, RESIZE_DEBOUNCE_MS);
+  }
+
+  // MediaVideoEncoderWrapper::ReconstructEncoderForNewSize. ConstructEncoder reports the frames still in the old
+  // encoder as dropped, and the new encoder's first frame is a key frame.
+  async function reconstructEncoderForNewSize(width, height) {
+    resizeTimer = null;
+    resizeTarget = null;
+    if (stopped || !videoEncoder || !encoderSize || (encoderSize.width === width && encoderSize.height === height)) return;
+    try {
+      const support = await VideoEncoder.isConfigSupported(encoderConfig(width, height));
+      if (!support.supported) { send({ t: "encoder-status", kind: "video", status: "unsupported_codec", message: videoCodec.string + (videoCodec.hardware ? " (hardware)" : "") + " at " + width + "x" + height }); return; }
+      configureVideo(width, height);
+    } catch (err) {
+      send({ t: "encoder-status", kind: "video", status: "codec_init_failed", message: describe(err) });
+    }
+  }
+
   // The size to encode a frame at: the oracle's capture size while it keeps the frame's aspect ratio and is not larger,
   // else the frame's own (a source that changed shape is followed at once; the oracle catches up).
   function encodeSize(frame) {
@@ -521,10 +564,17 @@ export const AGENT_SOURCE = String.raw`
     pendingFrames.delete(rtp);
     try {
       const { width: w, height: h } = encodeSize(frame);
-      if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize || encoderSize.width !== w || encoderSize.height !== h) {
+      if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize) {
+        // EncodeVideoFrame: the first frame makes the encoder at once, to avoid startup latency.
+        cancelResize();
         const support = await VideoEncoder.isConfigSupported(encoderConfig(w, h));
         if (!support.supported) { dropVideo(rtp); send({ t: "encoder-status", kind: "video", status: "unsupported_codec", message: videoCodec.string + (videoCodec.hardware ? " (hardware)" : "") + " at " + w + "x" + h }); return; }
         configureVideo(w, h);
+      } else if (encoderSize.width !== w || encoderSize.height !== h) {
+        debounceResize(w, h);
+      } else if (resizeTimer !== null) {
+        // The size came back to the encoder's before the wait was over: no resize.
+        cancelResize();
       }
       // A queue that grows means the encoder cannot keep up: skip, the engine sees the missing chunk as a drop.
       if (videoEncoder.encodeQueueSize > 4) { dropVideo(rtp); return; }
@@ -612,6 +662,7 @@ export const AGENT_SOURCE = String.raw`
 
   function stop() {
     stopped = true;
+    cancelResize();
     if (stream) for (const t of stream.getTracks()) t.stop();
     for (const f of pendingFrames.values()) f.close();
     pendingFrames.clear();

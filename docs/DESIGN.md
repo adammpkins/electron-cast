@@ -1096,7 +1096,12 @@ shows it: source size, the event, then the capture with the pipeline utilization
 capture size goes to the agent as `capture-size`, rounded down to even numbers as `DesktopCaptureDevice` does with
 `& ~1`. The agent configures the encoder for that size and gives it the unscaled frame, which a WebCodecs encoder
 scales (checked in Electron 45: a 1920x1080 frame encoded with a 640x360 configuration decodes at 640x360). A change
-of size reconfigures the encoder, as a change of source size already did.
+of size, the oracle's or the source's, rebuilds the encoder as `MediaVideoEncoderWrapper::EncodeVideoFrame` does: the
+first frame makes the encoder at once, and after that a new size has to last 250 ms (`resize_debounce_timer_`). The
+wait starts over only for a size other than the one already waited for, and a frame of the encoder's own size ends
+it. Frames are not held back or dropped meanwhile: the running encoder scales them to the size it has. When the wait
+is over the encoder is rebuilt (`ReconstructEncoderForNewSize`), the frames still inside the old one are reported
+dropped, and the new one starts with a key frame.
 
 Differences:
 
