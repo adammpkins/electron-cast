@@ -3,6 +3,7 @@
 // routes sources that name a Cast Streaming app, and `remote-playback:` sources, to code electron-cast does not have,
 // so they must never be launched as ordinary apps. Pure module: no Electron imports.
 import { parsePresentationUrl, type PresentationUrl } from "./presentation-envelope.ts";
+import { parseCastMediaSource } from "./cast-media-source.ts";
 import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
 
 /**
@@ -24,48 +25,12 @@ export type PresentationSourceKind =
   /** Anything else (invalid, unknown scheme, a plain web page). */
   | "other";
 
-const LEGACY_PREFIX = "https://google.com/cast#";
-
-/** `base::UnescapeURLComponent` with the rules `ParseLegacyCastUrl` uses, close enough for app ids. */
-function unescape(value: string): string {
-  const spaced = value.replace(/\+/g, " ");
-  try {
-    return decodeURIComponent(spaced);
-  } catch {
-    return spaced;
-  }
-}
-
 /**
- * The app ids `CastMediaSource::FromMediaSource` reads from a Cast presentation URL, in order: the path of a `cast:`
- * URL (`ParseCastUrl`), or every `__castAppId__` of the legacy `https://google.com/cast#...` form with its `(caps)`
- * suffix cut off (`ParseLegacyCastUrl`, which lets one URL list several apps). Null when the URL is neither form or
- * names no app.
+ * The app ids `CastMediaSource::GetAppIds` lists for a Cast presentation URL, in order (see cast-media-source.ts). Null
+ * when the URL is neither Cast form or names no app.
  */
 export function castUrlAppIds(url: string): string[] | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol === "cast:") {
-    // GURL::GetPath of `cast:ID?query` is `ID`
-    const id = unescape(parsed.pathname);
-    return id === "" ? null : [id];
-  }
-  // IsLegacyCastPresentationUrl: a case-insensitive prefix of the canonical spec
-  if (!parsed.href.toLowerCase().startsWith(LEGACY_PREFIX)) return null;
-  const ids: string[] = [];
-  for (const pair of parsed.hash.slice(1).split("/")) {
-    const eq = pair.indexOf("=");
-    if (eq === -1 || pair.slice(0, eq) !== "__castAppId__") continue;
-    const value = unescape(pair.slice(eq + 1));
-    const paren = value.indexOf("(");
-    const id = paren === -1 ? value : value.slice(0, paren);
-    if (id !== "") ids.push(id);
-  }
-  return ids.length > 0 ? ids : null;
+  return parseCastMediaSource(url)?.appInfos.map((i) => i.appId) ?? null;
 }
 
 /**
@@ -75,10 +40,7 @@ export function castUrlAppIds(url: string): string[] | null {
  */
 export function containsStreamingApp(url: string): boolean {
   const ids = castUrlAppIds(url);
-  if (ids !== null && ids.some((id) => CAST_STREAMING_APP_IDS.includes(id))) return true;
-  // electron-cast's own reading of the URL must not reach a streaming app either (it splits `ID(caps)` in a `cast:` path)
-  const own = parsePresentationUrl(url);
-  return own !== null && CAST_STREAMING_APP_IDS.includes(own.appId);
+  return ids !== null && ids.some((id) => CAST_STREAMING_APP_IDS.includes(id));
 }
 
 /** Classifies one presentation URL as Chrome's Cast provider would. */
@@ -100,6 +62,11 @@ export function classifyPresentationUrl(url: string): PresentationSourceKind {
 export interface LaunchableUrl {
   url: string;
   parsed: PresentationUrl;
+  /**
+   * Set when the URL names a Cast Streaming app and the page's origin may initiate mirroring: the source is served by a
+   * mirroring route (`CastActivityManager::DoLaunchSession`, `ContainsStreamingApp`), not by launching an app.
+   */
+  mirroring?: true;
 }
 
 /** A `cast-dial:` URL with the app it names (`MediaSource::AppNameFromDialSource`). */
@@ -127,15 +94,26 @@ export type SourceChoice =
  * chosen sink supports (`QueryResultManager`, `MediaRouterUI`), and a page is told a screen is available when any
  * source has one. A Cast sink supports a Cast app source and a DIAL sink a `cast-dial:` one, so this is the first
  * plain Cast app URL and, with `dial` on, the first `cast-dial:` URL naming a valid app; a mirroring or
- * `remote-playback:` entry never blocks an ordinary one next to it. With DIAL off a `cast-dial:` URL is one nothing
+ * `remote-playback:` entry never blocks an ordinary one next to it. With `mirroring` on (the page's origin may start
+ * mirroring) a Cast Streaming URL competes with the ordinary ones in URL order. With DIAL off a `cast-dial:` URL is one nothing
  * here understands.
  */
-export function chooseSource(urls: readonly string[], options: { dial?: boolean } = {}): SourceChoice {
+export function chooseSource(urls: readonly string[], options: { dial?: boolean; mirroring?: boolean } = {}): SourceChoice {
   let unservable = false;
   let cast: LaunchableUrl | undefined;
   let dial: DialSourceUrl | undefined;
   for (const url of urls) {
     const kind = classifyPresentationUrl(url);
+    if (kind === "mirroring" && options.mirroring === true) {
+      // site-initiated mirroring (`IsSiteInitiatedMirroringSource`) for an origin `GetOrigins` allows: a source like any
+      // other, served in URL order
+      if (cast === undefined) {
+        const parsed = parsePresentationUrl(url);
+        if (parsed !== null) cast = { url, parsed, mirroring: true };
+        else unservable = true;
+      }
+      continue;
+    }
     if (kind === "mirroring" || kind === "remote_playback") {
       unservable = true;
       continue;

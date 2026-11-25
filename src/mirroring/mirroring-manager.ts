@@ -8,7 +8,8 @@ import { randomUUID } from "node:crypto";
 import type { CastDevice } from "../discovery/index.ts";
 import { MirroringActivity, type MirroringClient, type MirroringServiceFactory } from "./mirroring-activity.ts";
 import type { MirroringStats } from "./stats/statistics.ts";
-import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringType } from "./routing.ts";
+import { classifyLaunchFailure, type RouterIssues } from "../electron/issues.ts";
+import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringSource, type MirroringType } from "./routing.ts";
 
 /** `MediaCastMode` values this library implements besides the Presentation API. */
 export type MirroringCastMode = "tab_mirror" | "desktop_mirror";
@@ -40,6 +41,8 @@ export interface MirroringRoute {
   castMode: MirroringCastMode;
   appId: string;
   displayName: string;
+  /** `MediaRoute::presentation_id`: what the route id carries after the prefix. */
+  presentationId: string;
   /** The Cast session id once the app is launched; "" while launching. */
   sessionId: string;
   /** True while the launch is in flight (`MediaRoute::is_connecting`). */
@@ -71,9 +74,22 @@ export interface MirroringManagerOptions {
    * frame in `routes_by_frame_` for every kind of route, so a page that becomes a mirroring source loses them.
    */
   terminateRoutesOfPage?(webContentsId: number): void;
+  /**
+   * `SwitchToFlingingIfPossible` (components/media_router/browser/mirroring_to_flinging_switcher.cc): called for the page a
+   * route now mirrors after its source tab switched (`MirroringActivity::DidGetTabSourceId` posts it). It runs in a later
+   * task, as Chrome's `PostTask` does.
+   */
+  switchToFlingingIfPossible?(webContentsId: number): void;
   /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
   commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
+  /** Where Chrome raises its issues for a mirroring route (`CastActivityManager`, `MediaRouterUI`); none without it. */
+  issues?: RouterIssues;
+  /**
+   * `GetCastMirroringPlayoutDelay`: the `--cast-mirroring-target-playout-delay` switch, used for a route that does not
+   * ask for a delay of its own (`MirroringActivity::StartSession`).
+   */
+  defaultTargetPlayoutDelayMs?: number;
 }
 
 interface Entry {
@@ -133,15 +149,42 @@ export class MirroringManager {
    */
   async startMirroring(sinkId: string, options: StartMirroringOptions): Promise<MirroringRoute> {
     if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
-    const device = this.options.findDevice(sinkId);
-    if (device === undefined) throw new MirroringRouteError("sink_not_found", `no sink ${sinkId}`);
     const mediaSourceId = this.mediaSourceFor(options);
     const source = mirroringSourceFor(mediaSourceId)!;
     if (options.targetPlayoutDelayMs !== undefined) source.targetPlayoutDelayMs = options.targetPlayoutDelayMs;
+    return this.launchRoute(sinkId, source, options.webContentsId, { castMode: options.castMode, withAudio: options.withAudio === true });
+  }
+
+  /**
+   * `CastActivityManager::DoLaunchSession` for a source a page supplied (a Cast Streaming URL of the Presentation API,
+   * `IsSiteInitiatedMirroringSource`): the activity mirrors the page's own tab and the route's source stays the URL.
+   * Whether the page's origin may do this is the caller's check (`kPresentationApiAllowlist`). No dialog is involved, so
+   * `MediaRouterUI`'s issues (route timeout, user declined, desktop audio) are not raised; the provider's are.
+   */
+  async startSiteInitiatedMirroring(sinkId: string, source: MirroringSource): Promise<MirroringRoute> {
+    if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
+    if (source.type !== "tab" || source.tabId === undefined) throw new TypeError("a site-initiated source mirrors a tab");
+    return this.launchRoute(sinkId, source, source.tabId);
+  }
+
+  /** `ui` is set when the route was requested from the dialog (`MediaRouterUI::CreateRoute`), as the app's own UI does. */
+  private async launchRoute(sinkId: string, source: MirroringSource, tabId: number | undefined, ui?: { castMode: MirroringCastMode; withAudio: boolean }): Promise<MirroringRoute> {
+    const options = { webContentsId: tabId };
+    const mediaSourceId = source.id;
+    const issues = this.options.issues;
+    const device = this.options.findDevice(sinkId);
+    if (device === undefined) throw new MirroringRouteError("sink_not_found", `no sink ${sinkId}`);
+    // `MirroringActivity::StartSession`: the URL's `target_playout_delay()` wins; only without one does the feature or
+    // command line (`GetCastMirroringPlayoutDelay`) apply
+    if (source.targetPlayoutDelayMs === undefined && this.options.defaultTargetPlayoutDelayMs !== undefined) {
+      source.targetPlayoutDelayMs = this.options.defaultTargetPlayoutDelayMs;
+    }
     // A sink is offered for a source only when it can run one of its apps (the sinks query of `CastMediaSource`).
     if (!sinkSupportsSource(source, device.capabilities)) {
       throw new MirroringRouteError("unable_to_cast", `${device.name} cannot receive this mirroring source`);
     }
+    // `MediaRouterUI::CreateRoute`, once the route can be made: the dialog's earlier issues go.
+    if (ui !== undefined) issues?.routeRequested();
     for (const entry of [...this.entries.values()]) {
       if (entry.route.sinkId === sinkId) entry.activity.stopMirroring();
     }
@@ -149,6 +192,9 @@ export class MirroringManager {
     if (source.type === "tab") this.terminateRoutesOfTab(options.webContentsId!);
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
+    // `CastActivityManager::LaunchSession` -> `MaybeShowIssueAtLaunch`
+    if (ui !== undefined) issues?.desktopAudioNotSupportedAtLaunch(ui.castMode, ui.withAudio, sinkId);
+    const launched: { failure?: ReturnType<typeof classifyLaunchFailure> } = {};
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
     const entry = { stats: undefined } as unknown as Entry;
     const client = this.options.createClient(device);
@@ -160,6 +206,21 @@ export class MirroringManager {
       createService: this.options.createService,
       commandLine: this.options.commandLine,
       log,
+      ...(issues === undefined ? {} : {
+        onLaunchStatus: (status) => {
+          if (status === "pending_authorization") issues.pendingUserAuth({ id: sinkId, name: device.name });
+          else issues.userAllowed(sinkId);
+        },
+        onLaunchFailed: (err) => {
+          // the provider's issue first (HandleLaunchSessionResponseFailures), then the dialog's (OnRouteResponseReceived)
+          const launchFailure = (launched.failure = classifyLaunchFailure(err));
+          issues.launchFailed(launchFailure, sinkId, routeId, err instanceof Error ? err.message : String(err));
+          if (ui === undefined) return;
+          if (launchFailure === "timed_out") issues.uiRouteTimeout(ui.castMode, sinkId, "");
+          else if (launchFailure === "user_not_allowed") issues.uiUserNotAllowed({ id: sinkId, name: device.name });
+          else if (launchFailure === "notification_disabled") issues.uiNotificationDisabled({ id: sinkId, name: device.name });
+        },
+      }),
       shouldFetchMirroringStats: () => this.fetchMirroringStats,
       onMirroringStats: (stats) => {
         if (this.entries.get(routeId) !== entry) return;
@@ -194,6 +255,9 @@ export class MirroringManager {
           if (other !== entry && other.activity.webContentsId === tab) other.activity.stopMirroring();
         }
         this.options.terminateRoutesOfPage?.(tab);
+        // `DidGetTabSourceId`: once the source moved, the new page may have a default request to switch to
+        const flinging = this.options.switchToFlingingIfPossible;
+        if (flinging !== undefined) queueMicrotask(() => flinging(tab));
       },
     });
     entry.activity = activity;
@@ -204,7 +268,11 @@ export class MirroringManager {
       await activity.start();
     } catch (err) {
       activity.stopMirroring();
-      throw err instanceof MirroringRouteError ? err : new MirroringRouteError("unknown_error", err instanceof Error ? err.message : String(err));
+      if (err instanceof MirroringRouteError) throw err;
+      // RouteRequestResultCode of a launch the receiver or the clock ended
+      const f = launched.failure;
+      const code = f === "timed_out" || f === "user_not_allowed" || f === "notification_disabled" ? f : "unknown_error";
+      throw new MirroringRouteError(code, err instanceof Error ? err.message : String(err));
     }
     if (activity.state === "stopped") throw new MirroringRouteError("unable_to_cast", "mirroring stopped while starting");
     return { ...entry.route };
@@ -297,10 +365,14 @@ export class MirroringManager {
    * End the mirroring routes of a page, and only those: what a Cast session launched by the page does to them. It must
    * not call `terminateRoutesOfPage`, which would end the session that was just launched.
    */
-  stopMirroringRoutesOfTab(webContentsId: number): void {
+  stopMirroringRoutesOfTab(webContentsId: number): Promise<void> {
+    const settled: Promise<void>[] = [];
     for (const entry of [...this.entries.values()]) {
-      if (entry.activity.webContentsId === webContentsId) entry.activity.stopMirroring();
+      if (entry.activity.webContentsId !== webContentsId) continue;
+      entry.activity.stopMirroring();
+      settled.push(entry.activity.stopSettled);
     }
+    return Promise.all(settled).then(() => {});
   }
 
   dispose(): void {
@@ -329,6 +401,7 @@ export class MirroringManager {
       id: routeId,
       mediaSource: activity.source.id,
       sinkId: activity.sink.id,
+      presentationId: routeId.slice(ROUTE_ID_PREFIX.length).split("/")[0]!,
       description: activity.description,
       castMode: type === "tab" ? "tab_mirror" : "desktop_mirror",
       appId: activity.app?.appId ?? activity.source.appInfos[0]!.appId,

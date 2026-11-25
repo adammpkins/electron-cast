@@ -180,7 +180,7 @@ test("sinks can be asked for by presentation URL", async () => {
     stop();
     return got;
   };
-  assert.deepEqual(await ids([URL1]), ["dev-tv", "dev-speaker", "dev-group"]);
+  assert.deepEqual(await ids([URL1]), ["dev-tv", "dev-group", "dev-speaker"]);
   assert.deepEqual(await ids([URL_VIDEO]), ["dev-tv"]);
   assert.deepEqual(await ids(["https://example.test/"]), []);
   assert.deepEqual(await ids(["https://example.test/", URL_VIDEO]), ["dev-tv"]);

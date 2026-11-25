@@ -2,8 +2,32 @@
 
 ## Unreleased
 
+### Chrome parity
+
+- **Cast presentation URLs are read as Chrome reads them** (`CastMediaSource::FromMediaSource`). New fields:
+  `supportedAppTypes`, `appParams`, `invisibleSender`, `streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio`.
+  A legacy URL with several `__castAppId__` is no longer reduced to its last app: a sink is offered the URL when it has
+  one of the apps and its capabilities, and the first app it can run is launched. Values are unescaped as Chrome unescapes
+  them, an unknown `autoJoinPolicy` is `page_scoped` (it was `tab_and_origin_scoped`), and a `cast:` URL's `(caps)` suffix is
+  no longer split off the app id. Tested on a Nest Hub Max (see below).
+- **A device with no `fn` is not a sink** (`CreateCastMediaSink`: an empty or missing `id` or `fn`). It was listed under its
+  instance name. TXT keys are now case-sensitive and the last repeat wins, as in Chrome.
+- **Sinks are listed in Chrome's order** (`MediaSink::CompareUsingCollator`): by icon type, then collated name, then id.
+  Group speakers now come before single speakers.
+- **Receiver labels survive a restart when the app gives `receiverIdHashToken`** a store: a 64-byte token as Chrome keeps in
+  the profile (`GetReceiverIdHashToken`). It was a 16-byte token made at every start.
+
 ### Tested on real devices
 
+- **Chrome parity, tested on a Nest Hub Max** (`npm run live:checks -- parity`). The CONNECT and LAUNCH JSON of a session
+  started by Google's SDK were logged and accepted (`flower.mp4` reached `PLAYING`); `Session.leave()` closed the page's
+  connection with reason `closed` and `Session.stop()` ended it as `terminated`; receiver labels were the same across two
+  runs with a token store and different without one; the sink list of eight real devices was in Chrome's order; a launch
+  of an app the device does not have raised the "Failed to cast" warning for that sink and showed in `getLogs`; a page with
+  `AllowAllSitesToInitiateMirroring` started mirroring with a streaming delay of 300 ms (the OFFER carried it, about
+  8,600 packets were sent and acknowledged in 30 s, and `terminate()` from the page ended the route); and a mirrored tab
+  whose page's SDK auto-joined was replaced by a Default Media Receiver session.
+- **Sessions started by another sender, tested on a Nest Hub Max** (`npm run live:checks -- parity --test nonlocal-join` and `nonlocal-terminate`). A Node script on its own connection launched the Default Media Receiver and played `flower.mp4`. The route was listed as non-local (`isLocal` false, no member, Chrome's description, the right sink); a page's `ORIGIN_SCOPED` auto-join did not take it, `chrome.cast.requestSessionById` did, and media status reached the page; the other sender's stop removed the route and ended the page's session; and `terminateRoute` stopped the app on the device. No library change was needed.
 - **DIAL dedup tested with real Chromecasts.** With DIAL on, three Chromecasts that answer both mDNS and DIAL were each listed
   once over 60 s, as Cast sinks and never as DIAL sinks (the DIAL entry shows for about a second until the Cast channel
   opens and then goes, as in Chrome's `CastMediaSinkServiceImpl::OnChannelOpenSucceeded`); the other five devices were
@@ -17,6 +41,13 @@
 
 ### Fixed
 
+- A mirroring route the receiver ended itself (its app is gone from the receiver status) no longer sends a CLOSE and a STOP
+  for the session the receiver dropped; it only closes its channel (`CastActivityManager::OnSessionRemoved`,
+  `RemoveActivity`).
+- A Cast session launched by a page that is being mirrored now stops the mirroring app and waits for the receiver to answer
+  the STOP before it sends the LAUNCH (`onSessionLaunched` is now `onSessionLaunching`, and may return a promise). Chrome
+  sends the two back to back (`DoLaunchSession` terminates the frame's mirroring route first); a Nest Hub Max answered a
+  LAUNCH sent right behind the STOP, and a LAUNCH sent alone, with `LAUNCH_ERROR` `CANCELLED`.
 - A sandboxed iframe without `allow-presentation` can no longer construct a `PresentationRequest`: it throws Blink's
   `SecurityError` ("The document is sandboxed and lacks the 'allow-presentation' flag.") as
   `PresentationRequest::Create` does. A page cannot read its sandbox flags, so this is seen only for an iframe that is
@@ -25,9 +56,40 @@
 
 ### Added
 
+- **The channel says what Chrome's says, and waits as Chrome's does** (CONNECT, LAUNCH and the close reasons tested on a Nest Hub Max; the approval wait and the timers not yet tried on a real device). CONNECT carries
+  `userAgent`, `connType`, `origin` and `senderInfo`; LAUNCH carries `language`, `supportedAppTypes` and `appParams`
+  (from the presentation URL); the app's virtual connection is invisible only for `invisibleSender`.
+  `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` and `USER_ALLOWED` keep a launch open (without extending its timeout), and
+  `USER_NOT_ALLOWED` and `USER_NOTIFICATIONS_DISABLED` fail it with Chrome's messages (`CastLaunchError`). Requests wait 5 s
+  and a launch 60 s (2 minutes at most), the keep-alive timers restart on every message received, the ping timer fires
+  once and a failed keep-alive write closes the channel. A page's close event carries blink's reason and message
+  ([docs/DESIGN.md](docs/DESIGN.md#what-the-channel-sends-and-waits-for)).
+- **Mirroring to flinging.** A page whose tab is mirrored and whose Cast SDK auto-joins (`defaultActionPolicy` other than
+  `cast_this_tab`) gets its app launched on the mirroring sink, which ends the mirroring
+  (`CastActivityManager::JoinSession`, `GetSinkForMirroringActivity`); switching the mirrored tab to a window with a default
+  presentation request does the same and hands the window a `connectionavailable`
+  (`SwitchToFlingingIfPossible`). The auto-join path is tested on a Nest Hub Max; switching the mirrored tab is unit-tested only.
+- **Site-initiated mirroring.** With the `mirroring` option, a page of `docs.google.com`, `meet.google.com` or
+  `music.youtube.com` (or any origin with the `AllowAllSitesToInitiateMirroring` feature in `app.commandLine`) can start
+  tab mirroring with a Cast Streaming URL in a `PresentationRequest` (`kPresentationApiAllowlist`,
+  `IsSiteInitiatedMirroringSource`). Other origins still see the source unavailable. Tested on a Nest Hub Max.
+- **The desktop capture escalation guard.** Joining a route as a desktop mirroring source is refused with Chrome's text
+  unless the route is desktop mirroring (`IsDesktopCaptureEscalation`).
+- **Issues, like Chrome's Cast dialog shows.** `registerIssuesObserver`, `clearIssue` and `clearTopIssueForSink` on the manager:
+  per-sink issues (a failed launch, a request waiting for the user on the TV, a declined one, a route timeout, "Use remote to
+  stop casting" for DIAL, "unable to cast", the macOS screen-capture permission), deduplicated, going away after 1 minute
+  (notifications) or 5 minutes (warnings), as Chrome's `IssueManager`. A failed launch is tested on a Nest Hub Max; the other issues and the dismissal timers are unit-tested only.
+- **Chrome's switches and features** read from `app.commandLine` (new `commandLine` option): `--disable-features=MediaRouter`,
+  `CastAllowAllIPs`, `ShowCastPermissionRejectedError`, `CastDesktopMirroringKeepLocalAudio`, `--cast-device-ips`,
+  `--cast-developer-certificate-path`, `--cast-mirroring-target-playout-delay`. The mapping of Chrome's enterprise policies
+  is in [docs/DESIGN.md](docs/DESIGN.md). Not yet tried on a real device.
+- **Diagnostics:** `getLogs` and `registerLogObserver` (Chrome's media router log) and `getCastProviderState`.
+- `mirroring.electron.systemPreferences`: the macOS Screen Recording permission is checked before a desktop mirroring route.
+
 - `npm run live:checks` ([examples/live-checks](examples/live-checks)): unattended live checks for DIAL dedup (read-only) and
-  for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, and the
-  app's own UI. The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.
+  for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, the
+  app's own UI, and the new `parity` checks (wire fields, close reasons, receiver-id token, sink order, issues,
+  site-initiated mirroring, mirroring to flinging). The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.
 
 ## 0.5.0-next.1 (prerelease)
 
@@ -290,7 +352,8 @@ senders started. Both are covered by unit tests with fakes.
 
 - **Mirroring and remote-playback sources are never launched as ordinary apps.** A presentation URL naming a Cast
   Streaming app (`0F5096E8`, `85CDB22F`), alone or beside other apps in one legacy URL, and a `remote-playback:` URL
-  are unavailable (`getAvailability()` is `false`) and `start()` rejects with `NotFoundError` ("No screens found.").
+  are unavailable (`getAvailability()` is `false`) and `start()` rejects with `NotFoundError` ("No screens found.") unless the
+  page's origin may start mirroring (see Site-initiated mirroring in the Unreleased section).
   Of several URLs the first ordinary Cast app one is served. The stand-in's `PresentationRequest` drops URLs of unknown
   protocol like Blink and throws `NotSupportedError` when none is left.
 - A device that fails device authentication no longer shows in the picker (see Changed).

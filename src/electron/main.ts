@@ -2,19 +2,22 @@ import { CastSessionService, type CastClientLike, type DeviceSource, type CastRe
 import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
-import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle } from "./presentation-handler.ts";
-import { randomBytes, randomUUID } from "node:crypto";
+import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle, type SiteMirroringHooks } from "./presentation-handler.ts";
+import { randomUUID } from "node:crypto";
 import {
   MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
   type CastManagerApi, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
+import { getReceiverIdHashToken, type ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
+import { parseCastMediaSource } from "./cast-media-source.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
+import { AUTO_JOIN_PRESENTATION_ID, siteInitiatedMirroringAllowed, siteMirroringSource } from "./mirroring-to-flinging.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-presentation.ts";
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
-import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
+import { AccessCodeCastDisabledError, type AccessCodeDevice, type AccessCodeOptions, type AccessCodeRememberedSink, type AddSinkResult } from "./access-code.ts";
 import { DiscoveryNetworkMonitor, NETWORK_ID_DISCONNECTED, type NetworkMonitor } from "./network-monitor.ts";
 import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
 import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
@@ -22,6 +25,12 @@ import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirr
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
+import { IssueManager, RouterIssues, originNameForDisplay } from "./issues.ts";
+import { MediaRouterLogger } from "./logger.ts";
+import {
+  castAllowAllIpsFeature, castMirroringPlayoutDelayMs, developerCertificates, fixedCastDevices, mediaRouterFeatureEnabled,
+  showCastPermissionRejectedError, type CommandLineLike,
+} from "./switches.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -43,7 +52,9 @@ export {
   type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
 export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type { CommandLineLike } from "./switches.ts";
 export type { NetworkMonitor } from "./network-monitor.ts";
+export type { ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
 export type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
 export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 export type {
@@ -54,7 +65,8 @@ export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
 export type {
-  CastManagerApi, DevicePickerContext, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
+  CastManagerApi, CastProviderState, CastSessionState, DevicePickerContext, Issue, IssueInfo, IssueSeverity, IssuesObserver,
+  LogCategory, LogEntry, LogObserver, LogSeverity, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
   MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
 } from "./manager-api.ts";
 
@@ -134,6 +146,12 @@ export interface CastManagerOptions {
    */
   wiredDisplay?: WiredDisplayOptions;
   /**
+   * Where the token that salts receiver labels is kept (Chrome: the profile pref `media_router.receiver_id_hash_token`), so
+   * a page that remembers a `receiverLabel` finds the same one after a restart. Without it the token is made again on
+   * each start. See {@link ReceiverIdHashTokenStore}.
+   */
+  receiverIdHashToken?: ReceiverIdHashTokenStore;
+  /**
    * Adding a device by its address, as Chrome's access code casting adds the device a code resolved to (see
    * {@link CastManager.addSinkByAddress}). Off unless `enabled`, as Chrome's `AccessCodeCastEnabled` policy is.
    */
@@ -152,6 +170,15 @@ export interface CastManagerOptions {
    * {@link NetworkMonitor} drives it in tests.
    */
   networkMonitor?: NetworkMonitor | false;
+  /**
+   * The app's command line (`app.commandLine`; Chrome's `base::CommandLine::ForCurrentProcess()`), where the Chrome switches
+   * that change the media router are read: `--disable-features=MediaRouter` (the router is off: no discovery, no sinks),
+   * `--enable-features=CastAllowAllIPs` (as `sinks.allowAllIps`, which wins when given, as the policy does),
+   * `--disable-features=ShowCastPermissionRejectedError`, `--cast-device-ips` (channels are opened to these addresses at
+   * start), `--cast-developer-certificate-path` (more trusted Cast root certificates, PEM) and
+   * `--cast-mirroring-target-playout-delay` (1 to 1000 ms). Defaults to `mirroring.electron.app.commandLine`.
+   */
+  commandLine?: CommandLineLike;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -235,7 +262,7 @@ function sharedChannelClient(deviceId: string, channel: CastClientLike | undefin
     send: (namespace, destinationId, payload) => {
       if (attached) need().send(namespace, destinationId, payload);
     },
-    launch: (appId) => need().launch(appId),
+    launch: (appId, launchOptions) => need().launch(appId, launchOptions),
     stop: (sessionId) => need().stop(sessionId),
     connectTransport: (transportId) => need().connectTransport(transportId),
     closeTransport: (transportId) => need().closeTransport(transportId),
@@ -286,7 +313,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
+  const commandLine: CommandLineLike | undefined = options.commandLine
+    ?? (options.mirroring !== undefined && "electron" in options.mirroring ? options.mirroring.electron.app?.commandLine : undefined);
+  // media_router::MediaRouterEnabled: the router "does not support dynamic enabling/disabling"; it is read once
+  const routerEnabled = mediaRouterFeatureEnabled(commandLine);
+  const logger = new MediaRouterLogger();
+  const issues = new RouterIssues(new IssueManager(), { showPermissionRejectedError: showCastPermissionRejectedError(commandLine), logger });
+  // GetCastAllowAllIPsPref: the policy (here `sinks.allowAllIps`) when set, else the CastAllowAllIPs feature
+  const sinkOptions: CastSinkOptions = { ...options.sinks, allowAllIps: options.sinks?.allowAllIps ?? castAllowAllIpsFeature(commandLine) };
+  // CastTrustStore::AddDefaultCertificates: the developer certificates are trusted besides Google's
+  const developerRoots = developerCertificates(commandLine, (message) => console.warn(`electron-cast: ${message}`));
   const discovery = options.discovery ?? new CastDiscovery();
+  // DnsSdRegistry::ServicesPermissionRejected -> MediaRouterDesktop::OnLocalDiscoveryPermissionRejected. Node cannot tell
+  // that the OS refused local network access (docs/DESIGN.md, "Local discovery permission"), so only a discovery source that
+  // knows says it, with a `permissionRejected` event.
+  const permissionSource = discovery as unknown as { on?(event: string, listener: () => void): unknown; off?(event: string, listener: () => void): unknown };
+  const onPermissionRejected = (): void => issues.localDiscoveryPermissionRejected();
+  permissionSource.on?.("permissionRejected", onPermissionRejected);
   const networkMonitor = options.networkMonitor === false ? undefined
     : options.networkMonitor ?? (options.discovery === undefined ? new DiscoveryNetworkMonitor() : undefined);
   const createClient = options.createClient ?? ((d: CastDevice, params: ChannelParams) =>
@@ -294,12 +337,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       host: d.host,
       port: d.port,
       verifyDevice: options.verifyDevices !== false,
+      ...(developerRoots.length > 0 ? { deviceAuth: { extraRoots: developerRoots } } : {}),
       connectTimeoutMs: params.connectTimeoutMs,
       heartbeatTimeoutMs: params.livenessTimeoutMs,
       heartbeatIntervalMs: params.pingIntervalMs,
     }));
-  // The receiver labels of Cast and DIAL routes are hashed with one per-process token, as in Chrome.
-  const hashToken = randomBytes(16).toString("hex");
+  // The receiver labels of Cast and DIAL routes are hashed with one token, kept between runs when the app gives a store
+  // (Chrome keeps it in the profile's prefs).
+  const hashToken = getReceiverIdHashToken(options.receiverIdHashToken);
   const dialOption = options.dial ?? (options.discovery === undefined);
   // A DIAL sink whose processed UDN is a Cast sink's id is removed: CastMediaSinkServiceImpl removes it from the DIAL
   // sink service when the Cast channel opens (OnChannelOpenSucceeded) and when the DIAL sink comes after the Cast one
@@ -310,7 +355,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     hashToken,
     isCastDevice: (uuid) => castSinks().some((d) => processDeviceUuid(d.id) === uuid),
     ...(typeof dialOption === "object" ? dialOption : {}),
+    log: (message) => {
+      logger.info("Discovery", "DialMediaSinkServiceImpl", message);
+      if (typeof dialOption === "object") dialOption.log?.(message);
+    },
   });
+  // DialMediaRouteProvider::HandleStopAppResult -> media_router_->OnIssue
+  dial?.provider.on("issue", (sinkId) => issues.cannotTerminate(sinkId));
   const routeListeners = new Set<() => void>();
   const notifyRoutes = (): void => {
     for (const l of [...routeListeners]) l();
@@ -435,6 +486,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     async selectDevice(devices, request, picker) {
       const mixed = mixedStarts.get(request.senderId);
       const choice = await options.selectDevice(devices, mixed === undefined ? request : { ...request, displays: mixed.displays }, picker);
+      // MediaRouterUI::CreateRoute: the dialog's earlier issues go once a sink is chosen
+      if (choice !== null && choice !== "stop" && !("display" in choice)) issues.routeRequested();
       if (typeof choice === "object" && choice !== null && "display" in choice) {
         if (mixed !== undefined && mixed.displays.some((d) => d.id === choice.display)) mixed.chosen = choice.display;
         return null;
@@ -442,7 +495,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       return choice;
     },
     allowOrigin: options.allowOrigin,
-    sinks: options.sinks,
+    sinks: sinkOptions,
+    issues,
     ...(dial !== undefined && dialSource !== undefined ? {
       dial: {
         source: dialSource,
@@ -450,11 +504,18 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     } : {}),
-    accessCode: options.accessCode,
+    accessCode: options.accessCode === undefined ? undefined : {
+      ...options.accessCode,
+      log: (level, message, sinkId) => {
+        logger[level === "info" ? "info" : level === "warning" ? "warning" : "error"]("Discovery", "AccessCodeCastSinkService", message, { sinkId });
+        options.accessCode?.log?.(level, message, sinkId);
+      },
+    },
     ...(networkMonitor !== undefined ? { networkMonitor } : {}),
     // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
-    // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
-    onSessionLaunched: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
+    // session ends a mirroring route of that page, before its LAUNCH is sent, as `DoLaunchSession` does. Subframe sender ids
+    // never match a tab, as only the main frame is one.
+    onSessionLaunching: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -516,12 +577,54 @@ export function createCastManager(options: CastManagerOptions): CastManager {
 
   const wired = options.wiredDisplay !== undefined && options.presentation !== false ? createWiredDisplay(options.wiredDisplay) : undefined;
 
+  /** The mirroring routes a page started through the Presentation API, so their connections end with them. */
+  const siteRoutes = new Set<string>();
+  /**
+   * Site-initiated mirroring and mirroring-to-flinging (see mirroring-to-flinging.ts). `routes_by_frame_` keys a route by
+   * the web contents' main frame, so a sender (any frame) is looked up through its window.
+   */
+  const siteMirroring: SiteMirroringHooks | undefined = options.mirroring === undefined ? undefined : {
+    allowed: (origin) => siteInitiatedMirroringAllowed(origin, commandLine),
+    async start({ senderId, url, deviceId }) {
+      const wc = senders.get(senderId)?.wc;
+      if (wc === undefined || mirroring === undefined) throw new Error("the page is gone");
+      // CastMediaSource::target_playout_delay() and site_requested_audio_capture() of the page's URL, from the one parse
+      const parsed = parseCastMediaSource(url);
+      const source = siteMirroringSource(url, wc.id, parsed ?? {});
+      if (source === undefined) throw new Error(`not a mirroring source: ${url}`);
+      try {
+        const route = await mirroring.startSiteInitiatedMirroring(deviceId, source);
+        siteRoutes.add(route.id);
+        return { routeId: route.id, presentationId: route.presentationId };
+      } catch (err) {
+        if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+        throw err;
+      }
+    },
+    terminate: (routeId) => void mirroring?.terminate(routeId),
+    sinkOfFrame(senderId) {
+      const wcId = senders.get(senderId)?.wc.id;
+      return mirroring?.routes().find((r) => r.castMode === "tab_mirror" && r.webContentsId === wcId)?.sinkId;
+    },
+  };
+
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
   const setUpPresentation = () => {
     const ipc = options.ipcMain;
     const on = ipc.on!.bind(ipc);
     const off = ipc.removeListener!.bind(ipc);
-    const h = new CastPresentationHandler({ service, token: hashToken, ...(dial !== undefined ? { dial } : {}), dialRoutesChanged: notifyRoutes });
+    const h = new CastPresentationHandler({
+      service,
+      token: hashToken,
+      ...(dial !== undefined ? { dial } : {}),
+      dialRoutesChanged: notifyRoutes,
+      ...(siteMirroring !== undefined ? { mirroring: siteMirroring } : {}),
+      // `MediaRouterDesktop::GetCurrentRoutes`: the routes a join can name, by presentation id
+      currentRoutes: () => [
+        ...(mirroring?.routes() ?? []).map((r) => ({ presentationId: r.presentationId, mediaSource: r.mediaSource })),
+        ...service.mediaRoutes().map((r) => ({ presentationId: `cast-session_${r.id}`, mediaSource: r.mediaSource })),
+      ],
+    });
     handler = h;
     const connections = new Map<string, { conn: PresentationConnectionHandle | null; sid: number }>();
     const watches = new Map<string, { ac: AbortController; sid: number }>();
@@ -563,9 +666,12 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (typeof local.connecting === "boolean") {
         (conn as LocalConnectionHandle).onconnect = () => sendTo(sid, { type: "statechange", connectionId, state: "connected" });
       }
-      conn.onclose = (state) => {
+      conn.onclose = (state, closeReason) => {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
-        sendTo(sid, { type: "statechange", connectionId, state });
+        // A closed connection's close event carries blink's reason and an empty message (PresentationConnection::DidClose(reason))
+        sendTo(sid, state === "closed"
+          ? { type: "statechange", connectionId, state, reason: closeReason ?? "closed", message: "" }
+          : { type: "statechange", connectionId, state });
       };
       if (opened?.(conn) === false) {
         // Declined (OnPresentationResponse hands a connection only to the request it answers): the session stays, but the
@@ -737,8 +843,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
               if (wired !== undefined && (displayOnly(urls) || wired.provider.local.isLocalPresentation(presentationId))) {
                 return await open(sid, p.connectionId, async () => wired.controllers.reconnect({ urls, senderId: sid }, presentationId));
               }
-              return await open(sid, p.connectionId,
-                () => h.reconnectPresentation({ urls: wired !== undefined && castUrlsOf(urls).length > 0 ? castUrlsOf(urls) : urls, origin, senderId: sid, presentationId }));
+              let joined: PresentationConnectionHandle | undefined;
+              const reconnected = await open(sid, p.connectionId, async () => {
+                joined = await h.reconnectPresentation({ urls: wired !== undefined && castUrlsOf(urls).length > 0 ? castUrlsOf(urls) : urls, origin, senderId: sid, presentationId });
+                return joined;
+              });
+              // an auto-join that flung the mirrored tab launched a session: it is the page's route now (`routes_by_frame_`)
+              if (reconnected.ok && joined?.launchedSessionId != null) launchedFrom.set(sid, joined.launchedSessionId);
+              return reconnected;
             }
           case "close":
           case "terminate": {
@@ -829,6 +941,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         const earlier = launchedFrom.get(webContentsId);
         if (earlier !== undefined && routes().some((r) => r.id === earlier)) void service.terminateSession(earlier);
         if (!senders.has(webContentsId)) throw unable("the window is gone");
+        // MediaRouterUI::CreateRoute: past the checks, "GetIssueManager()->ClearAllIssues()"
+        issues.routeRequested();
         const connectionId = randomUUID();
         let failure: unknown;
         const result = await open(
@@ -860,6 +974,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             : bridge === "extension_missing" ? "invalid_origin"
             : bridge === "invalid_parameter" ? "redundant_request"
             : "unknown_error";
+          // MediaRouterUI::OnRouteResponseReceived; a Cast launch raised its own at the launch (session-service)
+          if (code === "timed_out" && device.dial !== undefined) issues.uiRouteTimeout("presentation", device.id, originNameForDisplay(request.frameOrigin));
           throw new MediaRouteError(code, result.description);
         }
         if (device.dial !== undefined) {
@@ -869,11 +985,51 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           if (dialRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
           return dialRoute;
         }
+        if (!result.value.id.startsWith("cast-session_")) {
+          // a site-initiated mirroring route: the connection's id is the route's presentation id
+          const prefix = `urn:x-org.chromium:media:route:${result.value.id}/`;
+          const mirrorRoute = routes().find((r) => r.id.startsWith(prefix));
+          if (mirrorRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
+          return mirrorRoute;
+        }
         const sessionId = result.value.id.slice("cast-session_".length);
         launchedFrom.set(webContentsId, sessionId);
         const route = routes().find((r) => r.id === sessionId);
         if (route === undefined) throw new MediaRouteError("route_not_found", `no route ${sessionId}`);
         return route;
+      },
+      /**
+       * `SwitchToFlingingIfPossible` (components/media_router/browser/mirroring_to_flinging_switcher.cc): when the window has
+       * a default presentation request, join it with "auto-join" (`MediaRouter::JoinRoute`), which `CastActivityManager::
+       * JoinSession` turns into a launch on the mirroring sink; the answer goes to the page as `OnPresentationResponse`
+       * does, only while the request is still the default one. "Handle multiple URLs" is a TODO in Chrome, which joins
+       * with the first URL only.
+       */
+      async switchToFlingingIfPossible(webContentsId: number): Promise<void> {
+        const request = defaults.get(webContentsId);
+        if (request === null || !senders.has(webContentsId)) return;
+        const connectionId = randomUUID();
+        let joined: PresentationConnectionHandle | undefined;
+        const result = await open(
+          webContentsId,
+          connectionId,
+          async () => {
+            joined = await h.reconnectPresentation({
+              urls: [request.presentationUrls[0]!],
+              origin: request.frameOrigin,
+              senderId: webContentsId,
+              presentationId: AUTO_JOIN_PRESENTATION_ID,
+            });
+            return joined;
+          },
+          (conn) => {
+            const current = defaults.get(webContentsId);
+            if (current === null || !samePresentationRequest(current, request)) return false;
+            sendTo(webContentsId, { type: "connectionavailable", connectionId, id: conn.id, url: conn.url });
+            return true;
+          },
+        );
+        if (result.ok && joined?.launchedSessionId != null) launchedFrom.set(webContentsId, joined.launchedSessionId);
       },
       dispose(): void {
         ipc.removeHandler(`${channel}:presentation`);
@@ -909,8 +1065,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       terminateRoutesOfPage: (wcId) => {
         for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
       },
-      commandLine: "electron" in m ? m.electron.app?.commandLine : undefined,
-      log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
+      switchToFlingingIfPossible: (wcId) => void presentation?.switchToFlingingIfPossible(wcId),
+      commandLine,
+      issues,
+      ...(castMirroringPlayoutDelayMs(commandLine) !== undefined ? { defaultTargetPlayoutDelayMs: castMirroringPlayoutDelayMs(commandLine)! } : {}),
+      log: (level, message) => {
+        logger[level]("Mirroring", "MirroringActivity", message);
+        (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`);
+      },
+    });
+    // a route that ended ends the connections of the page that started it (`RemoveActivity`, `TERMINATED`)
+    mirroring.observe(() => {
+      const live = new Set(mirroring!.routes().map((r) => r.id));
+      for (const id of [...siteRoutes]) {
+        if (live.has(id)) continue;
+        siteRoutes.delete(id);
+        handler?.siteMirroringRouteEnded(id);
+      }
     });
   }
   const dialRoutes = (): MediaRoute[] =>
@@ -1045,6 +1216,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (presentation === undefined) return Promise.reject(new MediaRouteError("unable_to_cast", "presentation mode is off"));
       return presentation.startDefaultPresentation(webContentsId, sinkId);
     },
+  }, {
+    issues,
+    logger,
+    enabled: routerEnabled,
+    // MediaRouteStarter::GetScreenCapturePermission asks on macOS only; Electron cannot prompt, so a refusal is the answer
+    ...(options.mirroring !== undefined && "electron" in options.mirroring && options.mirroring.electron.systemPreferences !== undefined && process.platform === "darwin"
+      ? { screenCapturePermission: () => options.mirroring !== undefined && "electron" in options.mirroring && options.mirroring.electron.systemPreferences?.getMediaAccessStatus("screen") === "granted" }
+      : {}),
   });
   // Cast sinks coming and going decide which DIAL sinks are shown; the DIAL sinks are looked up again.
   castSinks = () => service.devices();
@@ -1055,20 +1234,30 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     ...api,
     ...(wired !== undefined ? { wiredDisplay: wired.api } : {}),
     async start() {
+      // MediaRouterEnabled false: Chrome makes no media router, so nothing is discovered and there are no sinks
+      if (!routerEnabled) {
+        logger.info("Discovery", "MediaRouter", "The media router is disabled (--disable-features=MediaRouter): no discovery is started.");
+        return;
+      }
       networkMonitor?.start();
       await discovery.start();
       dial?.start({ online: networkMonitor === undefined || networkMonitor.networkId() !== NETWORK_ID_DISCONNECTED });
+      // CastMediaSinkServiceImpl::Start: the devices of --cast-device-ips
+      service.openFixedSinks(fixedCastDevices(commandLine));
     },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
     settled: (options) => service.settled(options),
-    addSinkByAddress: (device) => service.addSinkByAddress(device),
+    addSinkByAddress: (device) => (routerEnabled ? service.addSinkByAddress(device) : Promise.reject(new AccessCodeCastDisabledError())),
     configureAccessCode: (settings) => service.configureAccessCode(settings),
     rememberedSinks: () => service.rememberedSinks(),
     async dispose() {
       if (disposed) return;
       disposed = true;
       api.dispose();
+      permissionSource.off?.("permissionRejected", onPermissionRejected);
+      issues.manager.dispose();
+      logger.dispose();
       defaults.dispose();
       mirroring?.dispose();
       disposeMirroring?.();

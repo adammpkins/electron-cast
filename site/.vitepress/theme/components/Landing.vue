@@ -208,6 +208,10 @@ const tabs = [
                 <th scope="row">Casting from iframes</th>
                 <td colspan="3">Tested on a Nest Hub Max, from a same-origin and a cross-origin iframe (media reached PLAYING). Moving or removing an iframe while it casts is unit-tested only.</td>
               </tr>
+              <tr>
+                <th scope="row">Chrome's rules for URLs, the channel and mirroring from a page</th>
+                <td colspan="3">Tested on a Nest Hub Max: the SDK's CONNECT and LAUNCH (the device accepted them and media reached PLAYING), the close reason of a page's connection (<code>leave()</code> closes with <code>closed</code>, <code>stop()</code> ends as terminated), receiver labels that survive a restart with a token store, sink order on eight real devices, a failed launch raising Chrome's "Failed to cast" issue and filling the media router log, a page that starts mirroring with a streaming delay of 300 ms (the OFFER carried it and frames flowed), a mirrored tab that the page's SDK turns into a Cast session, and a session another sender started (listed as a non-local route, joined by id with <code>requestSessionById</code> while auto-join left it alone, ended with the other sender's stop, and stopped by <code>terminateRoute</code>). Ported from Chromium and unit-tested only so far: the rest of the URL parameters, the approval wait of TV receivers, the other issues, Chrome's other switches, and switching a mirrored tab to a window that has a default request.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -220,6 +224,7 @@ const tabs = [
               <li>Mirroring at 1080p without the video lag on a Chromecast Ultra (under investigation)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>
+              <li>The Chrome-parity rules above, tried on a real device</li>
             </ul>
           </div>
           <div>

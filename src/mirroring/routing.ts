@@ -81,6 +81,11 @@ export interface MirroringSource {
   siteRequestedAudioCapture: boolean;
   /** `target_playout_delay`. */
   targetPlayoutDelayMs?: number;
+  /**
+   * A site-initiated source keeps its Cast URL as `id` (as `CastMediaSource` keeps the source id), so the page it
+   * captures cannot be read from the id: this is the `webContents.id` of the tab (`frame_tree_node_id_` of the activity).
+   */
+  tabId?: number;
 }
 
 /**

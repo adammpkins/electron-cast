@@ -95,3 +95,26 @@ test("a media request that cannot be sent gets no reply, like Chromium", async (
   await tick();
   assert.equal(got.length, n);
 });
+
+test("a presentation URL's supportedAppTypes, appParams and invisibleSender reach the LAUNCH from the one CastMediaSource parse", async () => {
+  const clients: FakeClient[] = [];
+  let handler: CastPresentationHandler | undefined;
+  const service = waitForSinks(new CastSessionService({
+    sinks: FAST_SINKS,
+    devices: new FakeDevices(),
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      clients.push(c);
+      return c;
+    },
+    selectDevice: async (list) => list.find((d) => d.id === TV.id) ?? null,
+    emit: (id, ev) => handler?.onServiceEvent(id, ev),
+  }));
+  handler = new CastPresentationHandler({ service, token: "tok" });
+  const url = "cast:233637DE?supportedAppTypes=ANDROID_TV,WEB&appParams=%7B%22a%22%3A1%7D&invisibleSender=true";
+  await handler.startPresentation({ urls: [url], origin: PAGE.origin, senderId: PAGE.id });
+  const c = clients[0]!;
+  assert.deepEqual(c.launchOptions[0]?.supportedAppTypes, ["ANDROID_TV", "WEB"]);
+  assert.deepEqual(c.launchOptions[0]?.appParams, { a: 1 });
+  assert.deepEqual(c.transportOptions.at(-1), { invisible: true });
+});

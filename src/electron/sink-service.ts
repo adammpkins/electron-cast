@@ -126,6 +126,11 @@ export interface OpenSinkOptions {
   params?: ChannelParams;
   /** Delays between attempts, instead of the service's `retry` (Chrome: the `BackoffEntry` passed to `OpenChannel`). */
   backoff?: OpenBackoff;
+  /**
+   * How the sink is said to have been found (Chrome's `SinkSource`, which also picks the retry policy of the attempts).
+   * Default `"access-code"`; `"discovery"` is `kMdns`, for the devices of `--cast-device-ips`.
+   */
+  source?: "discovery" | "access-code";
 }
 
 /** Carries one run of attempts: its options and who to tell how it ended (Chrome's `ChannelOpenedCallback`). */
@@ -280,7 +285,7 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
         return;
       }
       this.waiting.add(resolve);
-      this.openChannel(device, "access-code", 0, {
+      this.openChannel(device, options.source ?? "access-code", 0, {
         ...options,
         done: (opened) => {
           this.waiting.delete(resolve);

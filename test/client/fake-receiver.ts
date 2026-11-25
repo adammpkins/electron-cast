@@ -90,11 +90,16 @@ export class FakeReceiver {
     return this.waitFor((m) => m.namespace === NS_CONNECTION && m.json?.type === "CONNECT");
   }
 
-  waitFor(pred: (m: Received) => boolean, timeoutMs = 2000): Promise<Received> {
+  // The bound only ends a test that would hang, so it is generous: a loaded machine can take seconds to finish a TLS handshake.
+  // Both timers are cleared on either outcome so a timed-out wait leaves nothing running.
+  waitFor(pred: (m: Received) => boolean, timeoutMs = 10_000): Promise<Received> {
     const found = this.received.find(pred);
     if (found) return Promise.resolve(found);
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("FakeReceiver.waitFor timed out")), timeoutMs);
+      const t = setTimeout(() => {
+        clearInterval(check);
+        reject(new Error("FakeReceiver.waitFor timed out"));
+      }, timeoutMs);
       const check = setInterval(() => {
         const m = this.received.find(pred);
         if (m) {

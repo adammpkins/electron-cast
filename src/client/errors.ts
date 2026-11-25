@@ -31,6 +31,25 @@ export class CastRequestError extends Error {
   }
 }
 
+/** How a LAUNCH failed, as Chrome's `LaunchSessionResponse::Result` tells them apart. */
+export type CastLaunchFailure = "user_not_allowed" | "notification_disabled" | "error";
+
+/**
+ * The receiver refused or failed a LAUNCH. `description` is the text Chrome gives the page for the same failure
+ * (CastActivityManager::HandleLaunchSessionResponse), which is what a presentation request rejects with.
+ */
+export class CastLaunchError extends CastRequestError {
+  readonly failure: CastLaunchFailure;
+  readonly description: string;
+
+  constructor(response: Record<string, unknown>, failure: CastLaunchFailure, description: string) {
+    super(response);
+    this.name = "CastLaunchError";
+    this.failure = failure;
+    this.description = description;
+  }
+}
+
 /** Why a device failed authentication; see {@link CastAuthError}. */
 export type CastAuthReason =
   | "timeout"

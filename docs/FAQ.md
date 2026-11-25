@@ -58,7 +58,7 @@ It works on sessions other senders started too. That is also how to build your o
 
 ## Can it mirror a tab or the desktop?
 
-Not yet. Mirroring is in progress; until it lands, a mirroring source is reported unavailable. The Remote Playback API
+Tab and desktop mirroring are in `0.5` (`next`). A page can start mirroring through a Cast Streaming presentation URL only from the origins Chrome allows. The Remote Playback API
 (`video.remote`) needs support in Electron itself, so `remote-playback:` sources are reported unavailable. See the
 [parity table](../README.md#chrome-parity).
 

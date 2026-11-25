@@ -18,6 +18,12 @@ export interface CastAppSource {
   appIds: string[];
   /** Capability names every sink must have (`required_capabilities`). */
   capabilities: string[];
+  /**
+   * The apps of a Cast presentation URL with the capabilities each needs (`CastMediaSource::app_infos()`). When given, a sink
+   * counts when one app is available on it and the sink has all of that app's capabilities, as
+   * `CastAppAvailabilityTracker::GetAvailableSinks` decides; `capabilities` is then not used.
+   */
+  appInfos?: { appId: string; requiredCapabilities: number }[];
 }
 
 /** What the discovery needs of the sink service. */
@@ -29,7 +35,7 @@ export interface AppDiscoverySinks {
   clientOf(deviceId: string): CastClientLike | undefined;
 }
 
-const CAPABILITY_BITS: Record<string, number> = { video_out: 1, video_in: 2, audio_out: 4, audio_in: 8, multizone_group: 32 };
+const CAPABILITY_BITS: Record<string, number> = { video_out: 1, video_in: 2, audio_out: 4, audio_in: 8, dev_mode: 16, multizone_group: 32 };
 
 /** `capabilities.HasAll(required_capabilities)` in `GetAvailableSinks`; unknown names are ignored, as in the session service. */
 function hasAll(device: CastDevice, capabilities: string[]): boolean {
@@ -40,7 +46,8 @@ function hasAll(device: CastDevice, capabilities: string[]): boolean {
   return true;
 }
 
-const sourceKey = (s: CastAppSource): string => JSON.stringify([[...s.appIds].sort(), [...s.capabilities].sort()]);
+const sourceKey = (s: CastAppSource): string =>
+  JSON.stringify([[...s.appIds].sort(), [...s.capabilities].sort(), (s.appInfos ?? []).map((i) => [i.appId, i.requiredCapabilities]).sort()]);
 
 interface Query {
   source: CastAppSource;
@@ -84,8 +91,12 @@ export class CastAppDiscovery {
 
   /** `GetAvailableSinks` then `GetSinksByIds`: the current sinks that have one of the source's apps and its capabilities. */
   availableSinks(source: CastAppSource): CastDevice[] {
-    return this.sinkService.sinks().filter((d) =>
-      hasAll(d, source.capabilities) && source.appIds.some((app) => this.availability(d.id, app).result === "available"));
+    const available = (d: CastDevice, app: string): boolean => this.availability(d.id, app).result === "available";
+    if (source.appInfos !== undefined) {
+      return this.sinkService.sinks().filter((d) =>
+        source.appInfos!.some((i) => available(d, i.appId) && (d.capabilities & i.requiredCapabilities) === i.requiredCapabilities));
+    }
+    return this.sinkService.sinks().filter((d) => hasAll(d, source.capabilities) && source.appIds.some((app) => available(d, app)));
   }
 
   /**
@@ -100,7 +111,14 @@ export class CastAppDiscovery {
     const key = sourceKey(source);
     let query = this.queries.get(key);
     if (query === undefined) {
-      query = { source: { appIds: [...source.appIds], capabilities: [...source.capabilities] }, callbacks: new Set() };
+      query = {
+        source: {
+          appIds: [...source.appIds],
+          capabilities: [...source.capabilities],
+          ...(source.appInfos === undefined ? {} : { appInfos: source.appInfos.map((i) => ({ ...i })) }),
+        },
+        callbacks: new Set(),
+      };
       this.queries.set(key, query);
       for (const appId of this.register(query.source)) {
         for (const sink of this.sinkService.sinks()) void this.request(sink.id, appId);

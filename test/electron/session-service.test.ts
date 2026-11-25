@@ -1,7 +1,8 @@
+import type { RouterIssues } from "../../src/electron/issues.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceChoice } from "../../src/electron/session-service.ts";
-import { CastTimeoutError } from "../../src/client/index.ts";
+import { CastLaunchError, CastTimeoutError } from "../../src/client/index.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
 import { FakeDevices, FakeClient, EventLog, TV, SPEAKER, GROUP, device, launchError, tick, FAST_SINKS, waitForSinks } from "./fakes.ts";
@@ -18,7 +19,8 @@ function setup(opts: {
   allowOrigin?: (o: string) => boolean;
   tweak?: (c: FakeClient) => void;
   sinks?: Record<string, unknown>;
-  onSessionLaunched?: (senderId: number) => void;
+  onSessionLaunching?: (senderId: number) => void;
+  issues?: RouterIssues;
 } = {}) {
   const devices = opts.devices ?? new FakeDevices();
   const log = new EventLog();
@@ -38,7 +40,8 @@ function setup(opts: {
       return opts.pick ? opts.pick(list, req) : (list.find((d) => d.id === TV.id) ?? null);
     },
     allowOrigin: opts.allowOrigin,
-    onSessionLaunched: opts.onSessionLaunched,
+    onSessionLaunching: opts.onSessionLaunching,
+    ...(opts.issues === undefined ? {} : { issues: opts.issues }),
     emit: log.emit,
   }));
   return { service, devices, log, clients, picks };
@@ -685,11 +688,18 @@ test("a launch that fails leaves what the device was running listed", async () =
   assert.deepEqual(service.mediaRoutes().map((r2) => r2.id), ["other"]);
 });
 
-test("onSessionLaunched fires for a launch, not for a join, and sessionsLaunchedBy names the launcher's sessions", async () => {
+test("onSessionLaunching fires for a launch, before the LAUNCH is sent, not for a join, and sessionsLaunchedBy names the launcher's sessions", async () => {
   const launched: number[] = [];
-  const { service } = setup({ onSessionLaunched: (id) => void launched.push(id) });
+  const launchSentBefore: boolean[] = [];
+  const { service, clients } = setup({
+    onSessionLaunching: (id) => {
+      launched.push(id);
+      launchSentBefore.push(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))));
+    },
+  });
   const snap = await session(service, PAGE);
   assert.deepEqual(launched, [PAGE.id]);
+  assert.deepEqual(launchSentBefore, [false], "the frame's earlier route is stopped before the LAUNCH goes out (DoLaunchSession)");
   assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), [snap.sessionId]);
   assert.deepEqual(service.sessionsLaunchedBy(PAGE2.id), []);
   await init(service, PAGE2);
@@ -700,4 +710,89 @@ test("onSessionLaunched fires for a launch, not for a join, and sessionsLaunched
   const ended = await service.terminateSession(snap.sessionId);
   assert.equal(ended.ok, true);
   assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), []);
+});
+
+test("the LAUNCH waits for what onSessionLaunching returns (the old route's STOP being answered), as a Nest Hub Max needs", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const { service, clients } = setup({ onSessionLaunching: () => gate });
+  await init(service);
+  const pending = service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))), false, "no LAUNCH while the STOP is unanswered");
+  release();
+  const r = await pending;
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))), true);
+});
+
+test("the launch carries the URL's supportedAppTypes and parsed appParams, and an invisible sender connects invisibly", async () => {
+  const { service, clients } = setup();
+  await init(service);
+  const r = await service.handle(PAGE, "requestSession", {
+    appId: YT, capabilities: ["audio_out"], timeoutMs: 5000,
+    supportedAppTypes: ["WEB", "ANDROID_TV"], appParams: '{"a":[1,2],"b":"x"}', connectionType: "invisible",
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const c = clients[0]!;
+  assert.deepEqual(c.launchOptions[0]?.supportedAppTypes, ["WEB", "ANDROID_TV"]);
+  assert.deepEqual(c.launchOptions[0]?.appParams, { a: [1, 2], b: "x" });
+  assert.deepEqual(c.transportOptions.at(-1), { invisible: true });
+
+  // Without them the launch asks for nothing extra and the transport connection is strong
+  const plain = setup();
+  await init(plain.service);
+  assert.equal((await plain.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 })).ok, true);
+  assert.equal(plain.clients[0]!.launchOptions[0]?.appParams, undefined);
+  assert.equal(plain.clients[0]!.launchOptions[0]?.supportedAppTypes, undefined);
+  assert.equal(plain.clients[0]!.transportOptions.at(-1), undefined);
+});
+
+test("appParams that are not JSON fail the launch before anything is sent; JSON null is left out", async () => {
+  const bad = setup();
+  await init(bad.service);
+  const r = await bad.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000, appParams: "{nope" });
+  assert.equal(!r.ok && r.description, "Invalid JSON Format of appParams");
+  assert.deepEqual(bad.clients[0]!.launchOptions, [], "no LAUNCH was sent");
+
+  const none = setup();
+  await init(none.service);
+  const ok = await none.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000, appParams: "null" });
+  assert.equal(ok.ok, true);
+  assert.equal(none.clients[0]!.launchOptions[0]?.appParams, undefined);
+});
+
+test("a launch the user declines, or that notifications block, fails with Chrome's messages; a timeout says so", async () => {
+  const declined = setup({ tweak: (c) => { c.launchError = new CastLaunchError({ type: "LAUNCH_ERROR", requestId: 1 }, "user_not_allowed", "Failed to launch session as the user declined the cast request."); } });
+  await init(declined.service);
+  const r = await declined.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  assert.deepEqual([!r.ok && r.code, !r.ok && r.description], ["session_error", "Failed to launch session as the user declined the cast request."]);
+
+  const slow = setup({ tweak: (c) => { c.launchDelayMs = 200; } });
+  await init(slow.service);
+  const t = await slow.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 40 });
+  assert.deepEqual([!t.ok && t.code, !t.ok && t.description], ["timeout", "Failed to launch session due to timeout."]);
+
+  const timesOut = setup({ tweak: (c) => { c.launchError = new CastTimeoutError("launch timed out"); } });
+  await init(timesOut.service);
+  const t2 = await timesOut.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  assert.equal(!t2.ok && t2.description, "Failed to launch session due to timeout.");
+});
+
+test("a launch that waits for the user's approval reports pending authorization and allowed, then goes on", async () => {
+  // The launch status is wired once: the session service raises and clears Chrome's pending-authorization issue
+  const seen: string[] = [];
+  const issues = {
+    pendingUserAuth: (sink: { id: string }) => seen.push(`${sink.id} pending_authorization`),
+    userAllowed: (sinkId: string) => seen.push(`${sinkId} allowed`),
+    launchFailed() {},
+  } as unknown as RouterIssues;
+  const { service } = setup({
+    tweak: (c) => { c.launchStatuses = ["pending_authorization", "allowed"]; },
+    issues,
+  });
+  await init(service);
+  const r = await service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(seen, [`${TV.id} pending_authorization`, `${TV.id} allowed`]);
 });

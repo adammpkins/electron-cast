@@ -40,3 +40,22 @@ ends its own session, and quits within `--secs` (default 80) whatever happens.
 | `default-presentation` | Casting from the app's own UI: the main process calls `startCasting(sinkId, { webContentsId })` for the page's default `PresentationRequest` (the SDK sets it), with no click. The page gets `connectionavailable` and a started session; media plays; `terminateRoute` ends it. |
 
 The media is a short MDN sample video. The `gtv-videos-bucket` samples answer 403 now.
+
+## `parity`: Chrome's rules on one device
+
+`npm run live:checks -- parity --sink "<device name>" --test <name> --yes [--secs 85] [--logdir <dir>]` takes the same
+guards as `cast` (the idle guard, `--yes`, a hard time cap of 90 s) and logs the Cast channel's JSON (the AES key and IV of an
+OFFER are redacted), `getLogs` and `getCastProviderState`, then writes `<logdir>/<test>.json`. Every other device is hidden.
+
+| `--test` | What it does |
+|---|---|
+| `wire` | Google's SDK launches the Default Media Receiver; the CONNECT and LAUNCH JSON are logged and the device must accept them (a session starts, the sample video reaches `PLAYING`). |
+| `close-leave` | `session.leave()` closes the page's connection with reason `closed`. |
+| `close-stop` | `session.stop()` ends it as `terminated`. |
+| `token` | With `--token-file <path>`, two runs give the same receiver label; without it they differ. Nothing is cast. |
+| `sinks` | The sink list is in Chrome's order (cast, cast_audio_group, cast_audio, names by collator). Nothing is cast. |
+| `issues` | A launch of app `00000000` fails and the "Failed to cast" issue reaches `registerIssuesObserver`. |
+| `site-mirror` | Run with `--enable-features=AllowAllSitesToInitiateMirroring`. A page starts mirroring with `cast:0F5096E8?streamingTargetPlayoutDelayMillis=300`; the OFFER's `targetDelay` must be 300 and frames must flow; the page terminates it. |
+| `nonlocal-join` | Another sender (`other-sender.mjs`, a Node script on its own connection) launches the Default Media Receiver and plays `flower.mp4`. The route must be non-local (`isLocal` false, no member, the session's status text as description); the page's auto-join must not take it; `chrome.cast.requestSessionById` must (media status reaches the page); when the other sender stops the app the route goes and the page gets `isAlive` false and a terminated connection. |
+| `nonlocal-terminate` | The same start; then `terminateRoute` from Electron must stop the app on the device (the other sender's receiver status no longer lists it). |
+| `fling` | A tab is mirrored, then the page's SDK auto-joins (`origin_scoped`) for the Default Media Receiver; the mirroring route must be replaced by the app session. |

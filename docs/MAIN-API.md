@@ -19,6 +19,10 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `registerMediaSinksObserver(observer, query?)` | `MediaSinksObserver` (constructed with a `MediaSource` and an origin, or for all sinks; `Init()` registers it) and its `OnSinksUpdated(sinks, origins)`. `MediaRouter::RegisterMediaSinksObserver` is private to the observer class | `components/media_router/browser/media_router.h`, `components/media_router/browser/media_sinks_observer.h` |
 | `MediaSink` | `media_router::MediaSink`: `id`, `name`, `icon_type`, `provider_id` (no description) | `components/media_router/common/media_sink.h` |
 | `MediaSink.iconType` | `GetCastSinkIconType`: `video_out` gives `CAST`, else a multizone group gives `CAST_AUDIO_GROUP`, else `CAST_AUDIO` | `chrome/browser/media/router/discovery/mdns/media_sink_util.cc` |
+| `registerIssuesObserver(observer)` | `IssueManager::RegisterObserver` (`IssuesObserver::OnIssue`, `OnIssuesCleared`): told of the top issue now and when it changes | `components/media_router/browser/issue_manager.cc` |
+| `clearIssue(id)`, `clearTopIssueForSink(sinkId)` | `IssueManager::ClearIssue`, `MediaRouter::ClearTopIssueForSink` | `components/media_router/browser/issue_manager.cc` |
+| `getLogs()`, `registerLogObserver(observer)` | `LoggerImpl::GetLogsAsValue`, `AddObserver` | `components/media_router/browser/logger_impl.cc` |
+| `getCastProviderState()` | `CastMediaRouteProvider::GetState` | `chrome/browser/media/router/providers/cast/cast_media_route_provider.cc` |
 | `registerMediaRoutesObserver(observer)` | `MediaRoutesObserver` (constructed with the router) and `OnRoutesUpdated(routes)`; `MediaRouter::RegisterMediaRoutesObserver` is private to it | `components/media_router/browser/media_routes_observer.h` |
 | `MediaRoute` (`mediaSource`, `sinkId`, `description`) | `media_router::MediaRoute` (`media_source`, `media_sink_id`, `description`; the id is `media_route_id`) | `components/media_router/common/media_route.h`, `media_route.cc` |
 | `MediaRoute.description` | `CastSession::GetRouteDescription`: the status text, else the display name | `chrome/browser/media/router/providers/cast/cast_internal_message_util.cc` |
@@ -420,6 +424,7 @@ device that mDNS also finds is a second sink until the same-address rule removes
 | `AccessCodeOptions` | The `accessCode` option: `enabled`, `deviceDuration` (seconds), `store`, and optional `log` and `now` (tests). |
 | `AccessCodeDevice`, `AccessCodeCapabilities` | What `addSinkByAddress` takes: `id`, `name`, `capabilities` (`videoOut`, `videoIn`, `audioOut`, `audioIn`, `devMode`), `ipV6Address` or `ipV4Address`, and `port`. |
 | `AddSinkResult`, `SinkCreationFailure` | How adding ended: `ok` with the `sinkId`, or `response_malformed`, `sink_creation_error` (with its `reason`) or `channel_open_error`. |
+| `ReceiverIdHashTokenStore` | The `receiverIdHashToken` option: `load` and `save` the token that salts receiver labels (Chrome's `media_router.receiver_id_hash_token` pref), so a page's remembered `receiverLabel` still matches after a restart. Without it the token lasts for the process. |
 | `AccessCodeRememberedSink`, `AccessCodeStore` | A remembered device, and where they are kept between runs (`load`, `save`). |
 | `AccessCodeCastDisabledError` | What `addSinkByAddress` rejects with unless access code casting is enabled. |
 | `createAccessCodeSink(device)` | Chrome's checks on a device, without opening anything: the sink it would be, or why it cannot be one. |

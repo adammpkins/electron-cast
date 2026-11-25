@@ -226,7 +226,8 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     cast.switchMirroringSourceTab(route.id, page2.webContents.id);
     assert.equal(page.webContents.isAudioMuted(), false, "the old tab is audible again");
     assert.equal(page2.webContents.isAudioMuted(), true, "the new tab is muted locally");
-    await wait(3000);
+    // Wait for frames rather than a fixed time: a slow macOS runner delivers ~11 fps from a hidden window.
+    for (let t = 0; t < 10000 && s.validVideoFrames - before < 20; t += 250) await wait(250);
     console.log(`smoke: [tab] after the switch: ${s.validVideoFrames - before} more valid VP8 frames, audio ${s.validAudioFrames}, invalid ${s.invalidFrames}`);
     assert.ok(s.validVideoFrames - before >= 20, `only ${s.validVideoFrames - before} frames after the switch`);
     assert.equal(receiver.lastOffer, offer, "the switch renegotiated");

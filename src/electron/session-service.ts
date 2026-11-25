@@ -2,10 +2,16 @@ import type { BridgeEvent, BridgeResult, SessionSnapshot, VolumeSnapshot } from 
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
-import { CastTimeoutError } from "../client/index.ts";
+import { CastLaunchError, CastTimeoutError } from "../client/index.ts";
+import type { LaunchOptions } from "../client/index.ts";
+import { launchFieldsOf } from "./launch-fields.ts";
+import type { LaunchFields } from "./launch-fields.ts";
+import { classifyLaunchFailure, originNameForDisplay, type RouterIssues } from "./issues.ts";
 import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
+import { sortDevicesAsSinks } from "./sink-order.ts";
+import { chooseAppInfo } from "./cast-media-source.ts";
 import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sink-service.ts";
 import type { NetworkMonitor } from "./network-monitor.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
@@ -48,13 +54,13 @@ export interface CastClientLike {
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
-  launch(appId: string): Promise<ReceiverApplication>;
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication>;
   stop(sessionId: string): Promise<ReceiverStatus>;
   setVolume(volume: { level: number } | { muted: boolean }): Promise<ReceiverStatus>;
   getStatus(): Promise<ReceiverStatus>;
   /** `GET_APP_AVAILABILITY`; a client without it is taken to have every app. */
   getAppAvailability?(appIds: string[]): Promise<Record<string, boolean>>;
-  connectTransport(transportId: string): void;
+  connectTransport(transportId: string, options?: { invisible?: boolean }): void;
   closeTransport(transportId: string): void;
   on(event: "message", listener: (msg: ClientMessage) => void): unknown;
   on(event: "receiverStatus", listener: (status: ReceiverStatus) => void): unknown;
@@ -135,10 +141,21 @@ export interface CastSessionServiceOptions {
    */
   ownsSession?(sessionId: string, sinkId: string): boolean;
   /**
-   * A session was launched for `senderId` (`CastActivityManager::DoLaunchSession`, where a route from the frame is
-   * recorded in `routes_by_frame_`). Not called for a join, which Chrome does not record there.
+   * A session is about to be launched for `senderId` (`CastActivityManager::DoLaunchSession`, where the frame's earlier
+   * route is stopped and the new one recorded in `routes_by_frame_`, before the LAUNCH is sent). Called before the LAUNCH
+   * goes out, as Chrome stops the old route first, and the LAUNCH waits for the returned promise (the old app's STOP being
+   * answered). Chrome sends the two back to back; tried on a Nest Hub Max, a LAUNCH sent while the tab's mirroring app was
+   * still running, or right behind its STOP, was answered with `LAUNCH_ERROR` `CANCELLED`. Not called for a join, which
+   * Chrome does not record there.
    */
-  onSessionLaunched?(senderId: number): void;
+  onSessionLaunching?(senderId: number): void | Promise<void>;
+  /**
+   * Where Chrome raises its issues (`CastActivityManager` and `MediaRouterUI`); none are raised without it. A launch the
+   * receiver holds for its user's approval (`pending_authorization`, LAUNCH_STATUS USER_PENDING_AUTHORIZATION) raises the
+   * sink's notification and `allowed` (USER_ALLOWED) clears it (`SendPendingUserAuthNotification`, `ClearTopIssueForSink`);
+   * the launch timeout keeps running meanwhile.
+   */
+  issues?: RouterIssues;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -199,6 +216,7 @@ const CAPABILITY_BITS: Record<string, number> = {
   video_in: 2,
   audio_out: 4,
   audio_in: 8,
+  dev_mode: 16,
   multizone_group: 32,
 };
 
@@ -245,13 +263,27 @@ function parseInitialize(params: unknown): { appId: string; capabilities: string
   return { appId, capabilities, autoJoinPolicy };
 }
 
-function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean } | null {
+/** The `apps` of a presentation request: every app of its URL and the capabilities each needs (`CastMediaSource::app_infos()`). */
+function parseApps(value: unknown): CastAppInfoParam[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const apps: CastAppInfoParam[] = [];
+  for (const entry of value as unknown[]) {
+    if (!isRecord(entry) || typeof entry.appId !== "string" || typeof entry.requiredCapabilities !== "number") return null;
+    apps.push({ appId: entry.appId, requiredCapabilities: entry.requiredCapabilities });
+  }
+  return apps;
+}
+
+function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean; apps?: CastAppInfoParam[]; launch: LaunchFields } | null {
   if (!isRecord(params)) return null;
   const { appId, capabilities, timeoutMs } = params;
   if (typeof appId !== "string" || !isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  const apps = parseApps(params.apps);
+  if (apps === null) return null;
+  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, launch: launchFieldsOf(params), ...(apps === undefined ? {} : { apps }) };
 }
 
 /** `requestSession`'s parameters as a picker request with no DIAL app. */
@@ -268,6 +300,16 @@ interface RequestParams {
   timeoutMs: number;
   /** Offer only the sinks that said they have the Cast app (a page's presentation request). */
   appAvailability: boolean;
+  /** Every app of the presentation URL; `appId` is the first. The app launched is `ChooseAppId`'s choice for the sink. */
+  apps?: CastAppInfoParam[];
+  /** What the LAUNCH carries beyond the app id, from the Cast presentation URL. */
+  launch: LaunchFields;
+}
+
+/** An app of a presentation URL and the capability bits a sink needs to run it. */
+interface CastAppInfoParam {
+  appId: string;
+  requiredCapabilities: number;
 }
 
 /** `requestSink` parameters: like `requestSession`'s, with the Cast app id optional and a DIAL app name. */
@@ -280,7 +322,9 @@ function parseRequestSink(params: unknown): RequestParams | null {
   if (!isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  const apps = parseApps(params.apps);
+  if (apps === null) return null;
+  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, launch: launchFieldsOf(params), ...(apps === undefined ? {} : { apps }) };
 }
 
 function parseSessionId(params: unknown): { sessionId: string } | null {
@@ -460,6 +504,14 @@ export class CastSessionService {
     return this.accessCode.addSinkByAddress(device);
   }
 
+  /**
+   * `CastMediaSinkServiceImpl::Start`: `OpenChannels(GetFixedIPSinksFromCommandLine(), SinkSource::kMdns)`: a channel to each
+   * of `--cast-device-ips` at once (no randomized delay), retried as a discovered device's is.
+   */
+  openFixedSinks(devices: CastDevice[]): void {
+    for (const device of devices) void this.sinkService.openSink(device, { source: "discovery" });
+  }
+
   /** Change `enabled` and `deviceDuration` while running, as Chrome applies its policies. */
   configureAccessCode(settings: { enabled?: boolean; deviceDuration?: number }): Promise<void> {
     return this.accessCode.configure(settings);
@@ -492,6 +544,13 @@ export class CastSessionService {
           return await this.handleRequestSession(sender, params, {
             sink: true,
             ...(isRecord(params) && typeof params.deviceId === "string" ? { presetDeviceId: params.deviceId } : {}),
+          });
+        case "pickSink":
+        case "pickSinkOnDevice":
+          // main only: the sink for a request the presentation handler serves with a mirroring route; nothing is launched here
+          return await this.handleRequestSession(sender, params, {
+            pickOnly: true,
+            ...(method === "pickSinkOnDevice" ? { presetDeviceId: isRecord(params) && typeof params.deviceId === "string" ? params.deviceId : "" } : {}),
           });
         case "joinRunningSession":
           return await this.handleJoinRunningSession(sender, params);
@@ -724,9 +783,10 @@ export class CastSessionService {
    * `requestSession`; with `presetDeviceId` (`requestSessionOnDevice`) the picker is skipped: that device is the choice
    * (and must still be eligible). With `sink` (`requestSink`) the request may name a DIAL app as well as, or instead
    * of, a Cast app, and the picker is offered the DIAL sinks that have it too; a DIAL choice is returned as
-   * `{ dialSink }` and nothing is launched here (the presentation handler creates the DIAL route).
+   * `{ dialSink }` and nothing is launched here (the presentation handler creates the DIAL route). With `pickOnly`
+   * (`pickSink`) the choice of a Cast sink is returned as `{ pickedSink }` and nothing is launched either.
    */
-  private async handleRequestSession(sender: SenderInfo, params: unknown, opts: { presetDeviceId?: string; sink?: boolean } = {}): Promise<BridgeResult> {
+  private async handleRequestSession(sender: SenderInfo, params: unknown, opts: { presetDeviceId?: string; sink?: boolean; pickOnly?: boolean } = {}): Promise<BridgeResult> {
     const presetDeviceId = opts.presetDeviceId;
     const p: RequestParams | null = opts.sink === true ? parseRequestSink(params) : parseRequestSessionParams(params);
     if (p === null) return bad("invalid_parameter");
@@ -748,10 +808,17 @@ export class CastSessionService {
     let combined: ReturnType<typeof createSinksObservers> | undefined;
     try {
       // A page's presentation request is offered the sinks that have the app; chrome.cast's requestSession is unchanged
-      if (p.appAvailability && appId !== null) appSinks = await this.appSinks({ appIds: [appId], capabilities });
+      if (p.appAvailability && appId !== null) {
+        appSinks = await this.appSinks(p.apps === undefined
+          ? { appIds: [appId], capabilities }
+          : { appIds: p.apps.map((a) => a.appId), capabilities: [], appInfos: p.apps });
+      }
       if (cancelled.value || this.disposed) return bad("cancel");
+      // a device is offered when it can run an app of the request (one app: its capability names)
+      const supportsRequest = (d: CastDevice): boolean =>
+        p.apps === undefined ? deviceMatches(d, capabilities) : p.apps.some((a) => (d.capabilities & a.requiredCapabilities) === a.requiredCapabilities);
       const castEligible = (): CastDevice[] =>
-        appId === null ? [] : (appSinks?.devices() ?? this.sinkService.devices()).filter((d) => deviceMatches(d, capabilities));
+        appId === null ? [] : (appSinks?.devices() ?? this.sinkService.devices()).filter((d) => supportsRequest(d));
       let eligible = [...castEligible(), ...dialAvailable()];
       if (eligible.length === 0 && dial !== undefined && stopMonitoring !== undefined) {
         await waitForDevices(dial.source, Math.min(p.timeoutMs, DIAL_PROBE_WAIT_MS), () => cancelled.value || discard.value || dialAvailable().length > 0);
@@ -783,10 +850,10 @@ export class CastSessionService {
         const castObservers = appSinks?.observers ?? this.sinks;
         if (dial !== undefined) combined = createSinksObservers(combineSources(appSinks?.source ?? this.sinkService, dial.source));
         const pick = createPickerContext(combined ?? castObservers, (d) =>
-          d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && deviceMatches(d, capabilities));
+          d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && supportsRequest(d));
         pending.picker = pick;
         try {
-          choice = await this.options.selectDevice(eligible, request, pick.context);
+          choice = await this.options.selectDevice(sortDevicesAsSinks(eligible), request, pick.context);
         } catch (err) {
           return bad("session_error", describe(err));
         } finally {
@@ -800,6 +867,9 @@ export class CastSessionService {
         return good({ dialSink: choice });
       }
       if (appId === null) return bad("invalid_parameter");
+      // The chosen sink is the answer (`{ pickedSink }`): the mirroring route that serves a site-initiated request is not
+      // a Cast app to launch here
+      if (opts.pickOnly === true) return choice === "stop" ? bad("cancel") : good({ pickedSink: choice });
       if (choice === "stop") {
         const rec = request.session !== undefined ? this.sessions.get(request.session.sessionId) : undefined;
         if (rec === undefined) return bad("cancel");
@@ -814,6 +884,8 @@ export class CastSessionService {
         const rec = this.sessions.get(request.session.sessionId);
         if (rec !== undefined) return good(this.snapshotOf(rec));
       }
+      // CastActivityManager::ChooseAppId: the first app of the source the sink can run, else the first
+      const launchAppId = p.apps === undefined ? appId : chooseAppInfo(p.apps.map((a) => ({ ...a, capabilities: [] })), choice.capabilities).appId;
       // The bound starts after the picker resolves; picker time does not count.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bound = new Promise<never>((_, reject) => {
@@ -823,10 +895,10 @@ export class CastSessionService {
         }, p.timeoutMs);
       });
       try {
-        const snapshot = await Promise.race([this.openSession(choice, appId, sender, discard, cancelled), bound]);
+        const snapshot = await Promise.race([this.openSession(choice, launchAppId, sender, discard, cancelled, p), bound]);
         return good(snapshot);
       } catch (err) {
-        if (err instanceof Discarded) return bad("timeout", "timed out");
+        if (err instanceof Discarded) return bad("timeout", "Failed to launch session due to timeout.");
         if (err instanceof MappedError) return bad(err.code, err.message);
         throw err;
       } finally {
@@ -994,6 +1066,7 @@ export class CastSessionService {
     sender: SenderInfo,
     discard: { value: boolean },
     cancelled: { value: boolean },
+    request: Pick<RequestParams, "launch" | "timeoutMs">,
   ): Promise<SessionSnapshot> {
     // A DIAL sink has no Cast port: it is launched by the presentation handler's DIAL route, never as a Cast session.
     if (device.dial !== undefined) throw new MappedError("session_error", "A DIAL device cannot host a Cast session");
@@ -1004,7 +1077,7 @@ export class CastSessionService {
     if (cancelled.value) throw new MappedError("cancel", "cancelled");
     this.launching.set(device.id, (this.launching.get(device.id) ?? 0) + 1);
     try {
-      return await this.launchOn(device, client, appId, sender, discard, cancelled);
+      return await this.launchOn(device, client, appId, sender, discard, cancelled, request);
     } finally {
       const left = (this.launching.get(device.id) ?? 1) - 1;
       if (left > 0) this.launching.set(device.id, left);
@@ -1021,12 +1094,54 @@ export class CastSessionService {
     sender: SenderInfo,
     discard: { value: boolean },
     cancelled: { value: boolean },
+    request: Pick<RequestParams, "launch" | "timeoutMs">,
   ): Promise<SessionSnapshot> {
+    // CastActivityManager::LaunchSession: appParams that are not JSON fail the route before anything is sent
+    // (NO_SUPPORTED_PROVIDER, "Invalid JSON Format of appParams")
+    let appParams: unknown;
+    if (request.launch.appParams !== undefined && request.launch.appParams !== "") {
+      try {
+        appParams = JSON.parse(request.launch.appParams);
+      } catch {
+        throw new MappedError("session_error", "Invalid JSON Format of appParams");
+      }
+      // base::JSONReader gives a none value for null, which LaunchSession leaves out
+      if (appParams === null) appParams = undefined;
+    }
     let app: ReceiverApplication;
+    const issues = this.options.issues;
     try {
-      app = await client.launch(appId);
+      await this.options.onSessionLaunching?.(sender.id);
     } catch (err) {
-      if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
+      console.error("electron-cast: onSessionLaunching failed", err);
+    }
+    try {
+      app = await client.launch(appId, {
+        ...(request.launch.supportedAppTypes === undefined ? {} : { supportedAppTypes: request.launch.supportedAppTypes }),
+        ...(appParams === undefined ? {} : { appParams }),
+        // The request bound is the page's launch timeout; the channel's wait is the same, capped at two minutes
+        timeoutMs: request.timeoutMs,
+        // CastActivityManager::HandleLaunchSessionResponse: the receiver's "waiting for its user" and "user allowed" statuses
+        ...(issues === undefined ? {} : {
+          onStatus: (status) => {
+            if (status === "pending_authorization") issues.pendingUserAuth({ id: device.id, name: device.name });
+            else issues.userAllowed(device.id);
+          },
+        }),
+      });
+    } catch (err) {
+      if (issues !== undefined && !discard.value && !cancelled.value) {
+        // The provider's issue first (HandleLaunchSessionResponseFailures), then the dialog's (OnRouteResponseReceived)
+        const failure = classifyLaunchFailure(err);
+        const sink = { id: device.id, name: device.name };
+        issues.launchFailed(failure, device.id, "", describe(err));
+        if (failure === "timed_out") issues.uiRouteTimeout("presentation", device.id, originNameForDisplay(sender.origin));
+        else if (failure === "user_not_allowed") issues.uiUserNotAllowed(sink);
+        else if (failure === "notification_disabled") issues.uiNotificationDisabled(sink);
+      }
+      // HandleLaunchSessionResponse: the messages of the failures, and TIMED_OUT for a launch that never answered
+      if (err instanceof CastTimeoutError) throw new MappedError("timeout", "Failed to launch session due to timeout.");
+      if (err instanceof CastLaunchError) throw new MappedError("session_error", err.description);
       throw new MappedError("session_error", describe(err));
     }
     if (discard.value) {
@@ -1037,7 +1152,7 @@ export class CastSessionService {
       client.closeTransport(app.transportId);
       throw new MappedError("cancel", "cancelled");
     }
-    client.connectTransport(app.transportId);
+    client.connectTransport(app.transportId, request.launch.invisibleSender === true ? { invisible: true } : undefined);
     let status: ReceiverStatus;
     try {
       status = await client.getStatus();
@@ -1069,11 +1184,6 @@ export class CastSessionService {
     const snapshot = this.snapshotOf(rec);
     rec.lastSnapshot = snapshot;
     this.sessions.set(app.sessionId, rec);
-    try {
-      this.options.onSessionLaunched?.(sender.id);
-    } catch (err) {
-      console.error("electron-cast: onSessionLaunched failed", err);
-    }
     return snapshot;
   }
 
