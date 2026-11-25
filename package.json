@@ -96,6 +96,7 @@
     "check": "npm run typecheck && npm run lint && npm test && npm run docs:check",
     "prepack": "npm run build",
     "smoke": "npm run build && node smoke/run.mjs",
+    "smoke:one-ua": "npm run build && node smoke/run.mjs one-ua-main.mjs",
     "live:iframe": "node examples/live-iframe/run.mjs",
     "live:checks": "node examples/live-checks/run.mjs",
     "probe:discovery": "node tools/probe-discovery.mjs"
