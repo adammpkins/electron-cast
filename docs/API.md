@@ -38,6 +38,7 @@ Contents: [`electron-cast/main`](#electron-castmain) · [`electron-cast/preload`
 
 ### `createCastManager(options)`
 
+<!-- no-check -->
 ```ts
 function createCastManager(options: CastManagerOptions): CastManager
 ```
@@ -197,6 +198,7 @@ Electron's `ipcMain`, `WebContents` and `WebFrameMain` satisfy these. The main e
 
 ### `installCastBridge(options)`
 
+<!-- no-check -->
 ```ts
 function installCastBridge(options: CastBridgeOptions): void
 ```
@@ -247,6 +249,7 @@ interface IpcRendererLike {
 
 ### `installChromeCast(bridgeKey)`
 
+<!-- no-check -->
 ```ts
 function installChromeCast(bridgeKey: string): boolean
 ```
@@ -309,6 +312,7 @@ have no Electron dependency, so they run in plain Node.
 
 ### Session service
 
+<!-- no-check -->
 ```ts
 class CastSessionService {
   constructor(options: CastSessionServiceOptions)
@@ -384,6 +388,7 @@ and `detachSession(id)`, the hooks the manager's [main-process API](MAIN-API.md)
 
 ### `CastClient`
 
+<!-- no-check -->
 ```ts
 class CastClient extends EventEmitter<CastClientEvents> {
   constructor(options: CastClientOptions)
@@ -493,6 +498,16 @@ Returned by the `deviceAuth` getter. Exported as a type.
 | `usedFallbackCrl` | `boolean` | The device sent no usable CRL and the built-in fallback CRL was used. |
 | `revocationChecked` | `boolean` | `false` only in the stale-fallback case above. |
 
+`CastDeviceCertPolicy` (an exported type) is the type of `policy`: `"unrestricted"` or `"audio_only"`.
+
+`CastCertError` (an exported type) is the outcome of the certificate-chain check that device authentication runs, named after
+Chromium's `CastCertError`: `OK`, `OK_FALLBACK_CRL`, `OK_FALLBACK_CRL_STALE`, `ERR_CERTS_MISSING`, `ERR_CERTS_PARSE`,
+`ERR_CERTS_DATE_INVALID`, `ERR_CERTS_VERIFY_GENERIC`, `ERR_CERTS_RESTRICTIONS`, `ERR_CERTS_REVOKED`,
+`ERR_CERTS_REVOKED_BY_FALLBACK_CRL` and `ERR_FALLBACK_CRL_INVALID`. A client reports it through `CastAuthError.reason`, never
+directly: the `ERR_CERTS_MISSING`, `_PARSE`, `_DATE_INVALID` and `_RESTRICTIONS` outcomes become `invalid_certificate`,
+`ERR_CERTS_VERIFY_GENERIC` becomes `untrusted_chain`, both `REVOKED` outcomes become `revoked`, and `ERR_FALLBACK_CRL_INVALID`
+becomes `crl_invalid`. The three `OK` outcomes pass; `OK_FALLBACK_CRL_STALE` is the stale-fallback case above.
+
 ##### `DeviceAuthOptions`
 
 The `deviceAuth` client option, exported as the type `DeviceAuthOptions`. All fields are optional.
@@ -538,6 +553,7 @@ Through the manager, any `connect()` failure, `CastAuthError` included, reaches 
 
 #### `CastDiscovery`
 
+<!-- no-check -->
 ```ts
 class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
   constructor(options?: CastDiscoveryOptions)

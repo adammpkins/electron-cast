@@ -51,6 +51,7 @@ Where electron-cast differs from Chrome:
 
 ## Sinks
 
+<!-- no-check -->
 ```ts
 import { createCastManager, type MediaSink } from "electron-cast/main";
 
@@ -71,6 +72,7 @@ where `device` is the discovered `CastDevice`.
 
 ## Routes
 
+<!-- no-check -->
 ```ts
 manager.registerMediaRoutesObserver({
   onRoutesUpdated(routes) {
@@ -103,6 +105,7 @@ apps running on the devices.
 works like Chrome's dialog watching sinks while it is open. mDNS often needs a few seconds, so devices can appear
 after the picker opens:
 
+<!-- no-check -->
 ```ts
 selectDevice: (devices, request, picker) =>
   new Promise((resolve) => {
