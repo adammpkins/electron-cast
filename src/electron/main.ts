@@ -4,7 +4,7 @@ import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
-import type { CastSinkOptions } from "./sink-service.ts";
+import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 
 /**
@@ -19,7 +19,7 @@ const PAGE_METHODS: ReadonlySet<string> = new Set<BridgeMethod>([
 export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
-export type { CastSinkOptions, SinkRetryOptions } from "./sink-service.ts";
+export type { CastSinkOptions, ChannelParams, SinkRetryOptions } from "./sink-service.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
   MediaSinksQuery, SinkIconType,
@@ -66,7 +66,7 @@ export interface CastManagerOptions {
   selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   discovery?: DeviceSource & { start(): Promise<void>; stop(): void };  // default new CastDiscovery()
-  createClient?(device: CastDevice): CastClientLike;                     // default new CastClient({ host, port })
+  createClient?(device: CastDevice, params: ChannelParams): CastClientLike; // default new CastClient({ host, port, timeouts })
   channel?: string;                                                       // default "electron-cast"
   /**
    * Answer the preload's presentation mode (the page's own Google Cast SDK running on a stand-in Presentation API),
@@ -97,7 +97,7 @@ export interface CastManager extends CastManagerApi {
    * so the devices that can be reached are listed. Discovery and Chrome's random delay (up to 5 s) come first, so call it
    * some time after `start()`.
    */
-  settled(): Promise<void>;
+  settled(options?: { retries?: boolean }): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -133,7 +133,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
   const discovery = options.discovery ?? new CastDiscovery();
-  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false }));
+  const createClient = options.createClient ?? ((d: CastDevice, params: ChannelParams) =>
+    new CastClient({
+      host: d.host,
+      port: d.port,
+      verifyDevice: options.verifyDevices !== false,
+      connectTimeoutMs: params.connectTimeoutMs,
+      heartbeatTimeoutMs: params.livenessTimeoutMs,
+    }));
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
    * the frame's lifetime (across its navigations, so a reloaded iframe can rejoin its session). The frame is looked up
@@ -456,7 +463,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     start: () => discovery.start(),
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
-    settled: () => service.settled(),
+    settled: (options) => service.settled(options),
     async dispose() {
       if (disposed) return;
       disposed = true;

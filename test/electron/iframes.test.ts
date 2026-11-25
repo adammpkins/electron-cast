@@ -120,7 +120,7 @@ test("availability watches are per frame", async () => {
   // the device's channel is lost for good (Chrome drops a sink only when its channel cannot be reopened)
   devices.unreachable.add(TV.id);
   clientFor(clients, TV.id).fail();
-  await tick(20);
+  await manager.settled();
   assert.equal(wc.main.events("presentation").filter((e) => e.value === false).length, 1);
   await manager.dispose();
 });

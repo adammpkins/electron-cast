@@ -21,10 +21,11 @@ function setup(o: { devices?: FakeDevices; pick?: (l: CastDevice[], r: CastReque
   const clients: FakeClient[] = [];
   let handler: CastPresentationHandler | undefined;
   const service = waitForSinks(new CastSessionService({
-    sinks: FAST_SINKS,
+    sinks: { ...FAST_SINKS, retry: { maxAttempts: 1 } },
     devices,
     createClient: (d) => {
       const c = new FakeClient(d);
+      if (devices.unreachable.has(d.id)) c.connectError = new Error("unreachable");
       const launch = c.launch.bind(c);
       c.launch = async (id: string) => {
         const app = await launch(id);
@@ -65,14 +66,20 @@ test("getAvailability reports devices and calls onchange when they change, until
   const devices = new FakeDevices([]);
   const h = setup({ devices });
   const changes: boolean[] = [];
+  const kept: boolean[] = [];
   const ac = new AbortController();
   assert.equal(await h.handler.getAvailability({ ...req(), onchange: (v: boolean) => changes.push(v), signal: ac.signal }), false);
+  // the positive control: a watch that is never aborted
+  await h.handler.getAvailability({ ...req(), onchange: (v: boolean) => kept.push(v), signal: new AbortController().signal });
   devices.up(TV);
   await h.service.settled();
   assert.deepEqual(changes, [true]);
   ac.abort();
-  devices.up(SPEAKER);
+  // the TV genuinely leaves: its channel fails and cannot be reopened (Chrome drops a sink only then)
+  devices.unreachable.add(TV.id);
+  h.clients.find((c) => c.device.id === TV.id)!.fail();
   await h.service.settled();
+  assert.deepEqual(kept, [true, false], "without the abort the same step reports the loss");
   assert.deepEqual(changes, [true], "no change after abort");
   assert.equal(await h.handler.getAvailability({ ...req("https://example.test/"), onchange: () => {}, signal: new AbortController().signal }), false);
 });

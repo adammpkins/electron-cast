@@ -5,7 +5,7 @@ import { CastTimeoutError } from "../client/index.ts";
 import {
   ObservedMap, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
-import { CastSinkService, type CastSinkOptions } from "./sink-service.ts";
+import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sink-service.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
@@ -71,7 +71,11 @@ export type DeviceChoice = CastDevice | null | "stop";
 /** Dependencies and callbacks of {@link CastSessionService}. */
 export interface CastSessionServiceOptions {
   devices: DeviceSource;
-  createClient(device: CastDevice): CastClientLike;
+  /**
+   * Make a client for a device. `params` carries the connect and liveness timeouts Chrome would use for this attempt
+   * (10 s; longer after failures only when `sinks.dynamicTimeoutDeltaMs` is set).
+   */
+  createClient(device: CastDevice, params: ChannelParams): CastClientLike;
   /**
    * Ask the user which device to cast to. Resolves a device, `null` (cancel) or
    * `"stop"` (stop `request.session`, the sender's current session, if it has one).
@@ -248,13 +252,20 @@ export class CastSessionService {
   private readonly sinkService: CastSinkService;
   private readonly tracker = new CastSessionTracker();
   private lastRoutesKey = "";
+  /** Devices a page's launch is in flight on, with how many: the session it starts is the page's, not a non-local one. */
+  private readonly launching = new Map<string, number>();
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
   private disposed = false;
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
-    this.sinkService = new CastSinkService({ ...options.sinks, source: options.devices, createClient: options.createClient });
+    this.sinkService = new CastSinkService({
+      ...options.sinks,
+      source: options.devices,
+      createClient: options.createClient,
+      isClientInUse: (client) => [...this.sessions.values()].some((rec) => rec.client === client),
+    });
     this.sinks = createSinksObservers(this.sinkService);
     this.sinkService.on("deviceUp", this.deviceListener);
     this.sinkService.on("deviceDown", this.deviceListener);
@@ -285,8 +296,8 @@ export class CastSessionService {
   }
 
   /** Resolves when no channel is being opened and none is scheduled to be; for tests. */
-  settled(): Promise<void> {
-    return this.sinkService.settled();
+  settled(options?: { retries?: boolean }): Promise<void> {
+    return this.sinkService.settled(options);
   }
 
   /** Handle one bridge call; never throws or rejects. */
@@ -400,7 +411,11 @@ export class CastSessionService {
     this.pendingRequests.set(sender.id, pending);
     try {
       const eligible = this.sinkService.devices().filter((d) => deviceMatches(d, p.capabilities));
-      if (eligible.length === 0) return bad("receiver_unavailable");
+      if (eligible.length === 0) {
+        // Say why the devices found are not offered, when they failed to open (Chrome shows no sink and logs the error)
+        const why = this.sinkService.openErrors();
+        return bad("receiver_unavailable", why.length > 0 ? `no device could be reached: ${why.join("; ")}` : undefined);
+      }
       const request: CastRequestInfo = {
         appId: p.appId,
         capabilities: p.capabilities,
@@ -618,6 +633,26 @@ export class CastSessionService {
     if (client === undefined) throw new MappedError("receiver_unavailable", "no open channel to the device");
     if (discard.value) throw new Discarded();
     if (cancelled.value) throw new MappedError("cancel", "cancelled");
+    this.launching.set(device.id, (this.launching.get(device.id) ?? 0) + 1);
+    try {
+      return await this.launchOn(device, client, appId, sender, discard, cancelled);
+    } finally {
+      const left = (this.launching.get(device.id) ?? 1) - 1;
+      if (left > 0) this.launching.set(device.id, left);
+      else this.launching.delete(device.id);
+      // A launch that ended without a session leaves the device's own session listed again
+      if (left === 0) this.onTrackerChanged();
+    }
+  }
+
+  private async launchOn(
+    device: CastDevice,
+    client: CastClientLike,
+    appId: string,
+    sender: SenderInfo,
+    discard: { value: boolean },
+    cancelled: { value: boolean },
+  ): Promise<SessionSnapshot> {
     let app: ReceiverApplication;
     try {
       app = await client.launch(appId);
@@ -773,7 +808,7 @@ export class CastSessionService {
 
   /** The tracked sessions no page of this service holds (Chrome: activities with `is_local` false). */
   private nonLocalSessions(): TrackedSession[] {
-    return this.tracker.sessions().filter((s) => !this.sessions.has(s.sessionId));
+    return this.tracker.sessions().filter((s) => !this.sessions.has(s.sessionId) && !this.launching.has(s.sinkId));
   }
 
   /** Be told when a session starts, changes (status, volume, pages) or ends; returns the unsubscribe function. */
@@ -791,8 +826,11 @@ export class CastSessionService {
     // No page is the caller, so every member is told sessionEnded.
     if (rec !== undefined) return this.stopSessionRecord(rec, MAIN_CALLER, false);
     const tracked = this.nonLocalSessions().find((s) => s.sessionId === sessionId);
-    const client = tracked === undefined ? undefined : this.sinkService.clientOf(tracked.sinkId);
-    if (tracked === undefined || client === undefined) return bad("session_error", "unknown session");
+    if (tracked === undefined) return bad("session_error", "unknown session");
+    // With no open channel the stop cannot be sent: Chrome's `CastMessageHandler::StopSession` finds no socket and
+    // reports a failure, which `HandleStopSessionResponse` turns into this message while the route stays.
+    const client = this.sinkService.clientOf(tracked.sinkId);
+    if (client === undefined) return bad("session_error", "StopSession response is not OK. Failed to terminate route.");
     try {
       this.tracker.applyStatus(tracked.sinkId, client, await client.stop(sessionId));
     } catch (err) {
@@ -837,6 +875,7 @@ export class CastSessionService {
   /** Tell the route observers something changed (the arguments only fit the ObservedMap callback). */
   private notifySession(_kind: "started" | "updated" | "ended", _rec: SessionRecord): void {
     if (this.disposed) return;
+    if (_kind === "ended") this.sinkService.releaseUnused();
     this.lastRoutesKey = JSON.stringify(this.mediaRoutes());
     this.fireSessionListeners();
   }

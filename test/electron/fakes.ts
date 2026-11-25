@@ -286,3 +286,77 @@ export function waitForSinks<T extends { handle: (...a: any[]) => Promise<any>; 
 
 /** True when no client was used for anything but its channel (connecting and asking its status): no launch, stop, volume or transport. */
 export const onlyChannels = (clients: FakeClient[]): boolean => clients.every((c) => c.calls.every((x) => x === "connect"));
+
+/**
+ * A clock for tests of timers: `install()` replaces `setTimeout` and `clearTimeout`, and `advance(ms)` runs what comes due
+ * in order, letting promises settle between timers. Nothing waits in real time. Do not call `service.settled()` under it
+ * (that polls with a timer); advance instead.
+ */
+export class FakeClock {
+  now = 0;
+  /** The delay of every timer set while installed, in order. */
+  delays: number[] = [];
+  private seq = 0;
+  private readonly timers = new Map<number, { at: number; fn: () => void }>();
+  private readonly realSet = globalThis.setTimeout;
+  private readonly realClear = globalThis.clearTimeout;
+
+  install(): this {
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms = 0, ...args: unknown[]) => {
+      const id = ++this.seq;
+      this.delays.push(ms);
+      this.timers.set(id, { at: this.now + Math.max(0, ms), fn: () => fn(...args) });
+      return { id, unref() { return this; }, ref() { return this; }, hasRef: () => true, refresh() { return this; }, [Symbol.toPrimitive]: () => id };
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((t?: { id?: number }) => void (t?.id !== undefined && this.timers.delete(t.id))) as typeof clearTimeout;
+    return this;
+  }
+
+  restore(): void {
+    globalThis.setTimeout = this.realSet;
+    globalThis.clearTimeout = this.realClear;
+  }
+
+  private async flush(): Promise<void> {
+    for (let i = 0; i < 60; i++) await Promise.resolve();
+  }
+
+  async advance(ms: number): Promise<void> {
+    const end = this.now + ms;
+    for (;;) {
+      await this.flush();
+      let next: [number, { at: number; fn: () => void }] | undefined;
+      for (const entry of this.timers) if (entry[1].at <= end && (next === undefined || entry[1].at < next[1].at)) next = entry;
+      if (next === undefined) break;
+      this.timers.delete(next[0]);
+      this.now = Math.max(this.now, next[1].at);
+      next[1].fn();
+    }
+    this.now = end;
+    await this.flush();
+  }
+
+  /** Timers still waiting. */
+  get pending(): number {
+    return this.timers.size;
+  }
+}
+
+/**
+ * Makes every timer of `minMs` or more fire at once (and records its delay), so a test goes through a retry backoff
+ * without waiting. Short timers are left alone, so polling such as `settled()` still works. Call the returned function to
+ * undo it.
+ */
+export function instantTimers(minMs: number, delays: number[] = []): () => void {
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    if (ms !== undefined && ms >= minMs) {
+      delays.push(ms);
+      return real(fn, 0, ...rest);
+    }
+    return real(fn, ms, ...rest);
+  }) as typeof setTimeout;
+  return () => {
+    globalThis.setTimeout = real;
+  };
+}

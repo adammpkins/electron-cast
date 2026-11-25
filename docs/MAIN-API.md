@@ -99,7 +99,7 @@ await controller.setMute(true);
 A device that runs a session no page of this app holds (started by another sender, or by this app before it restarted)
 has a route too, as in Chrome (`AddNonLocalActivity`): `isLocal` is `false`, `members` and `origin` are empty, and
 `sinkName` names the device. It follows the device's receiver status, goes when the app stops, and can be
-terminated and have its volume set; `detachRoute` on it does nothing. A route a page held, once every page has let go
+terminated and have its volume set (while its channel is down, because the device is being reopened, terminating fails with `session_error` "StopSession response is not OK. Failed to terminate route." and the route stays, as in Chrome); `detachRoute` on it does nothing. A route a page held, once every page has let go
 of it without stopping the app, becomes a non-local route. `isLocal` is `true` for the routes of this app's pages.
 
 Control goes through the same `CastSessionService` code the page's calls use, so the page sees what it would see if

@@ -166,6 +166,7 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     discovery: new FakeDiscovery(),
     createClient: (d) => {
       const c = new FakeClient(d);
+      if ((over.discovery as FakeDevices | undefined)?.unreachable.has(d.id)) c.connectError = new Error("unreachable");
       const launch = c.launch.bind(c);
       c.launch = async (id: string) => {
         const app = await launch(id);
@@ -246,17 +247,21 @@ test("start opens a connection whose envelope messages reach the page, and page 
 
 test("availability changes reach the page until stopWatching", async () => {
   const devices = new FakeDiscovery([]);
-  const { pcall, manager } = setup({ discovery: devices });
+  const { pcall, manager, clients } = setup({ discovery: devices, sinks: { ...FAST_SINKS, retry: { maxAttempts: 1 } } });
   const wc = new FakeWebContents(5);
   assert.deepEqual(await pcall(wc, "getAvailability", { watchId: "w1", urls: [URL1] }), { ok: true, value: { available: false } });
+  // the positive control: a watch that is not stopped
+  await pcall(wc, "getAvailability", { watchId: "w2", urls: [URL1] });
   devices.up(TV);
   await manager.settled();
-  assert.deepEqual(wc.events().at(-1), { type: "availability", watchId: "w1", value: true });
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w1").at(-1), { type: "availability", watchId: "w1", value: true });
   await pcall(wc, "stopWatching", { watchId: "w1" });
-  const n = wc.events().length;
-  devices.up(SPEAKER);
+  // the TV genuinely leaves: its channel fails and cannot be reopened
+  devices.unreachable.add(TV.id);
+  clients.find((c) => c.device.id === TV.id)!.fail();
   await manager.settled();
-  assert.equal(wc.events().length, n);
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w2").map((e) => e.value), [true, false], "an unstopped watch hears the loss");
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w1").map((e) => e.value), [true], "a stopped watch hears nothing more");
 });
 
 test("a destroyed webContents loses its connections and gets nothing more", async () => {

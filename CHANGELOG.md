@@ -21,7 +21,10 @@
   pages all let go now stays a (non-local) route while the device runs it, where it used to disappear from the list.
 - A device's channel is shared by its sessions and kept open, so clients from `createClient` live as long as the device
   is a sink, not as long as a session. `createClient` is called once per device (again after a failure) and its
-  clients must be fine to keep connected. Chromecast mode (`mode: "chromecast"`) behaves as before for pages; it
+  clients must be fine to keep connected. It gets a second argument, `{ connectTimeoutMs, livenessTimeoutMs }`. A channel
+  replaced because the device's address changed stays open while a session uses it (as Chrome leaves the old socket);
+  an address list that mDNS merely reorders changes nothing. A device whose host is not an IP address is skipped with a
+  warning. `CastManager.settled()` takes `{ retries: true }`. Chromecast mode (`mode: "chromecast"`) behaves as before for pages; it
   shares the device list.
 
 ## 0.4.0

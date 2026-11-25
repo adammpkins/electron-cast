@@ -6,7 +6,7 @@ import type { CastClientLike } from "../../src/electron/session-service.ts";
 import { CastClient } from "../../src/client/index.ts";
 import { CastDiscovery } from "../../src/discovery/index.ts";
 import type { BridgeEvent } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, TV, tick, FAST_SINKS } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, onlyChannels } from "./fakes.ts";
 
 // Compile-time: the real classes fit the shapes the manager takes.
 const _client: CastClientLike = new CastClient({ host: "127.0.0.1" });
@@ -151,11 +151,14 @@ test("a page cannot call a method only main uses (joinRunningSession), or an unk
   const wc = new FakeWebContents(4);
   await call(wc, "initialize", INIT);
   const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { sessionId: string } };
+  const before = clients.map((c) => [...c.calls]);
   const joined = await call(new FakeWebContents(5), "joinRunningSession", { sessionId: r.value.sessionId, appId: YT });
   assert.deepEqual(joined, { ok: false, code: "invalid_parameter", description: "unknown method: joinRunningSession" });
   assert.deepEqual(await call(wc, "nope", {}), { ok: false, code: "invalid_parameter", description: "unknown method: nope" });
   assert.equal(clients.length, 3, "only the channels to the devices");
-  assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("launch")), [`launch ${YT}`], "joining by this route launched nothing");
+  assert.deepEqual(clients.map((c) => c.calls), before, "the refused calls touched no device");
+  assert.ok(onlyChannels(clients.filter((c) => c.device.id !== TV.id)), "nothing was launched or stopped on the other devices");
+  assert.deepEqual(clients.find((c) => c.device.id === TV.id)!.calls.filter((c) => c.startsWith("launch")), [`launch ${YT}`], "only the page's own launch");
 });
 
 test("service events are sent to that webContents on <channel>:event", async () => {

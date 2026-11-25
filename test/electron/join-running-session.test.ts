@@ -121,7 +121,6 @@ test("a session found on a device appears as a route and route observers hear of
   let calls = 0;
   service.observeSessions(() => void calls++);
   await service.settled();
-  await tick(5);
   // before any page joins, the session is already a route: one this service holds no page for (Chrome: non-local)
   const [before0] = service.mediaRoutes();
   assert.deepEqual([service.mediaRoutes().length, before0?.id, before0?.isLocal, before0?.members, before0?.origin, before0?.sinkName], [1, sessionId, false, [], "", TV.name]);
@@ -146,7 +145,6 @@ test("a session found on a device appears as a route and route observers hear of
 test("a non-local route follows the device: status text and volume updates, and it ends when the app stops", async () => {
   const { service, clients, sessionId } = await restarted();
   await service.settled();
-  await tick(5);
   const tv = clients.find((c) => c.device.id === TV.id)!;
   let calls = 0;
   service.observeSessions(() => void calls++);
@@ -169,7 +167,6 @@ test("a non-local route follows the device: status text and volume updates, and 
 test("a session another sender started, in an app we do not know, is a route too, and it is not joinable by another app id", async () => {
   const { service, clients, sessionId } = await restarted();
   await service.settled();
-  await tick(5);
   const tv = clients.find((c) => c.device.id === TV.id)!;
   tv.apps = [{ ...tv.apps[0]!, appId: "CC1AD845", sessionId: "other-session", transportId: "other-transport", displayName: "Default Media Receiver" }];
   tv.pushStatus();
@@ -182,7 +179,6 @@ test("a session another sender started, in an app we do not know, is a route too
 test("a status with two applications or none we can use describes no session", async () => {
   const { service, clients } = await restarted();
   await service.settled();
-  await tick(5);
   const tv = clients.find((c) => c.device.id === TV.id)!;
   assert.equal(service.mediaRoutes().length, 1);
   tv.apps = [tv.apps[0]!, { ...tv.apps[0]!, sessionId: "s2", transportId: "t2" }];
@@ -193,7 +189,6 @@ test("a status with two applications or none we can use describes no session", a
 test("a non-local route can be terminated and its volume set, over the device's own channel", async () => {
   const { service, clients, sessionId } = await restarted();
   await service.settled();
-  await tick(5);
   const tv = clients.find((c) => c.device.id === TV.id)!;
   assert.equal((await service.setSessionVolume(sessionId, { level: 0.2 })).ok, true);
   assert.ok(tv.calls.includes(`volume {"level":0.2}`));
@@ -208,7 +203,6 @@ test("a non-local route can be terminated and its volume set, over the device's 
 test("a session the first page ends up leaving stays a route until the app stops; the tracker answers joins with no scan", async () => {
   const { service, clients, sessionId } = await restarted();
   await service.settled();
-  await tick(5);
   const connects = clients.map((c) => c.calls.filter((x) => x === "connect").length);
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT })).ok, true);
   assert.equal((await service.handle(PAGE2, "joinRunningSession", { sessionId, appId: YT })).ok, true);
@@ -220,20 +214,31 @@ test("a device that stops being a sink takes its session route with it", async (
   let unreachable = false;
   const { service, clients } = await restarted({ sinks: { retry: { initialDelayMs: 5, jitter: 0, maxAttempts: 2 } }, tweak: (c) => { if (unreachable) c.connectError = new Error("EHOSTUNREACH"); } });
   await service.settled();
-  await tick(5);
   assert.equal(service.mediaRoutes().length, 1);
   unreachable = true;
   clients.find((c) => c.device.id === TV.id)!.fail();
-  await tick(100);
-  await service.settled();
+  await service.settled({ retries: true });
   assert.deepEqual(service.mediaRoutes(), []);
 });
 
 test("dispose drops the tracker's sessions and closes every channel", async () => {
   const { service, clients } = await restarted();
   await service.settled();
-  await tick(5);
   await service.dispose();
   assert.ok(clients.every((c) => c.closed));
   assert.deepEqual(service.mediaRoutes(), []);
+});
+
+test("terminating a non-local route whose channel is down fails as Chrome's StopSession does, and the route stays", async () => {
+  // Chrome: CastMessageHandler::StopSession finds no socket and reports a failure, which
+  // CastActivityManager::HandleStopSessionResponse turns into this message; the activity is kept.
+  let down = false;
+  const { service, clients, sessionId } = await restarted({ tweak: (c) => { if (down) c.connectError = new Error("EHOSTUNREACH"); } });
+  await service.settled();
+  down = true;
+  clients.find((c) => c.device.id === TV.id)!.fail();
+  await service.settled();
+  assert.equal(service.mediaRoutes().length, 1, "the sink and its session stay listed while the channel is reopened");
+  assert.deepEqual(await service.terminateSession(sessionId), { ok: false, code: "session_error", description: "StopSession response is not OK. Failed to terminate route." });
+  assert.equal(service.mediaRoutes().length, 1);
 });

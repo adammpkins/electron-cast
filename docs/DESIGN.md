@@ -336,9 +336,31 @@ mirror what Chrome tunes.
 
 Where electron-cast differs from Chrome here:
 
-- Chrome opens a channel with connect and liveness timeouts that grow with each failure (`dynamic_timeout_delta_in_seconds`,
-  capped at `kMaxConnectTimeoutInSeconds` 30 and `kMaxLivenessTimeoutInSeconds` 60 in `OpenChannel`); `CastClient` always waits 10 s.
-- Chrome leaves a replaced socket to time out; the old one is closed once the new channel is open.
+- Chrome's connect and liveness timeouts can grow with each failed attempt on a sink (`failure_count_map_`, at most 100,
+  times `OpenParams::dynamic_timeout_delta_in_seconds`, capped at `kMaxConnectTimeoutInSeconds` 30 and
+  `kMaxLivenessTimeoutInSeconds` 60 in `CreateCastSocketOpenParams`), but that delta is 0 and nothing in the fetched
+  sources sets it, so Chrome's timeouts stay 10 s. The same mechanism is here (`sinks.dynamicTimeoutDeltaMs`, default 0;
+  each run of attempts keeps the parameters it began with, as the `open_params` carried through
+  `OnChannelErrorMayRetry`) and the timeouts reach `createClient` as its second argument.
+- When a sink's endpoint changes, Chrome's `OnChannelOpenSucceeded` just adds the sink with the new channel and leaves the
+  old socket alone, so a session on it goes on. Here the replaced channel stays open while a session uses it and closes
+  when the last one ends (`CastSinkService.releaseUnused`, `channelRetired`), or on `dispose()`.
+- mDNS lists a device's addresses in no fixed order, and a Chrome sink has one address, so there is no Chrome counterpart
+  to a reorder. A sink keeps its endpoint while the device still offers it (same port, host among its addresses): only the
+  other details are updated, as `OpenChannel` does for an unchanged endpoint, and a reopen uses that endpoint too.
+- A retry waiting out its backoff is dropped when the device has meanwhile been reached at another endpoint or discovery
+  names another one; Chrome's `OnChannelOpenFailed` ignores a failure whose endpoint is no longer the sink's for the same
+  reason, but still re-runs the stale `OpenChannel`.
+- A channel is opened to IP addresses only, as Chrome's `IPEndPoint` is. A device whose host is a name (a custom
+  discovery) is skipped with a `skipped` event and one `console.warn` per device; `isPubliclyRoutable` answers for IP
+  literals only. Chrome logs the same kind of skip in `OpenChannel` (`LoggerList`).
+- A route whose channel is down (the sink stays listed while it is reopened, as in Chrome) stays listed. Terminating it
+  fails with `session_error` and Chrome's message: `CastMessageHandler::StopSession` finds no socket and reports a
+  failure, and `CastActivityManager::HandleStopSessionResponse` turns that into "StopSession response is not OK. Failed
+  to terminate route." and keeps the activity.
+- A page's own launch is not listed as a non-local route while it is in flight: the status the launch causes reaches the
+  tracker before the page's session record exists. Chrome has the activity before the launch (`DoLaunchSession` adds it
+  first), so the route is never non-local there.
 - `CastSession::UpdateSession` keeps the old session id and app when another session shows up on a device, which would
   leave the tracker naming a session the device no longer runs; a different session replaces the old one here.
 - A status with several applications is never a session, so such a session cannot be joined (as in Chrome).
