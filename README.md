@@ -178,6 +178,10 @@ there describes the top-level await form of the same hang).
 - Several pages or windows at once, and iframes (with `nodeIntegrationInSubFrames`). A page that reloads keeps its
   sessions open on the device and rejoins them (auto-join, `origin_scoped` or `tab_and_origin_scoped`). A page that
   closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
+- DIAL, as Chrome does it, in presentation mode: SSDP discovery, availability and the picker for the `cast-dial:`
+  sources Google's SDK builds from a `dialRequest`, launching and stopping the app over HTTP. On by default, as in
+  Chrome; `dial: false` turns it off. A device that is also a Cast device stays a Cast device. See
+  [docs/DESIGN.md](docs/DESIGN.md#dial-srcdial) and [SECURITY.md](SECURITY.md#ssdp-and-dial-http-exposure).
 - A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
   its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
 

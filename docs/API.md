@@ -72,6 +72,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `channel` | `string` | `"electron-cast"` | Prefix of the IPC channel names. Must match the preload's `channel`. |
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
 | `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is still listed by discovery and the picker; casting to it fails as for an unreachable device. |
+| `dial` | `boolean \| { registry?, http?, httpOptions?, settleMs? }` | `true`, but `false` when a custom `discovery` is given | DIAL: SSDP discovery and the `cast-dial:` sources of presentation mode (see [DESIGN.md](DESIGN.md#dial-srcdial)). `false` sends no SSDP and no request to any device for DIAL. An object replaces the network layers (`registry`: `DialRegistryOptions`, `http`: a `DialHttp`, `httpOptions`: `origin`, `getTimeoutMs`, `actionTimeoutMs`), mostly for tests. |
 
 #### `CastManager`
 
@@ -106,6 +107,11 @@ The result is a `DeviceChoice` (`CastDevice | null | "stop"`):
   request resolves as cancelled. Without a `request.session`, it is treated as cancelled.
 
 The time the picker is open does not count against the page's launch timeout.
+
+When the page's request carries a `cast-dial:` URL (Google's SDK adds one when the page passes a `dialRequest`),
+`devices` also holds the DIAL sinks that have that app and may be shown to the page's origin; `request.appId` is then `""`
+for a request that has no Cast URL. A DIAL sink has `device.dial` set. Choose it like any device: the manager creates the
+DIAL route, and `request.session` does not apply to it.
 
 The third argument, a `DevicePickerContext` (`{ signal: AbortSignal; registerMediaSinksObserver(observer): () => void }`),
 streams devices that appear while the picker is open (mDNS often needs seconds). `signal` aborts when the request no
@@ -190,6 +196,7 @@ Electron's `ipcMain`, `WebContents` and `WebFrameMain` satisfy these. The main e
 | `statusText` | `string` | TXT `rs`, or `""`. |
 | `instanceName` | `string` | The full mDNS instance name. |
 | `txt` | `Record<string, string>` | All TXT records. Treat the values as untrusted. |
+| `dial` | `{ appUrl: string; modelName: string; ipAddress: string }` (optional) | Set only on a DIAL sink, which is shown to `selectDevice` when a request carries a `cast-dial:` URL. Then `id` is `dial:<uuid>`, `host` and `addresses` hold the device's address, `port` is 0, `capabilities` is 0 and `txt` is empty. Do not connect to it: return it from `selectDevice` and the manager launches the app over DIAL. |
 
 ---
 
@@ -367,6 +374,12 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 | `selectDevice` | `(devices, request, picker) => Promise<DeviceChoice>` | As in [`selectDevice`](#selectdevice). |
 | `allowOrigin` | `(origin: string) => boolean` (optional) | As for the manager. |
 | `emit` | `(senderId: number, event: BridgeEvent) => void` | Receives every event for a sender. |
+
+The root also exports the DIAL layer from `src/dial/`: `DialService` (registry, sink service and route provider behind
+`dial`), `DialRegistry`, `DialSinkService`, `DialRouteProvider`, `createDialHttp`, the parsers (`parseSsdpResponse`,
+`parseDeviceDescription`, `parseAppInfo`, `parseDialLaunchSource`) and `dialOriginAllowed`. They are the pieces
+[DESIGN.md](DESIGN.md#dial-srcdial) describes, each with the Chromium function it follows, and are not needed to use the
+manager.
 
 #### Other exports
 

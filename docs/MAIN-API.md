@@ -66,8 +66,11 @@ const stop = manager.registerMediaSinksObserver({
 // stop() unregisters
 ```
 
-A `MediaSink` is `{ id, name, description (the model), iconType: "cast" | "cast_audio" | "cast_audio_group", device }`
-where `device` is the discovered `CastDevice`.
+A `MediaSink` is `{ id, providerId: "cast" | "dial", name, description (the model), iconType: "cast" | "cast_audio" | "cast_audio_group" | "generic", device }`
+where `device` is the discovered `CastDevice`. A DIAL sink (`providerId: "dial"`, id `dial:<uuid>`, icon `generic`, as
+`DialMediaSinkServiceImpl` creates it) has `device.dial` set. A device that both mDNS and SSDP found is reported once,
+as the Cast sink (`CastMediaSinkServiceImpl::TryConnectDialDiscoveredSink`). DIAL sinks have no capabilities, so a
+`capabilities` query never lists them; `manager.devices()` stays the Cast devices.
 
 ## Routes
 
@@ -85,6 +88,14 @@ const controller = manager.getRouteController(routeId);
 await controller.setVolume(0.4);              // 0 to 1
 await controller.setMute(true);
 ```
+
+A DIAL route (`providerId: "dial"`) is the route of a `cast-dial:` presentation. Its `id` is Chrome's
+`urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source>`, `mediaSource` the `cast-dial:` source, `appId` is `""`
+and `description` and `displayName` the app name. It has no volume: `getRouteController(id).setVolume()` rejects, as
+Chrome's DIAL provider does not implement `BindMediaController`. `terminateRoute` sends the `DELETE` that stops the app
+(and tells the page's connection it ended); `detachRoute` ends the page's connections and leaves the app running, which
+is also what a page closing its connection does (`DialMediaRouteProvider::DetachRoute` is not implemented in Chrome, so
+nothing stops the app).
 
 Control goes through the same `CastSessionService` code the page's calls use, so the page sees what it would see if
 the change came from the device:

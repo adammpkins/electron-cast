@@ -256,6 +256,49 @@ Not done: Chrome also cancels a pending start whose frame navigated to another o
 (`HandleStartPresentationResponse` in the controller delegate); here a pending start is cancelled when the frame is
 removed or navigates, not on an origin change alone.
 
+## DIAL (`src/dial/`)
+
+Chrome's Media Router has a second provider next to Cast: DIAL (Discovery and Launch), which starts an app on a TV
+or dongle with an HTTP request. Google's SDK uses it when the page passes a `dialRequest`: the SDK then adds
+`cast-dial:<appName>?dialPostData=<data>&clientId=<id>` to the `PresentationRequest`'s URLs next to the `cast:` one,
+and the sink the user picks decides which URL is used. electron-cast follows Chrome's provider rule by rule. Paths
+below are relative to the Chromium source root (read from `chromium/chromium` `main` when this was written).
+
+| Part | electron-cast | Chromium |
+|---|---|---|
+| SSDP discovery | `dial-registry.ts`, `ssdp-socket.ts`: one UDP socket per external IPv4 address (the set mDNS uses), bound to an ephemeral port with broadcast on; four `M-SEARCH` requests to `239.255.255.250:1900` a second apart (`MX: 1`, `ST: urn:dial-multiscreen-org:service:dial:1`, `USER-AGENT: <product>/<version> <os>`, a trailing blank line); the cycle ends 2 s after the last one and the sockets close. | `chrome/browser/media/router/discovery/dial/dial_service_impl.cc` (`DialServiceImpl::Discover`, `BuildRequest`, `SendOneRequest`, `FinishDiscovery`, `DialSocket::CreateAndBindSocket`) |
+| SSDP answers | `parse.ts` `parseSsdpResponse`: complete headers, a `LOCATION` that is an http(s) URL whose host is an IP literal that is not publicly routable and equals the sender, a `USN`; `ST` is not checked; `CACHE-CONTROL` max-age capped at 3600; `CONFIGID.UPNP.ORG` accepted when `0 < id <= (2 << 24) - 1`; a 1500-byte read buffer. | `dial_service_impl.cc` (`DialSocket::ParseResponse`), `dial_device_data.cc` (`DialDeviceData::IsValidUrl`) |
+| Registry | A discovery cycle every 120 s; a device expires after 240 s or its max-age; at most 256 devices; keyed by `USN`, labelled by a counter; the list is published only when it changed (or when `discoverNow` forced it). | `dial_registry.cc` (`DialRegistry`, `PruneExpiredDevices`, `MaybeSendDeviceList`, `DiscoverNow`) |
+| Device description | `dial-sink-service.ts`: `GET` without an `Origin` header, the `Application-URL` header validated like a `LOCATION` and stripped of a trailing slash, the XML parsed for `UDN`, `friendlyName` (else `<model> [<last 4 of UDN>]`), `modelName` and `deviceType`; cached 12 h by label and `CONFIGID`, 256 entries. | `device_description_fetcher.cc`, `device_description_service.cc` (`ValidateParsedDeviceDescription`), `safe_dial_device_description_parser.cc` |
+| HTTP | `http.ts`: no redirects ("Redirect not allowed"), a 256 KiB body limit, a UTF-8 body, a `GET` with an empty body is an error, `GET` retried twice on 5xx, `POST` and `DELETE` not retried, `POST` as `text/plain`; an `Origin: package:Google-Chrome.<major>.<OS>` header on the app-info `GET`, `POST` and `DELETE` (not on the description `GET`), so a web page cannot make a browser do the same. | `dial_url_fetcher.cc` (`DialURLFetcher`, `GetFakeOriginForDialLaunch`) |
+| App info | `parse.ts` `parseAppInfo`, `dial-sink-service.ts` `fetchAppInfo`: `<service dialVer>` with `name`, `options@allowStop`, `link@href`, `state` (`running` or `stopped`, any case; else invalid) and `additionalData`; the result is a `network_error` (no HTTP status), `http_error` (non-2xx) or `parsing_error` (2xx, unusable body). | `dial_app_discovery_service.cc`, `safe_dial_app_info_parser.cc`, `components/media_router/common/media_source.cc` (`GetDialAppUrl`) |
+| Sinks | `dial-sink-service.ts`: sink id `dial:<UDN without "uuid:" and "-", lower case>`, icon `generic`, extra data `app_url`, `model_name`, `ip_address`; published 3 s after the last change; a sink is available for an app when app info said `running` or `stopped`, unavailable on an `http_error` or `parsing_error`, unknown on a `network_error`; app info is asked only while the answer is unknown, and never of `eureka dongle`, `chromecast audio` or `chromecast ultra`. | `dial_media_sink_service_impl.cc` (`OnDeviceDescriptionAvailable`, `OnDiscoveryComplete`, `FetchAppInfoForSink`, `GetSinkAppStatusFromResponse`), `media_sink_util.cc` |
+| Cast/DIAL dedup | A DIAL sink whose uuid is a Cast device's `id` (processed the same way) is hidden: not listed, not queried, not routable. | `chrome/browser/media/router/discovery/mdns/cast_media_sink_service_impl.cc` (`TryConnectDialDiscoveredSink`: a Cast sink with the same id removes the DIAL sink) |
+| Availability | `presentation-handler.ts`, `origins.ts`: a `cast-dial:` source is available when a sink has the app; for `youtube`, `netflix`, `pandora`, `radio`, `hulu`, `vimeo` and `dailymotion` only to Chrome's list of origins (matched case-insensitively on the app name); a request with a Cast URL too is available if either is. Like Chrome's, the first answer is what is known now: the app query is still on its way. | `chrome/browser/media/router/providers/dial/dial_media_route_provider.cc` (`StartObservingMediaSinks`, `GetOrigins`), `components/media_router/browser/media_sinks_observer.cc` (`OnSinksUpdated`) |
+| Create a route | `route-provider.ts` `createRoute`: unknown sink, a source that is not a `cast-dial:` launch (the `clientId` is required) and a repeated route fail like `SINK_NOT_FOUND`, `NO_SUPPORTED_PROVIDER`, `ROUTE_ALREADY_EXISTS`; an existing route on the sink is terminated first; the page gets `receiver_action` (`cast`) and `new_session` at once. The route id is `urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source>` and the presentation id `mr_<uuid>`. | `dial_media_route_provider.cc` (`CreateRoute`), `dial_activity_manager.cc` (`DialActivity::From`, `AddActivity`), `dial_internal_message_util.cc`, `components/media_router/common/media_route.cc` (`GetMediaRouteId`), `components/media_router/browser/media_router_base.cc` (`CreatePresentationId`) |
+| The SDK's round trip | `client_connect` makes the provider fetch app info and send `custom_dial_launch` (`{receiver, appState, extraData}` with a fresh sequence number, remembered in a set of at most 10); the page answers with the same number and `{doLaunch, launchParameter}`; an answer to an unknown number is ignored. `dial_app_info` is answered with the app info or an `error` (`network_error`, `parsing_error`, `http_error` with `details.http_error_code`) under the same number. A failed fetch at `client_connect` sends nothing, as in Chrome, and the route stays. | `dial_media_route_provider.cc` (`HandleParsedRouteMessage`, `HandleClientConnect`, `HandleCustomDialLaunchResponse`, `HandleAppInfoRequest`), `dial_internal_message_util.cc` |
+| Launch | `doLaunch: false` marks the route launched without a request; otherwise a `POST` to `<app url>/<app>` whose body is the launch parameter, else the source's `dialPostData` exactly as written in the source (Chrome reads the raw, still escaped query value); a `LOCATION` that is an http URL on the sink's own address becomes the run URL; a failed launch removes the route. | `dial_activity_manager.cc` (`LaunchApp`, `CustomDialLaunchMessageBody::From`, `DialActivity::From`) |
+| Stop | A `v2_message` of type `STOP` or a page's `terminate()` sends `receiver_action` (`stop`) and `DELETE`s the run URL (`<app url>/<app>/run` when the launch gave none); a route that was never launched is dropped without a request; a failure looks at app info again and posts an issue unless the app is no longer running; the connection ends `terminated` either way. | `dial_media_route_provider.cc` (`DoTerminateRoute`, `HandleStopAppResult`), `dial_activity_manager.cc` (`StopApp`) |
+| Join and close | `reconnect` with an `mr_` id joins the route with the same presentation id, source and origin and sends nothing; closing a connection, navigating or closing the page leaves the route and the app running. | `dial_media_route_provider.cc` (`JoinRoute`; `DetachRoute` is `NOTIMPLEMENTED`), `components/media_router/browser/presentation/controller_presentation_service_delegate_impl.cc` |
+
+Differences from Chrome, and why:
+
+- **No Cast channel for a DIAL-only device.** Chrome tries to open a Cast channel to a device it found by SSDP only
+  (port 8009) and, when that works, shows it as a Cast sink (`CastMediaSinkServiceImpl::TryConnectDialDiscoveredSink`
+  opens the channel; `OnChannelOpenSucceeded` drops the DIAL sink). electron-cast does not try: such a device is
+  listed as a DIAL sink. A device that mDNS also found is a Cast sink either way.
+- **Timeouts.** Chrome sets none on its URL fetches (`DialActivityManager::CreateFetcher` has a TODO for it); Node
+  would wait forever, so a `GET` gives up after 10 s and a `POST` or `DELETE` after 30 s.
+- **`setMulticastInterface`.** Each SSDP socket also pins its multicast sends to its interface, which Windows needs to
+  send from the right adapter.
+- **The `Origin` product.** `package:Google-Chrome.<major>.<OS>` is the syntax in `GetFakeOriginForDialLaunch`'s
+  comment; `<major>` comes from the Chromium that Electron ships (`0` outside Electron).
+- **Stop failures.** Chrome posts an issue (`IDS_MEDIA_ROUTER_ISSUE_CANNOT_TERMINATE`); the provider emits an `issue`
+  event and rejects `terminateRoute`, and the connection still ends.
+- **Volume.** A DIAL route has none, as in Chrome (`BindMediaController` is `NOTIMPLEMENTED`).
+- **The XML reader** (`xml.ts`) stands in for Chromium's out-of-process `data_decoder`: it refuses entity
+  declarations, caps the depth and ignores namespaces.
+
 ## Electron layer (`src/electron/`)
 
 No Electron import: both modules take the Electron objects they need as parameters, typed by small structural

@@ -159,8 +159,8 @@ test("dial_app_info is answered with the app state, or with an error carrying th
   await sleep(10);
   assert.equal(messages[0]?.message.type, "dial_app_info");
   assert.equal(messages[0]?.message.sequenceNumber, 7);
-  assert.equal((messages[0]?.message.message as Record<string, unknown>).appState, "running");
-  assert.deepEqual((messages[0]?.message.message as Record<string, unknown>).extraData, { k: "v" });
+  assert.equal((messages[0]!.message.message as Record<string, unknown>).appState, "running");
+  assert.deepEqual((messages[0]!.message.message as Record<string, unknown>).extraData, { k: "v" });
 
   setAppInfo(() => ({ appInfo: null, resultCode: "http_error", errorMessage: "Internal net::Error: -379", httpErrorCode: 404 }));
   provider.sendRouteMessage(r.id, dialEnvelope("dial_app_info", null, "client-1", 8));
@@ -191,7 +191,7 @@ test("a STOP v2_message tells the page receiver_action stop, deletes the run URL
   assert.deepEqual(http.calls.filter((c) => c.method === "DELETE").map((c) => c.url), [`http://${DEVICE_IP}:8008/apps/YouTube/web-1`], "the Location of the launch");
   const stop = messages.at(-1)?.message;
   assert.equal(stop?.type, "receiver_action");
-  assert.equal((stop?.message as Record<string, unknown>).action, "stop");
+  assert.equal((stop!.message as Record<string, unknown>).action, "stop");
   assert.deepEqual(terminated, [r.id]);
   assert.deepEqual(provider.routes(), []);
 });

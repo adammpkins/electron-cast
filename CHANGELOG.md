@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **DIAL, as Chrome's Media Router does it (presentation mode).** electron-cast now discovers DIAL devices by SSDP and
+  serves the `cast-dial:` sources that Google's SDK adds to a request when the page passes a `dialRequest`
+  (`chrome.cast.DialRequest`, as YouTube's web app does for non-Cast TVs). Each rule follows a Chromium function,
+  cited in [docs/DESIGN.md](docs/DESIGN.md#dial-srcdial): an M-SEARCH on every IPv4 interface (four searches a second
+  apart, every 120 s), the UPnP device description and the `Application-URL` header (both only for private addresses
+  that equal the sender's), app info for the app a page asks about, and a sink per device. A page sees availability
+  per app (only to the origins Chrome allows for that app), the picker offers DIAL sinks next to Cast devices, and
+  starting one runs the SDK's `custom_dial_launch` round trip, an HTTP launch with the SDK's launch parameter, and a
+  stop by `DELETE` of the run URL. A device that Cast discovery also found is shown as a Cast device only, as in
+  Chrome. On by default, as in Chrome; `dial: false` on `createCastManager` turns it off (SSDP and the HTTP requests
+  to devices stop entirely). A custom `discovery` turns it off unless `dial` is given.
+- Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009), requests
+  have timeouts (Chrome sets none), and a DIAL route has no volume control (`BindMediaController` is not implemented
+  there either).
+- API: `MediaSink` and `MediaRoute` gain `providerId` (`"cast"` or `"dial"`), `SinkIconType` gains `"generic"`, and
+  `CastDevice` gains an optional `dial` field that marks a DIAL sink. The sinks observer without a query now also
+  reports DIAL sinks (they have no capabilities, so a `capabilities` query never does); `manager.devices()` still lists
+  Cast devices only. `selectDevice` can be handed a DIAL device when the request carries a `cast-dial:` URL: return it
+  like any other and the manager does the rest (do not connect to it yourself). The SDK canary no longer lists the DIAL
+  messages and `cast-dial:` as unhandled.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge
