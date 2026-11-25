@@ -89,7 +89,8 @@ The main process serves both modes. `createCastManager({ ..., presentation: fals
 
 - Google's SDK gets what Chrome would give it: receiver availability, the device picker, sessions and joining them,
   messages on any namespace, volume, and media commands with their status replies.
-- Tested end to end with `cast.framework` on a Nest Hub (Electron 45): session start, volume, HLS load, play, pause,
+- Tested end to end with YouTube Music (YouTube Music Desktop, Electron 45) casting to speaker groups, a Nest Hub
+  and several Chromecasts, and with `cast.framework` on a Nest Hub: session start, volume, HLS load, play, pause,
   seek, resume and stop.
 
 **`mode: "chromecast"`:**

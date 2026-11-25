@@ -1,14 +1,15 @@
 {
   "name": "electron-cast",
-  "version": "0.2.0",
-  "description": "Chromecast for Electron: the chrome.cast sender API for web pages, backed by device discovery and the Cast v2 protocol in the main process.",
+  "version": "0.3.0",
+  "description": "Chromecast for Electron: lets pages run Google's own Cast SDK by supplying the Media Router Electron lacks, with device discovery and the Cast v2 protocol in the main process.",
   "keywords": [
     "electron",
     "chromecast",
     "cast",
     "google-cast",
     "chrome.cast",
-    "castv2"
+    "castv2",
+    "presentation-api"
   ],
   "license": "MIT",
   "author": "Adam Perkins",

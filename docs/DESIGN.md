@@ -1,9 +1,12 @@
 # electron-cast design
 
-Electron has no Presentation API and no Chrome Media Router, so web pages that use the Google Cast sender SDK
-(`chrome.cast`) cannot find or talk to Cast devices. Electron closed the upstream request (electron/electron#869) in
-2025 with no plans to implement it. electron-cast fills the gap from scratch: the page gets a `chrome.cast`
-implementation, and the main process does discovery and speaks the Cast v2 protocol.
+Electron exposes the Presentation API but has no Chrome Media Router behind it, so web pages that use the Google Cast
+sender SDK (`chrome.cast`) cannot find or talk to Cast devices. Electron closed the upstream request
+(electron/electron#869) in 2025 with no plans to implement it. electron-cast fills the gap from scratch. By default
+the page keeps Google's own SDK, and electron-cast supplies the missing Media Router: a stand-in Presentation API in
+the page, and in the main process a translator for the router's message format plus device discovery and the Cast v2
+protocol. The older alternative (`mode: "chromecast"`) gives the page electron-cast's own `chrome.cast`
+implementation instead.
 
 First consumer: YouTube Music Desktop (YTM's web player uses the legacy `chrome.cast` API with the YouTube receiver
 `233637DE` and the `urn:x-cast:com.google.youtube.mdx` namespace). The library is generic: nothing YouTube-specific
@@ -12,7 +15,7 @@ lives in it.
 ## Goals
 
 - Works with `sandbox: true` and `contextIsolation: true`. The page never gets Node, sockets or IPC handles; it only
-  sees the `chrome.cast` object.
+  sees the Presentation API stand-in (or the `chrome.cast` object in `"chromecast"` mode).
 - No native modules. Pure TypeScript on Node's `tls` and `dgram`.
 - The main process decides which pages may cast and which device the user picked. The library ships a picker hook,
   and the app supplies the UI.
@@ -22,11 +25,13 @@ lives in it.
 ## Layers
 
 ```
-page (main world)       chrome.cast polyfill           src/polyfill/
+page (main world)       Google's Cast SDK on the Presentation API stand-in   src/polyfill/presentation-standin.ts
+                        (or, mode "chromecast": chrome.cast polyfill          src/polyfill/install.ts)
    │  window-level bridge object, installed by the preload
 preload (isolated)      bridge: contextBridge + ipcRenderer   src/electron/preload.ts
    │  IPC channel "electron-cast:*"
 main process            CastManager: sessions, picker, IPC     src/electron/main.ts
+                        ├─ Presentation handler + envelope      src/electron/presentation-*.ts
                         ├─ Discovery (mDNS)                    src/discovery/
                         └─ CastClient per device (Cast v2)     src/client/
                            └─ protocol: framing + CastMessage  src/protocol/
@@ -110,21 +115,50 @@ Router behind the Presentation API. The polyfill refuses those script URLs (thro
 `__onGCastApiAvailable` once, after `DOMContentLoaded` if the page is still loading, for whichever function the page
 assigns. The Cast Application Framework then runs on the polyfill.
 
+## Presentation mode (default)
+
+Google's `cast_sender.js` loader sees `navigator.presentation` and loads its Presentation API based SDK
+(`www.gstatic.com/eureka/clank/<chrome major>/cast_sender.js`). That SDK implements `chrome.cast` on
+`PresentationRequest` with URLs like `https://google.com/cast#__castAppId__=<appId>/__castClientId__=<id>/...`, and
+talks to Chrome's Media Router over the `PresentationConnection` in a private JSON envelope
+(`{type, message, sequenceNumber, timeoutMillis, clientId}`, defined in Chromium's
+`cast_internal_message_util.cc`). Electron has the Presentation API but no Media Router, so electron-cast supplies
+one:
+
+- `src/polyfill/presentation-standin.ts` replaces `PresentationRequest`, `PresentationConnection`,
+  `PresentationAvailability` and `navigator.presentation` in the main world. It checks the user gesture, allows
+  one `start()` at a time, and moves strings over the bridge. It knows nothing about Cast.
+- `src/electron/presentation-envelope.ts` parses the Cast presentation URLs and converts between the envelope and
+  the session service's shapes. Examples: receiver labels are hashed, the media-command bitmask becomes strings, and
+  null fields are stripped.
+- `src/electron/presentation-handler.ts` (`CastPresentationHandler`) plays the Media Router's part on top of the
+  session service: availability, start (picker, launch, `receiver_action` then `new_session`), reconnect
+  (`auto-join` and `cast-session_<id>`), app and media messages with request id mapping, volume, leave and stop.
+  Its interface (`getAvailability`, `startPresentation`, `reconnectPresentation`, and a connection with `send`,
+  `close`, `terminate`, `onmessage` and `onclose`) is the one proposed to Electron as a native hook
+  (`docs/upstream/`, not shipped). With that hook the stand-in would go away.
+
+Known gaps: a session does not survive a page reload (the service drops a sender's sessions when it navigates), and
+events go to the main frame only, so Google's SDK inside an iframe gets nothing.
+
 ## Electron layer (`src/electron/`)
 
 No Electron import: both modules take the Electron objects they need as parameters, typed by small structural
 interfaces, so the library has no Electron dependency and runs in plain Node.
 
-- `main.ts`: `createCastManager({ ipcMain, selectDevice, allowOrigin?, discovery?, createClient?, channel? })`
-  returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events go back to the
-  page on `<channel>:event`. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
+- `main.ts`: `createCastManager({ ipcMain, selectDevice, allowOrigin?, discovery?, createClient?, channel?,
+  presentation? })` returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events
+  go back to the page on `<channel>:event`. Unless `presentation: false`, it also serves presentation mode:
+  `<channel>:presentation` (invoke), `<channel>:presentation:send` (page to main) and `<channel>:presentation:event`
+  (main to page). Each connection and availability watch belongs to one webContents, and the others can't touch it. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
   `chrome.cast.ErrorCode.CANCEL`) or `"stop"`
   (stop `request.session`, the sender's current session, which is set when the sender is already casting that app;
   picking that session's device returns it without relaunching). `allowOrigin(origin)` gates every call by the
   sender frame's origin. A sender is one webContents, which leaves its sessions when it is destroyed or navigates
   (`did-navigate`).
-- `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, bridgeKey? })` exposes the bridge
-  (`call`, `onEvent`) and installs the polyfill in the main world before page scripts run.
+- `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, mode?, bridgeKey?,
+  presentationBridgeKey? })` exposes a bridge and, before page scripts run, installs the Presentation API stand-in
+  (default) or, with `mode: "chromecast"`, the polyfill.
 
 Main process:
 

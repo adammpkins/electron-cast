@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.3.0)
+## 0.3.0
 
 - **Changed default: pages now run Google's own Cast SDK.** `installCastBridge` installs a stand-in Presentation API
   (`mode: "presentation"`, the new default) instead of electron-cast's `chrome.cast`, so Google's `cast_sender.js` and
