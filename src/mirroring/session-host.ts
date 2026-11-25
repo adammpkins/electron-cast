@@ -14,6 +14,7 @@
  */
 import { SUPPORTED_VIDEO_CODECS, type EncodingSupport } from "./encoding-support.ts";
 import { type MirroringBackend, type CapturedVideoFrame, type OperationalStatus, operationalStatusErrorMessage } from "./backend.ts";
+import type { CongestionSignal } from "../electron/switches.ts";
 import { MirrorSettings, getCodecParameterString, LEGACY_MAX_VIDEO_BITRATE, type FrameSenderConfig } from "./mirror-settings.ts";
 import { ErrorCode, type SessionError } from "./protocol/errors.ts";
 import type { VideoCodec } from "./protocol/constants.ts";
@@ -84,6 +85,14 @@ export interface SessionParameters {
   enableRtcpReporting?: boolean;
 }
 
+/** Chrome features the session host reads (`mirroring_features.cc`, `media_switches.cc`), as the app's command line sets them. */
+export interface MirroringFeatures {
+  /** `kCastStreamingCongestionSignal`; default `before_or_after_encoding`. */
+  congestionSignal?: CongestionSignal;
+  /** `kCastStreamingPerformanceOverlay`; default off. */
+  performanceOverlay?: boolean;
+}
+
 export interface SessionHostDeps {
   environment: SessionEnvironment;
   router: SenderPacketRouter;
@@ -92,6 +101,12 @@ export interface SessionHostDeps {
   encodingSupport: EncodingSupport;
   observer: SessionObserver;
   env?: Record<string, string | undefined>;
+  /**
+   * `max_resolution` of `OpenscreenSessionHost`'s constructor (`CastMirroringServiceHost::GetCaptureResolutionConstraint`);
+   * 1920x1080 when absent.
+   */
+  maxResolution?: { width: number; height: number };
+  features?: MirroringFeatures;
   /** Decides the H.264 profile of the offer (`ToProfile`: Baseline on macOS); default `process.platform`. */
   platform?: string;
 }
@@ -136,6 +151,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     this.params = params;
     this.deps = deps;
     this.settings = new MirrorSettings(params.targetPlayoutDelayMs, deps.env);
+    if (deps.maxResolution !== undefined) this.settings.setMaxResolutionConstraints(deps.maxResolution);
     this.session = new SenderSession({
       remoteAddress: params.receiverAddress,
       client: this,
@@ -355,6 +371,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       (utilization) => this.deps.backend.processFeedback(utilization),
     );
     frameSender.onDropLog = (message) => this.deps.observer.logInfo?.(message);
+    videoSender.performanceOverlay = this.deps.features?.performanceOverlay === true;
     videoSender.onKeyFrameRequest = (reason) => this.deps.observer.logInfo?.(`video key frame requested (${reason})`);
     this.videoFrameSender = frameSender;
     this.videoSender = videoSender;
@@ -608,11 +625,23 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     });
   }
 
+  /** `GetCongestionFrameDrops`: how many of the frames dropped so far count as a congestion signal. */
+  private congestionFrameDrops(video: VideoSender): number {
+    switch (this.deps.features?.congestionSignal ?? "before_or_after_encoding") {
+      case "before_encoding":
+        return video.framesDroppedBeforeEncoding;
+      case "after_encoding":
+        return video.framesDroppedAfterEncoding;
+      default:
+        return video.framesDropped;
+    }
+  }
+
   /** `UpdateBandwidthEstimate(int)`. Public so that tests can drive it with a chosen estimate. */
   updateBandwidthEstimate(bandwidthEstimate: number): void {
     if (this.videoSender === undefined) return;
     // The cumulative drop count (before or after encoding, the default congestion signal) is compared to the last update.
-    const currentFramesDropped = this.videoSender.framesDroppedBeforeEncoding + this.videoSender.framesDroppedAfterEncoding;
+    const currentFramesDropped = this.congestionFrameDrops(this.videoSender);
     const isCongested = currentFramesDropped > this.numVideoFramesDropped;
     this.numVideoFramesDropped = currentFramesDropped;
     if (bandwidthEstimate <= 0) return;

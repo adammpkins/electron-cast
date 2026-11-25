@@ -438,12 +438,12 @@ the app chooses what to send. They are off unless you pass `mirroring` to `creat
 
 <!-- no-check -->
 ```ts
-import { app, BrowserWindow, MessageChannelMain, utilityProcess, webContents } from "electron";
+import { app, BrowserWindow, MessageChannelMain, screen, utilityProcess, webContents } from "electron";
 
 const manager = createCastManager({
   ipcMain,
   selectDevice,
-  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app } },
+  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app, screen } },
 });
 await manager.start();
 
@@ -518,13 +518,19 @@ finite is the string `"null"`. As in Chrome the structure is for logs, not a con
 id because several routes can run (Chrome's debugger keeps one global copy). It never throws: like Chrome's `MediaRouterDebuggerImpl::GetMirroringStats`, which has no error path, it returns `{}` while statistics are off, before the first fetch and for a route id it does not know, and a route that has ended keeps its last statistics (Chrome's copy outlives the session) until another route pushes newer ones.
 
 `mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
-`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`, and `app` so that Chrome's
-switches are seen), `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio is always offered. Video is
+`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`, `app` so that Chrome's
+switches are seen, and `screen`, whose primary display caps the capture resolution), `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio is always offered. Video is
 chosen as Chrome chooses it: H.264, VP8 and VP9 in hardware when the machine has an encoder for them
 (`VideoEncoder.isConfigSupported` with `prefer-hardware`), VP8 and VP9 in software when it has none; Chrome's own
 switches on `app.commandLine` change that (`--cast-streaming-force-{enable,disable}-hardware-<codec>`,
 `--enable-features` / `--disable-features` with `CastStreamingVp8`, `CastStreamingVp9`, `CastStreamingAv1`,
-`CastStreamingHardwareHevc`, and `--disable-cast-letterboxing`), including ones the app appends itself. A hardware
+`CastStreamingHardwareHevc`, and `--disable-cast-letterboxing`), including ones the app appends itself. The same
+command line carries `--enable-features=CastStreamingGradualBandwidthBackoff:congestion_signal/before_encoding`
+(or `after_encoding`; default `before_or_after_encoding`), `--enable-features=CastStreamingPerformanceOverlay` (Chrome's
+metrics overlay drawn on the frames sent) and, on Linux, `--enable-features=PulseaudioLoopbackForCast` (without it a
+desktop capture carries no audio, as in Chrome). `screen` is Electron's `screen` module: as in Chrome, the capture is
+no larger than the primary display's size in pixels (landscape, in steps of 160x90, at most 1920x1080), for a tab and
+for a desktop alike; without it the limit is 1920x1080. A hardware
 encoder that fails during a session is dropped for the rest of the app's run and the session offers again without it.
 Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
 route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)

@@ -21,13 +21,30 @@ export const MIN_KEY_FRAME_REQUEST_FRAME_INTERVAL = 6;
 /** `kBitrateThreshold` in `InsertRawVideoFrame`. */
 export const BITRATE_HYSTERESIS = 0.05;
 
+/**
+ * What `VideoSender::InsertRawVideoFrame` hands `RenderPerformanceMetricsOverlay` (media/cast/sender/performance_metrics_overlay.h):
+ * drawn on the frame before it is encoded when `kCastStreamingPerformanceOverlay` is on.
+ */
+export interface PerformanceOverlayInfo {
+  targetPlayoutDelayMs: number;
+  lowLatencyMode: boolean;
+  /** The bitrate suggested for this frame, in bits per second. */
+  targetBitrate: number;
+  /** `frames_in_encoder_ + 1`. */
+  framesAgo: number;
+  /** -1 until an encoded frame reports one. */
+  encoderUtilization: number;
+  /** -1 until an encoded frame reports one. */
+  lossiness: number;
+}
+
 /** `media/cast/sender/video_encoder.h`, the part VideoSender calls. */
 export interface VideoEncoderPort {
   generateKeyFrame(): void;
   setBitRate(bitsPerSecond: number): void;
   setMaxFrameRate(rate: number): void;
   /** False when the encoder refused the frame. The result arrives later through `onEncodedVideoFrame`. */
-  encodeVideoFrame(frame: RawVideoFrame, referenceTimeMs: number): boolean;
+  encodeVideoFrame(frame: RawVideoFrame, referenceTimeMs: number, overlay?: PerformanceOverlayInfo): boolean;
 }
 
 export interface RawVideoFrame {
@@ -70,6 +87,8 @@ export class VideoSender implements FrameSenderClient {
   framesDroppedByEncoder = 0;
   /** Drops by reason, the counterpart of the `CastStreaming.Sender.Video.FrameDropped` histogram (video_sender.cc `kHistogramFrameDropped`). */
   readonly dropReasons = new Map<FrameDropReason, number>();
+  /** `base::FeatureList::IsEnabled(media::kCastStreamingPerformanceOverlay)`, read when the frame is inserted. */
+  performanceOverlay = false;
   /** Debug aid, not in Chromium: each key frame the sender asks the encoder for, with why. */
   onKeyFrameRequest: ((reason: string) => void) | undefined;
 
@@ -170,7 +189,17 @@ export class VideoSender implements FrameSenderClient {
       this.lastBitrate = suggestedBitrate;
     }
 
-    if (this.encoder.encodeVideoFrame(frame, referenceTimeMs)) {
+    const overlay: PerformanceOverlayInfo | undefined = this.performanceOverlay
+      ? {
+          targetPlayoutDelayMs: this.frameSender.targetPlayoutDelay,
+          lowLatencyMode: this.lowLatencyMode,
+          targetBitrate: suggestedBitrate,
+          framesAgo: this.framesInEncoder + 1,
+          encoderUtilization: this.lastReportedEncoderUtilization,
+          lossiness: this.lastReportedLossiness ?? -1,
+        }
+      : undefined;
+    if (this.encoder.encodeVideoFrame(frame, referenceTimeMs, overlay)) {
       this.framesInEncoder++;
       this.durationInEncoderMs += durationAddedByNextFrame;
       this.lastEnqueuedRtpTimestamp = frame.rtpTimestamp;

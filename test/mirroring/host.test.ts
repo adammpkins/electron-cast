@@ -353,3 +353,33 @@ test("host: a Mac offers H.264 Baseline, as Chrome's ToProfile does", async () =
   assert.equal(state.probes.find((p) => p.codec === "h264")?.string, "avc1.420028");
   host.dispose();
 });
+
+test("host: the primary display caps the capture resolution the engine and the hardware probes use", async () => {
+  const screen = { getPrimaryDisplay: () => ({ size: { width: 1366, height: 768 }, scaleFactor: 1 }) };
+  const { state, host } = await start(false, {}, [{ codec: "h264", hardware: true }, { codec: "vp8", hardware: false }]);
+  assert.deepEqual((state.procs[0]!.posted.find((m) => (m as { type: string }).type === "start") as { maxResolution: unknown }).maxResolution, { width: 1920, height: 1080 }, "no screen: kMaxResolution");
+  host.dispose();
+  const { electron, state: s2 } = fakeElectron();
+  s2.found = [{ codec: "h264", hardware: true }, { codec: "vp8", hardware: false }];
+  (electron as { screen?: unknown }).screen = screen;
+  const h2 = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
+  h2.factory({ type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never, {}, { send() {} }, { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never);
+  for (let i = 0; i < 100 && s2.procs.length === 0; i++) await sleep(5);
+  const msg = s2.procs[0]!.posted.find((m) => (m as { type: string }).type === "start") as { maxResolution: unknown };
+  assert.deepEqual(msg.maxResolution, { width: 1280, height: 720 });
+  const hw = s2.probes.find((p) => p.hardware)!;
+  assert.deepEqual([hw.width, hw.height], [1280, 720]);
+  h2.dispose();
+});
+
+test("host: the session start carries the features read from app.commandLine", async () => {
+  const feature = (args: string[]) => start(false, {}, undefined, args).then(({ state, host }) => {
+    host.dispose();
+    return (state.procs[0]!.posted.find((m) => (m as { type: string }).type === "start") as { features: unknown }).features;
+  });
+  assert.deepEqual(await feature([]), { congestionSignal: "before_or_after_encoding", performanceOverlay: false });
+  assert.deepEqual(
+    await feature(["--enable-features=CastStreamingPerformanceOverlay,CastStreamingGradualBandwidthBackoff:congestion_signal/after_encoding"]),
+    { congestionSignal: "after_encoding", performanceOverlay: true },
+  );
+});

@@ -8,6 +8,7 @@
  */
 
 import type { ResolutionChangePolicy } from "../mirror-settings.ts";
+import type { PerformanceOverlayInfo } from "../sender/video-sender.ts";
 
 /** What to capture. */
 export type CaptureSource =
@@ -34,7 +35,8 @@ export interface AgentStartMessage {
 
 export type EngineToAgent =
   | AgentStartMessage
-  | { t: "encode"; rtp: number }
+  /** `overlay` is set when `kCastStreamingPerformanceOverlay` is on: the numbers the agent draws on the frame first. */
+  | { t: "encode"; rtp: number; overlay?: PerformanceOverlayInfo }
   | { t: "set-bitrate"; bps: number }
   /** `hardware` is the offer's `use_hardware_encoder`: the encoder must be one (`prefer-hardware`) or must not be. */
   | { t: "set-codec"; codec: "vp8" | "vp9" | "h264" | "hevc" | "av1"; codecString: string; hardware: boolean }

@@ -1250,7 +1250,7 @@ Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) is a
   `sender_session.cc`: the one receiver-model rule there is `ShouldForceLetterboxing` (below).
 - **How "hardware" is established.** Chrome asks the GPU process for the `VideoEncodeAccelerator` profiles. Here the
   capture page asks WebCodecs: `VideoEncoder.isConfigSupported` with `hardwareAcceleration: "prefer-hardware"`, at the
-  session's maximum resolution (1920x1080, 30 fps) and the codec string Chrome would offer (`GetCodecParameterString`).
+  session's maximum resolution (the screen's, below; 30 fps) and the codec string Chrome would offer (`GetCodecParameterString`).
   In Chromium's blink `video_encoder.cc` `prefer-hardware` makes `GetRequiredEncoderType` return `kHardware`, and
   `CreateMediaVideoEncoder` returns the accelerated encoder's status without the software fallback that
   `no-preference` and `prefer-software` get (it also excludes the OS software encoders, such as Media Foundation's
@@ -1434,8 +1434,52 @@ pins; the files are identical on main) unless noted:
   `CastStreaming*` features (`--enable-features` / `--disable-features`: Vp8, Vp9, Av1, HardwareHevc, Win/MacHardwareH264)
   are read from Electron's `app.commandLine` (`hasSwitch`, `getSwitchValue`), as Chrome reads `base::CommandLine`, so
   switches the app appended with `app.commandLine.appendSwitch` count too. The app's `electron` object carries `app`
-  already; there is no option for it. Only these features are read, not the whole `base::FeatureList` (field trials,
-  `::` params); a feature named in both lists is disabled, as there.
+  already; there is no option for it. Only the features listed here are read, not the whole `base::FeatureList` (field
+  trials); a feature named in both lists is disabled, as there. A feature's parameters are read from
+  `--enable-features=Feature:name/value/name/value` (`featureParams` in `switches.ts`: `ParseEnableFeatureString` and
+  `AssociateFieldTrialParamsFromString`; values are URL-escaped, the first entry naming the feature wins, and a disabled
+  feature has none).
+
+### The capture resolution and the mirroring flags
+
+**The resolution cap** (`getCaptureResolutionConstraint`, `mirror-settings.ts`). `CastMirroringServiceHost::Start` passes
+`GetCaptureResolutionConstraint()` to the Mirroring Service, which calls `SetMaxResolutionConstraints`; it is also what
+`OpenOffscreenTab` sizes the offscreen page with. The constraint is `GetClampedResolution(primary display's
+GetSizeInPixel())`, or `kMaxResolution` (1920x1080) when there is no `display::Screen`: the screen in landscape, then
+whichever of width and height limits it against 16:9 capped at 1920x1080 and rounded down to a multiple of the step
+(160 wide for the width case, 90 for the height case), never below 160x90. The step is 160x90, as audited. Chrome asks for
+the **primary display** whatever it mirrors: not the display a tab's window is on, nor the screen being captured. Here
+`mirroring.electron.screen.getPrimaryDisplay()` gives `size` in DIPs and `scaleFactor`; `Display::GetSizeInPixel` is
+`ScaleToFlooredSize(size(), device_scale_factor_)` (float arithmetic, reproduced with `Math.fround`) unless Chromium
+holds `size_in_pixels_`, which Electron does not expose, so a fractional scale factor can be a pixel off the true
+size (1366x768 at 125% is 1093x614 DIPs, 1366x767), which the 160x90 steps absorb in nearly every case. `kCastEnableStreamingWithHiDPI` does not change the
+clamp; it only sets `VideoCaptureParams::is_high_dpi_enabled` (mirror_settings.cc `GetVideoCaptureParams`), which
+`WebContentsFrameTracker` reads to scale a tab's rendering up to the capture size when GPU compositing is on. The
+capture here is a `getUserMedia` request, which cannot set that field, so the feature does not apply and is not read.
+
+**Flags read** (the app's `app.commandLine`, once per session, like the encoding policy):
+
+| Chrome | Default | Here |
+|---|---|---|
+| `kCastStreamingGradualBandwidthBackoff` param `congestion_signal` (`GetCongestionFrameDrops`) | `before_or_after_encoding` | `before_encoding` counts `GetFramesDroppedBeforeEncoding`, `after_encoding` the drops after it, the default both. A value that names no option is the default, with a log line |
+| `kCastStreamingPerformanceOverlay` (`VideoSender::InsertRawVideoFrame`, `RenderPerformanceMetricsOverlay`) | off | Drawn by the capture agent on a copy of each I420 or NV12 frame just before the encoder, from the numbers the engine sends with the `encode` message. A frame of another format, or shorter than a line of text, goes unchanged, as in Chrome. Capture duration is the time from the frame's capture time to its arrival, since WebCodecs has no `capture_end_time`. Layout: Chrome 120 right-aligns each line; current Chromium advances the pointer before drawing a glyph, which shifts a line one glyph right and wraps the last one onto the next pixel row. That reads as a regression of the span refactor, so the intended layout is drawn |
+| `kPulseaudioLoopbackForCast` (`IsSystemAudioCaptureSupported`, `DesktopMediaPickerController`) | off, Linux only | On Linux without it a desktop `withAudio` is ignored (Chrome's picker offers no audio) and the sinks query does not ask for it. Elsewhere unchanged |
+
+**Flags that do not apply**:
+
+| Chrome | Default | Why |
+|---|---|---|
+| `kCastEnableStreamingWithHiDPI` | off | See above: a `getUserMedia` capture cannot set `is_high_dpi_enabled` |
+| `kCastMirroringNativeNV12` | off | `VideoCaptureClient::OnBufferReady` converts NV12 capture frames to I420 before the encoder unless it is on. Here a captured `VideoFrame` goes to WebCodecs in whatever format the capturer made (NV12 included), as if it were on; there is no conversion to switch |
+| `kCastVideoEncoderFrameDrop` | off | Defined in `media_switches.cc` and read nowhere in Chromium (a code search finds only its definition), so it does nothing in Chrome either |
+| `kWebCodecsVideoEncoderFrameDrop` | off | Read by Chromium's encoders themselves (`GetDefaultVideoEncoderDropFrameThreshold`, `VpxVideoEncoder`, `OpenH264VideoEncoder`), which WebCodecs here uses. Listing it on the app's command line before its windows are created is all it takes; the agent already reports a frame the encoder swallowed as dropped (`video-drop`) |
+
+The media-router and mirroring features that were not in scope and are still not read: `kCastStreaming60fps` (off; the
+frame rate stays 30), `kCastStreamingMaxVideoBitrate` (on, `max_bitrate_mbps` 5: the same 5 Mbps as the legacy value used),
+the other `kCastStreamingGradualBandwidthBackoff` parameters (`good_network_citizen_factor`, `min_backoff_factor`,
+`max_backoff_factor`, `fast_recovery_increase`, `conservative_increase`, with `GetBandwidthBackoffParams`' clamps) and
+turning the feature off (always on here), `kCastStreamingOfferHardwareFirst` (on; always on here), and `kCastMessageLogging`,
+`kDelayMediaSinkDiscovery`, `kFallbackToAudioTabMirroring` and `kRedirectionMediaRouteProvider` (see the policies table).
 - `PortBackend` restarts nothing when the 30 fps fallback asks for a capture restart (`RestartWithParams`); it is
   never asked to, as above.
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the

@@ -53,6 +53,7 @@ export const AGENT_SOURCE = String.raw`
   let encoderSize = null;
   let videoConfig = null;
   const pendingFrames = new Map();     // rtp -> VideoFrame, a few frames the engine may ask to encode
+  const captureDurations = new Map();  // rtp -> ms from capture begin to end, for the performance overlay
   const MAX_PENDING = 3;
   const inFlight = [];                 // { rtp, ts, key, startedAt } in encoder order
   let lastFrameClone = null;
@@ -126,7 +127,7 @@ export const AGENT_SOURCE = String.raw`
         // the device is suspended.
         if (!frozen) refreshFrame();
         return;
-      case "encode": return (encodeChain = encodeChain.then(() => encodeFrame(m.rtp)));
+      case "encode": return (encodeChain = encodeChain.then(() => encodeFrame(m.rtp, m.overlay)));
       case "capture-size": captureSize = { width: m.width, height: m.height }; return;
       case "estimate-complexity": estimating = m.on === true; return;
       case "encode-audio": return encodeAudio(m.seq);
@@ -339,6 +340,7 @@ export const AGENT_SOURCE = String.raw`
       const oldest = pendingFrames.keys().next().value;
       pendingFrames.get(oldest).close();
       pendingFrames.delete(oldest);
+      captureDurations.delete(oldest);
     }
   }
 
@@ -445,6 +447,7 @@ export const AGENT_SOURCE = String.raw`
       if (lastFrameClone) lastFrameClone.close();
       lastFrameClone = frame.clone();
       holdFrame(rtp, frame);
+      captureDurations.set(rtp, Math.max(refMs, arrivalMs) - refMs);
       send({ t: "frame", rtp, refMs, width: frame.displayWidth, height: frame.displayHeight, captureBeginMs: refMs, captureEndMs: Math.max(refMs, arrivalMs) });
     }
   }
@@ -558,11 +561,101 @@ export const AGENT_SOURCE = String.raw`
     return t;
   }
 
-  async function encodeFrame(rtp) {
-    const frame = pendingFrames.get(rtp);
+  // RenderPerformanceMetricsOverlay (media/cast/sender/performance_metrics_overlay.cc), drawn on a copy of the frame
+  // just before it is encoded (VideoSender::InsertRawVideoFrame, kCastStreamingPerformanceOverlay). Each glyph is a few
+  // rectangles of a 3x5 grid, 4 pixels per grid cell, and "diverges" the luma of its pixels by 48 so it shows on any
+  // background. Only 8-bit planar I420 and NV12 are drawn on, as in Chrome, which returns other frames untouched.
+  // Chrome 120 right-aligns each line (the pointer moves on after a glyph). Current Chromium moves it on before the
+  // glyph (the span refactor), which shifts the line one glyph to the right and wraps the last glyph into the next row
+  // of pixels; that looks like a regression, so the layout here is the intended one.
+  const OVERLAY_SCALE = 4, OVERLAY_GLYPH_W = 3, OVERLAY_SPACING = 1, OVERLAY_LINE_HEIGHT = (5 + 2) * OVERLAY_SCALE;
+  const OVERLAY_PX_PER_CHAR = (OVERLAY_GLYPH_W + OVERLAY_SPACING) * OVERLAY_SCALE;
+  const GLYPHS = {
+    "!": [[1,0,1,3],[1,4,1,1]], "%": [[0,0,1,1],[2,1,1,1],[1,2,1,1],[0,3,1,1],[2,4,1,1]],
+    "+": [[1,1,1,1],[1,3,1,1],[0,2,3,1]], "-": [[0,2,3,1]], ".": [[1,4,1,1]],
+    "0": [[0,0,3,1],[0,1,1,3],[2,1,1,3],[0,4,3,1]], "1": [[1,0,1,5]],
+    "2": [[0,0,3,1],[2,1,1,1],[0,2,3,1],[0,3,1,1],[0,4,3,1]], "3": [[0,0,3,1],[2,1,1,1],[0,2,3,1],[2,3,1,1],[0,4,3,1]],
+    "4": [[0,0,1,2],[2,0,1,5],[0,2,2,1]], "5": [[0,0,3,1],[0,1,1,1],[0,2,3,1],[2,3,1,1],[0,4,3,1]],
+    "6": [[1,0,2,1],[0,1,1,1],[0,2,3,1],[0,3,1,1],[2,3,1,1],[0,4,3,1]], "7": [[0,0,3,1],[2,1,1,2],[1,3,1,2]],
+    "8": [[0,0,3,1],[0,1,1,1],[2,1,1,1],[0,2,3,1],[0,3,1,1],[2,3,1,1],[0,4,3,1]],
+    "9": [[0,0,3,1],[0,1,1,1],[2,1,1,1],[0,2,3,1],[2,3,1,1],[0,4,2,1]],
+    ":": [[1,1,1,1],[1,3,1,1]], "e": [[0,0,3,1],[0,1,1,1],[0,2,2,1],[0,3,1,1],[0,4,3,1]],
+    "x": [[0,1,1,1],[2,1,1,1],[1,2,1,1],[0,3,1,1],[2,3,1,1]],
+  };
+  // printf("%<width>.1d"): the integer padded with spaces to the width.
+  const padInt = (n, width) => String(n).padStart(width, " ");
+  const saturatedInt = (x) => Math.max(-2147483648, Math.min(2147483647, Math.trunc(x)));
+  function drawOverlayLine(luma, offset, stride, width, line, top) {
+    const lineWidth = ((OVERLAY_GLYPH_W + OVERLAY_SPACING) * line.length + OVERLAY_SPACING) * OVERLAY_SCALE;
+    const first = lineWidth < width ? 0 : Math.floor((lineWidth - width) / OVERLAY_PX_PER_CHAR) + 1;
+    let x0 = width - lineWidth + first * OVERLAY_PX_PER_CHAR;
+    for (let i = first; i < line.length; i++, x0 += OVERLAY_PX_PER_CHAR) {
+      const rects = GLYPHS[line[i].toLowerCase()];
+      if (!rects) continue;
+      for (const [rx, ry, rw, rh] of rects) {
+        for (let y = ry * OVERLAY_SCALE; y < (ry + rh) * OVERLAY_SCALE; y++) {
+          for (let x = rx * OVERLAY_SCALE; x < (rx + rw) * OVERLAY_SCALE; x++) {
+            const at = offset + (top + y) * stride + x0 + x;
+            const v = luma[at];
+            // [16,63] -> [64,111]; [64,235] -> [16,187]
+            luma[at] = v >= 64 ? v - 48 : v + 48;
+          }
+        }
+      }
+    }
+  }
+  async function overlaid(frame, overlay, captureMs) {
+    try {
+      if (frame.format !== "I420" && frame.format !== "NV12") return frame;
+      const rect = frame.visibleRect;
+      let top = rect.height - OVERLAY_LINE_HEIGHT;
+      if (top < 0) return frame;
+      const buffer = new Uint8Array(frame.allocationSize());
+      const layout = await frame.copyTo(buffer);
+      const { offset, stride } = layout[0];
+      // Line 3: frame duration, size and timestamp
+      const decimillis = saturatedInt((frame.duration ? frame.duration : 0) / 100 + 0.5);
+      let rem = frame.timestamp;
+      const minutes = Math.floor(rem / 60000000); rem -= minutes * 60000000;
+      const seconds = Math.floor(rem / 1000000); rem -= seconds * 1000000;
+      const hundredths = Math.floor(Math.floor(rem / 1000) / 10);
+      drawOverlayLine(buffer, offset, stride, rect.width,
+        Math.floor(decimillis / 10) + "." + (decimillis % 10) + " " + rect.width + "x" + rect.height + " " + minutes + ":" + String(seconds).padStart(2, "0") + "." + String(hundredths).padStart(2, "0"), top);
+      top -= OVERLAY_LINE_HEIGHT;
+      if (top >= 0) {
+        // Line 2: capture duration, target playout delay, low latency mode, target bitrate
+        const delay = saturatedInt(overlay.targetPlayoutDelayMs + 0.5);
+        drawOverlayLine(buffer, offset, stride, rect.width,
+          saturatedInt(captureMs + 0.5) + " " + padInt(delay, 4) + (overlay.lowLatencyMode ? "!" : ".") + " " + padInt(Math.trunc(overlay.targetBitrate / 1000), 4), top);
+        top -= OVERLAY_LINE_HEIGHT;
+      }
+      if (top >= 0) {
+        // Line 1: frames in the encoder, encoder utilization, lossiness
+        drawOverlayLine(buffer, offset, stride, rect.width,
+          overlay.framesAgo + " " + padInt(saturatedInt(overlay.encoderUtilization * 100 + 0.5), 3) + "% " + padInt(saturatedInt(overlay.lossiness * 100 + 0.5), 3) + "%", top);
+      }
+      return new VideoFrame(buffer, {
+        format: frame.format, codedWidth: rect.width, codedHeight: rect.height, timestamp: frame.timestamp,
+        duration: frame.duration == null ? undefined : frame.duration, layout,
+        displayWidth: frame.displayWidth, displayHeight: frame.displayHeight, colorSpace: frame.colorSpace,
+      });
+    } catch {
+      // "Cannot render overlay": the source frame goes on.
+      return frame;
+    }
+  }
+
+  async function encodeFrame(rtp, overlay) {
+    let frame = pendingFrames.get(rtp);
     if (!frame) { dropVideo(rtp); return; }
     pendingFrames.delete(rtp);
+    const captureMs = captureDurations.get(rtp) || 0;
+    captureDurations.delete(rtp);
     try {
+      if (overlay) {
+        const drawn = await overlaid(frame, overlay, captureMs);
+        if (drawn !== frame) { frame.close(); frame = drawn; }
+      }
       const { width: w, height: h } = encodeSize(frame);
       if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize) {
         // EncodeVideoFrame: the first frame makes the encoder at once, to avoid startup latency.

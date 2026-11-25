@@ -7,7 +7,7 @@ import type { MirroringBackend } from "./backend.ts";
 import type { EncodingSupport } from "./encoding-support.ts";
 import type { CastMessageChannel, MirroringService, MirroringSessionObserver } from "./mirroring-activity.ts";
 import { SenderPacketRouter } from "./sender/packet-router.ts";
-import { OpenscreenSessionHost, type SessionParameters } from "./session-host.ts";
+import { OpenscreenSessionHost, type MirroringFeatures, type SessionParameters } from "./session-host.ts";
 import { UdpEnvironment } from "./transport/udp-environment.ts";
 
 export interface EngineOptions {
@@ -15,6 +15,9 @@ export interface EngineOptions {
   createBackend(): MirroringBackend;
   encodingSupport: EncodingSupport;
   env?: Record<string, string | undefined>;
+  /** `GetCaptureResolutionConstraint()`, which Chrome passes to `MirroringService::Start`. */
+  maxResolution?: { width: number; height: number };
+  features?: MirroringFeatures;
 }
 
 export function createMirroringServiceFactory(options: EngineOptions): (params: SessionParameters, observer: MirroringSessionObserver, channel: CastMessageChannel) => MirroringService {
@@ -48,6 +51,8 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
           backend,
           encodingSupport: options.encodingSupport,
           env: options.env,
+          maxResolution: options.maxResolution,
+          features: options.features,
           messagePort: { postMessage: (_destination, namespace, message) => channel.send(namespace, message) },
           observer: {
             ...observer,

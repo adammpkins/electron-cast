@@ -16,6 +16,7 @@ export const MIN_VIDEO_BITRATE = 300_000;
 export const MAX_START_VIDEO_BITRATE = 10_000_000;
 export const DEFAULT_MAX_FRAME_RATE = 30;
 export const TARGET_MAX_FRAME_RATE_60 = 60;
+/** cast_mirroring_service_host.cc and mirror_settings.cc `kMaxResolution`. */
 export const MAX_RESOLUTION = { width: 1920, height: 1080 } as const;
 export const MIN_RESOLUTION = { width: 180, height: 180 } as const;
 export const DEFAULT_AUDIO_MAX_BITRATE = 128_000;
@@ -65,6 +66,70 @@ export function getPlayoutDelayMs(env: Record<string, string | undefined> = proc
   const n = /^[+-]?\d+$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isInteger(n) || n < 1 || n > 65535) return DEFAULT_PLAYOUT_DELAY_MS;
   return n;
+}
+
+/**
+ * `CastMirroringServiceHost::GetClampedResolution` (chrome/browser/media/cast_mirroring_service_host.cc): the screen in
+ * landscape, capped at `kMaxResolution` keeping the 16:9 shape and rounded down to a whole step of 160x90, at least one
+ * step.
+ */
+export function getClampedResolution(screen: { width: number; height: number }): { width: number; height: number } {
+  const widthStep = 160;
+  const heightStep = 90;
+  // Use landscape mode dimensions for screens in portrait mode.
+  const [w, h] = screen.height > screen.width ? [screen.height, screen.width] : [screen.width, screen.height];
+  let clampedWidth: number;
+  let clampedHeight: number;
+  if (MAX_RESOLUTION.height * w < MAX_RESOLUTION.width * h) {
+    clampedWidth = Math.min(MAX_RESOLUTION.width, w);
+    clampedWidth -= clampedWidth % widthStep;
+    clampedHeight = Math.trunc((clampedWidth * heightStep) / widthStep);
+  } else {
+    clampedHeight = Math.min(MAX_RESOLUTION.height, h);
+    clampedHeight -= clampedHeight % heightStep;
+    clampedWidth = Math.trunc((clampedHeight * widthStep) / heightStep);
+  }
+  return { width: Math.max(clampedWidth, widthStep), height: Math.max(clampedHeight, heightStep) };
+}
+
+/** The part of Electron's `Display` that `Display::GetSizeInPixel` needs: `size` is in DIPs. */
+export interface DisplaySizeLike {
+  size: { width: number; height: number };
+  scaleFactor: number;
+}
+
+/** The part of Electron's `screen` that is used. */
+export interface PrimaryScreenLike {
+  getPrimaryDisplay(): DisplaySizeLike;
+}
+
+/**
+ * `Display::GetSizeInPixel` (ui/display/display.cc): `gfx::ScaleToFlooredSize(size(), device_scale_factor_)`, in the
+ * float arithmetic Chromium uses. Electron's `Display` does not expose Chromium's `size_in_pixels_` (which, when set,
+ * wins there), so the DIP size and the scale factor stand in for it.
+ */
+export function displaySizeInPixels(display: DisplaySizeLike): { width: number; height: number } {
+  const scale = Number.isFinite(display.scaleFactor) && display.scaleFactor > 0 ? display.scaleFactor : 1;
+  const floor = (dip: number): number => Math.floor(Math.fround(Math.fround(dip) * Math.fround(scale)));
+  return { width: floor(display.size.width), height: floor(display.size.height) };
+}
+
+/**
+ * `CastMirroringServiceHost::GetCaptureResolutionConstraint`: the clamped size of the primary display in pixels (for a
+ * tab and for a desktop capture alike: Chrome asks `display::Screen::GetPrimaryDisplay()`, not the display the page or
+ * the captured screen is on), or `kMaxResolution` when there is no screen to ask. It does not depend on
+ * `kCastEnableStreamingWithHiDPI`, which only sets `VideoCaptureParams::is_high_dpi_enabled`.
+ */
+export function getCaptureResolutionConstraint(screen: PrimaryScreenLike | undefined): { width: number; height: number } {
+  if (screen === undefined) return { ...MAX_RESOLUTION };
+  let display: DisplaySizeLike;
+  try {
+    display = screen.getPrimaryDisplay();
+  } catch {
+    // "Cannot get the Screen object": std::nullopt, so the default applies.
+    return { ...MAX_RESOLUTION };
+  }
+  return getClampedResolution(displaySizeInPixels(display));
 }
 
 export class MirrorSettings {

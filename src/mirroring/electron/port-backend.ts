@@ -11,7 +11,7 @@ import type { FrameSenderConfig, ResolutionChangePolicy, VideoCaptureParams } fr
 import { CaptureSizeOracle, suggestConstraints } from "../sender/capture-size-oracle.ts";
 import { EncoderQuantizerReader } from "../sender/encoder-quantizer.ts";
 import { EncoderUtilizationAverage, calculateEncoderUtilization, computeLossiness } from "../sender/video-encoder-metrics.ts";
-import type { RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
+import type { PerformanceOverlayInfo, RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
 import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.ts";
 
 const toLocalMs = (epochMs: number): number => epochMs - performance.timeOrigin;
@@ -280,11 +280,11 @@ export class PortBackend implements MirroringBackend {
       setMaxFrameRate: (rate) => {
         this.frameInterval = 1000 / rate;
       },
-      encodeVideoFrame: (frame: RawVideoFrame, referenceTimeMs: number) => {
+      encodeVideoFrame: (frame: RawVideoFrame, referenceTimeMs: number, overlay?: PerformanceOverlayInfo) => {
         this.pendingVideo.set(frame.rtpTimestamp, { ref: referenceTimeMs, captureBegin: frame.captureBeginTimeMs, captureEnd: frame.captureEndTimeMs });
         // Frames the agent never hears about again are closed by its own bounded queue; forget stale references too.
         if (this.pendingVideo.size > 64) this.pendingVideo.delete(this.pendingVideo.keys().next().value!);
-        this.port.postMessage({ t: "encode", rtp: frame.rtpTimestamp });
+        this.port.postMessage(overlay === undefined ? { t: "encode", rtp: frame.rtpTimestamp } : { t: "encode", rtp: frame.rtpTimestamp, overlay });
         return true;
       },
     };
