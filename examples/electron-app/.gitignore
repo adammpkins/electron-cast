@@ -1,0 +1,3 @@
+node_modules/
+preload.bundle.cjs
+package-lock.json
