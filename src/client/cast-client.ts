@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { notifySent } from "./sent-hook.ts";
 import tls from "node:tls";
 import type { TLSSocket } from "node:tls";
 import { decodeCastMessage, encodeCastMessage, frame, FrameDecoder, PayloadType } from "../protocol/index.ts";
@@ -52,12 +53,6 @@ export interface CastClientOptions {
 /** Events emitted by {@link CastClient}. */
 export interface CastClientEvents {
   message: [msg: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
-  /**
-   * A message the caller's requests put on the channel (`send`, `request`, `launch`, `stop`, `setVolume`, `getStatus`, a
-   * closed transport), as `CastMessageHandler::Observer::OnMessageSent` reports the ones `SendCastMessageToSocket` sends. The
-   * handshake, device authentication, virtual connection requests and keep-alive are not reported, as in Chrome.
-   */
-  messageSent: [msg: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
   receiverStatus: [status: ReceiverStatus];
   transportClosed: [transportId: string];
   close: [error?: Error];
@@ -675,9 +670,8 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   /** `CastMessageHandler::SendCastMessageToSocket`: the write, then the observers of the message sent. */
   private writeObserved(msg: CastMessage): void {
     this.write(msg);
-    if (this.listenerCount("messageSent") === 0) return;
     const data = msg.payloadType === PayloadType.STRING ? (msg.payloadUtf8 ?? "") : (msg.payloadBinary ?? Buffer.alloc(0));
-    this.emit("messageSent", { namespace: msg.namespace, sourceId: msg.sourceId, destinationId: msg.destinationId, data });
+    notifySent(this, { namespace: msg.namespace, sourceId: msg.sourceId, destinationId: msg.destinationId, data });
   }
 
   private write(msg: CastMessage, done?: (err?: Error | null) => void): void {

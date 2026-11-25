@@ -4,6 +4,7 @@ import net from "node:net";
 import { once } from "node:events";
 import { CastClient, NS, PLATFORM_RECEIVER_ID, CastConnectionError, CastRequestError, CastTimeoutError } from "../../src/client/index.ts";
 import { PayloadType } from "../../src/protocol/index.ts";
+import { setSentHook } from "../../src/client/sent-hook.ts";
 import { FakeReceiver, NS_CONNECTION, NS_HEARTBEAT, NS_RECEIVER } from "./fake-receiver.ts";
 
 const APP_NS = "urn:x-cast:com.example.test";
@@ -477,10 +478,10 @@ test("connect times out when the TLS handshake never completes", async () => {
   assert.ok(Date.now() - t0 < 2000);
 });
 
-test("messageSent reports what requests and sends put on the channel, not the handshake or keep-alive", async () => {
+test("the sent-message hook reports what requests and sends put on the channel, not the handshake or keep-alive", async () => {
   const { fake, client } = await setup();
   const sent: { namespace: string; destinationId: string; data: unknown }[] = [];
-  client.on("messageSent", (m) => sent.push({ namespace: m.namespace, destinationId: m.destinationId, data: m.data }));
+  setSentHook(client, (m) => sent.push({ namespace: m.namespace, destinationId: m.destinationId, data: m.data }));
   await client.connect();
   assert.equal(sent.length, 0);
   client.send(APP_NS, "tr-1", "hello");

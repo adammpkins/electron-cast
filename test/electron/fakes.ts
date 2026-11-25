@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { notifySent } from "../../src/client/sent-hook.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import type { LaunchOptions, ReceiverApplication, ReceiverStatus } from "../../src/client/index.ts";
 import { CastRequestError, CastConnectionError } from "../../src/client/index.ts";
@@ -51,7 +52,6 @@ export class FakeClient extends EventEmitter<{
   message: [{ namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
   receiverStatus: [ReceiverStatus];
   transportClosed: [string];
-  messageSent: [{ namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
   close: [Error?];
 }> {
   readonly device: CastDevice;
@@ -110,7 +110,7 @@ export class FakeClient extends EventEmitter<{
   send(namespace: string, destinationId: string, payload: unknown): void {
     if (!this.connected) throw new CastConnectionError("not connected");
     this.sent.push({ namespace, destinationId, payload });
-    this.emit("messageSent", { namespace, sourceId: this.senderId, destinationId, data: typeof payload === "string" ? payload : JSON.stringify(payload) });
+    notifySent(this, { namespace, sourceId: this.senderId, destinationId, data: typeof payload === "string" ? payload : JSON.stringify(payload) });
   }
 
   private echo(): void {
