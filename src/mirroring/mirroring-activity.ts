@@ -188,17 +188,30 @@ export class MirroringActivity {
   }
 
   /**
-   * `OnAppMessage`: only the webrtc and remoting namespaces, and only from the session's transport. (Chrome's
-   * source and destination checks read the same fields from the receiver's point of view; here the sender is the
-   * destination and the transport the source.)
+   * `MirroringActivity::OnAppMessage`: only the webrtc and remoting namespaces. Its source and destination checks are
+   * the one deliberate difference: Chromium compares `message.destination_id()` with the session's destination id and
+   * `message.source_id()` with the sender's own id (mirroring_activity.cc), the opposite of what a message from the
+   * receiver carries. `AppActivity::OnAppMessage` (app_activity.cc) and its unit tests `OnAppMessage` and
+   * `OnAppMessageAllClients` (app_activity_unittest.cc) treat `destination_id` as the sending client's id, or `*`
+   * for all clients, so here the transport must be the source and this sender (or `*`) the destination. Messages that
+   * fail the check are dropped with a log line, as Chrome's DVLOG(2) does.
    */
   private onAppMessage(msg: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }): void {
     const app = this.app;
     if (app === undefined || this.service === undefined || this.state === "stopped") return;
     if (msg.namespace !== CAST_WEBRTC_NAMESPACE && msg.namespace !== CAST_REMOTING_NAMESPACE) return;
-    if (msg.sourceId !== app.transportId) return;
-    if (msg.destinationId !== this.sourceId && msg.destinationId !== "*") return;
-    if (typeof msg.data !== "string") return;
+    if (msg.sourceId !== app.transportId) {
+      this.log("info", `Ignoring message unexpectedly sent by source_id "${msg.sourceId}" (expected "${app.transportId}")`);
+      return;
+    }
+    if (msg.destinationId !== this.sourceId && msg.destinationId !== "*") {
+      this.log("info", `Ignoring message intended for destination_id "${msg.destinationId}" (expected "${this.sourceId}")`);
+      return;
+    }
+    if (typeof msg.data !== "string") {
+      this.log("info", "Ignoring a binary app message");
+      return;
+    }
     if (msg.namespace === CAST_WEBRTC_NAMESPACE) this.log("info", `Relaying app message from receiver: ${msg.data.length > 0 ? scrubbedMessageText(msg.data) : ""}`);
     this.service.onMessage(msg.namespace, msg.data);
   }

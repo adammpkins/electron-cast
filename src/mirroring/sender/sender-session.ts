@@ -150,6 +150,13 @@ export class SenderSession {
       return;
     }
     const answer = reply.answer;
+    // SelectSenders reads `answer.ssrcs[i]` for every send index without checking the length (an out-of-range read in
+    // C++); a receiver that sends fewer ssrcs than indexes is malformed, so the answer is refused.
+    if (answer.ssrcs.length < answer.sendIndexes.length) {
+      this.resetState();
+      this.config.client.onError(this, new SessionError(ErrorCode.InvalidAnswer, "Invalid ANSWER message: fewer ssrcs than send indexes."));
+      return;
+    }
     const senders = this.selectSenders(answer);
     if (senders.audioSender === undefined && senders.videoSender === undefined) {
       this.resetState();

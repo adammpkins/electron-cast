@@ -309,6 +309,7 @@ export function createManagerApi(
       must(host.detachSession(routeId));
     },
     async startCasting(sinkId, options) {
+      validateStartCasting(sinkId, options);
       if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
       return host.startCasting(sinkId, options);
     },
@@ -335,4 +336,25 @@ export function createManagerApi(
       sinks.dispose();
     },
   };
+}
+
+/** Argument checks for `startCasting`, as the presentation `startCasting` makes them: TypeError for a wrong type, RangeError for a wrong value. */
+export function validateStartCasting(sinkId: unknown, options: unknown): void {
+  if (typeof sinkId !== "string" || sinkId === "") throw new TypeError("sinkId must be a non-empty string");
+  if (typeof options !== "object" || options === null) throw new TypeError("options must be an object");
+  const o = options as Record<string, unknown>;
+  if (o.castMode !== "tab_mirror" && o.castMode !== "desktop_mirror") throw new RangeError(`unsupported cast mode: ${String(o.castMode)}`);
+  if (o.castMode === "tab_mirror") {
+    if (typeof o.webContentsId !== "number") throw new TypeError("options.webContentsId must be a number");
+    if (!Number.isInteger(o.webContentsId) || o.webContentsId < 0) throw new RangeError("options.webContentsId must be a non-negative integer");
+  } else if (typeof o.desktopSourceId !== "string") {
+    throw new TypeError("options.desktopSourceId must be a string");
+  } else if (!/^(screen|window):/.test(o.desktopSourceId)) {
+    throw new RangeError("options.desktopSourceId must be a desktopCapturer source id (screen:... or window:...)");
+  }
+  if (o.withAudio !== undefined && typeof o.withAudio !== "boolean") throw new TypeError("options.withAudio must be a boolean");
+  if (o.targetPlayoutDelayMs !== undefined) {
+    if (typeof o.targetPlayoutDelayMs !== "number") throw new TypeError("options.targetPlayoutDelayMs must be a number");
+    if (!Number.isFinite(o.targetPlayoutDelayMs) || o.targetPlayoutDelayMs <= 0) throw new RangeError("options.targetPlayoutDelayMs must be a positive number of milliseconds");
+  }
 }

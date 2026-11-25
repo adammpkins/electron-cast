@@ -382,7 +382,7 @@ One mirroring route is three contexts:
 The agent and the engine split the work as Chrome splits capture and the Mirroring Service. The agent announces each
 raw frame (RTP timestamp, reference time); the engine runs `VideoSender::InsertRawVideoFrame` (the drop decision) and
 answers `encode`; the agent encodes and posts the chunk; the engine assigns the frame id and calls
-`FrameSender::EnqueueFrame`. Audio works the same way per 10 ms buffer. The agent holds at most three raw frames and
+`FrameSender::EnqueueFrame`. Audio works the same way per 10 ms buffer. A frame that never yields a chunk (encoder queue full, evicted, unsupported, swallowed by the encoder, encoder error) is reported as `video-drop` or `audio-drop`; the engine turns a video drop into Chrome's empty encoded frame (`VideoSender::OnFrameDroppedByEncoder`) so the sender's in-encoder count never leaks, and an audio drop becomes skipped samples on the next frame. Audio RTP and reference times follow `AudioEncoder::ImplBase::EncodeAudio` (underrun skip above `kUnderrunSkipThreshold`). A bitrate change reconfigures the running encoder in place and forces no key frame. The agent holds at most three raw frames and
 closes the oldest, so a dropped frame costs nothing. Pixels are not copied: a `VideoFrame` goes from the track
 processor into the encoder. Encoded chunks are copied once, through the port (Electron cannot transfer an
 `ArrayBuffer` over a `MessagePortMain`).

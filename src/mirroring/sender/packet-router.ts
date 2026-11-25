@@ -27,6 +27,10 @@ export interface SenderEnvironment {
   readonly maxPacketSize: number;
   /** Run `cb` at `atMs`; returns a cancel function. */
   schedule(atMs: number, cb: () => void): () => void;
+  /** `ConsumeIncomingPackets`: the router asks for received packets when its first sender is created. */
+  consumeIncomingPackets?(consumer: (arrivalTimeMs: number, packet: Buffer) => void): void;
+  /** `DropIncomingPackets`: and gives them up when the last sender is destroyed. */
+  dropIncomingPackets?(): void;
 }
 
 /** sender_packet_router.h `SenderPacketRouter::Sender`. */
@@ -77,7 +81,8 @@ export class SenderPacketRouter extends BandwidthEstimator {
   onSenderCreated(receiverSsrc: number, sender: RoutedSender): void {
     if (this.findEntry(receiverSsrc) !== undefined) throw new Error("sender already registered");
     this.senders.push({ receiverSsrc, sender, nextRtcpSendTime: NEVER, nextRtpSendTime: NEVER });
-    this.senders.sort((a, b) => a.receiverSsrc - b.receiverSsrc);
+    if (this.senders.length === 1) this.env.consumeIncomingPackets?.((arrival, packet) => this.onReceivedPacket(arrival, packet));
+    else this.senders.sort((a, b) => a.receiverSsrc - b.receiverSsrc);
   }
 
   /** `OnSenderDestroyed`. */
@@ -85,7 +90,10 @@ export class SenderPacketRouter extends BandwidthEstimator {
     const i = this.senders.findIndex((e) => e.receiverSsrc === receiverSsrc);
     if (i < 0) throw new Error("unknown sender");
     this.senders.splice(i, 1);
-    if (this.senders.length === 0) this.stop();
+    if (this.senders.length === 0) {
+      this.stop();
+      this.env.dropIncomingPackets?.();
+    }
   }
 
   /** `RequestRtcpSend`. */

@@ -53,16 +53,27 @@ test("lost packets are NACKed and retransmitted, and every frame still decrypts"
 test("the video bitrate backs off when the link cannot carry it", async () => {
   const h = await startHarness({ receiver: { linkBitsPerSecond: 1_500_000 } });
   try {
-    await sleep(1500);
-    const early = h.host.video?.encoderBitrate ?? 0;
-    await sleep(7000);
-    const late = h.host.video?.encoderBitrate ?? 0;
+    // Sampled once a second rather than read once at the end: wall-clock timers make a single reading noisy, the
+    // trend is not.
+    const samples: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      await sleep(1000);
+      samples.push(h.host.video?.encoderBitrate ?? 0);
+    }
+    const early = samples[0]!;
+    const settled = samples.slice(-3);
+    const late = settled[settled.length - 1]!;
     const s = h.receiver.stats;
-    console.log(`link 1.5 Mbps: video bitrate ${early} -> ${late} bps, usable ${h.host.currentUsableBandwidth}, dropped by link ${s.packetsDroppedByLink}, video frames ${s.videoFrames}, frames dropped ${h.host.video?.framesDroppedBeforeEncoding}+${h.host.video?.framesDroppedAfterEncoding}`);
+    console.log(`link 1.5 Mbps: video bitrate samples ${samples.join(" ")}, usable ${h.host.currentUsableBandwidth}, dropped by link ${s.packetsDroppedByLink}, video frames ${s.videoFrames}`);
     assert.deepEqual(h.errors, []);
     assert.ok(early > 1_000_000, `early ${early}`);
-    assert.ok(late < 3_000_000 && late > 300_000, `late ${late}`);
-    assert.ok(late < 5_000_000 * 0.6, `late ${late}`);
+    // The estimator settles near the link rate: the median late reading within 1.35x of it (1.2x when the machine is idle; the suite runs files in parallel, and a reading may overshoot
+    // while the estimator probes upward), none beyond 1.6x, and the end below the start.
+    const median = [...settled].sort((x, y) => x - y)[1]!;
+    assert.ok(median < 1.35 * 1_500_000, `settled ${settled.join(" ")}`);
+    assert.ok(Math.max(...settled) < 1.6 * 1_500_000, `settled ${settled.join(" ")}`);
+    assert.ok(Math.min(...settled) > 300_000, `settled ${settled.join(" ")}`);
+    assert.ok(late < early, `early ${early} late ${late}`);
     assert.ok(s.videoFrames > 20);
   } finally {
     h.close();

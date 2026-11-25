@@ -52,9 +52,14 @@ export class UdpEnvironment implements SessionEnvironment {
     });
   }
 
-  /** `ConsumeIncomingPackets`. */
-  setPacketHandler(handler: ReceivedPacketHandler | undefined): void {
+  /** `Environment::ConsumeIncomingPackets`. */
+  consumeIncomingPackets(handler: ReceivedPacketHandler): void {
     this.handler = handler;
+  }
+
+  /** `Environment::DropIncomingPackets`. */
+  dropIncomingPackets(): void {
+    this.handler = undefined;
   }
 
   now(): number {

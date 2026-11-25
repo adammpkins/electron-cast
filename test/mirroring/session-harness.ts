@@ -24,7 +24,6 @@ export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?
   const env = new UdpEnvironment("127.0.0.1");
   await env.bind();
   const router = new SenderPacketRouter(env);
-  env.setPacketHandler((t, p) => router.onReceivedPacket(t, p));
   const backend = new FakeBackend(() => env.now());
   const errors: Harness["errors"] = [];
   const log: string[] = [];
