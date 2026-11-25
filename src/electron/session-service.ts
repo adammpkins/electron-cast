@@ -10,6 +10,9 @@ import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sin
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 import { CastAppDiscovery, type CastAppSource } from "./app-discovery.ts";
 import { EventEmitter } from "node:events";
+import {
+  AccessCodeSinks, type AccessCodeDevice, type AccessCodeOptions, type AccessCodeRememberedSink, type AddSinkResult,
+} from "./access-code.ts";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
 export function capabilityNames(bits: number): string[] {
@@ -113,6 +116,8 @@ export interface CastSessionServiceOptions {
     available(appName: string, origin: string): CastDevice[];
     monitor(appName: string, origin: string): (() => void) | null;
   };
+  /** Adding a device by address, as Chrome's access code casting adds one; off unless `enabled` (see {@link AccessCodeOptions}). */
+  accessCode?: AccessCodeOptions;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -328,6 +333,7 @@ export class CastSessionService {
   /** The devices with an open channel; the only devices the service offers or casts to. */
   private readonly sinkService: CastSinkService;
   private readonly tracker = new CastSessionTracker();
+  private readonly accessCode: AccessCodeSinks;
   private lastRoutesKey = "";
   /** Devices a page's launch is in flight on, with how many: the session it starts is the page's, not a non-local one. */
   private readonly launching = new Map<string, number>();
@@ -368,6 +374,14 @@ export class CastSessionService {
     });
     this.tracker.on("sessionAddedOrUpdated", () => this.onTrackerChanged());
     this.tracker.on("sessionRemoved", () => this.onTrackerChanged());
+    this.accessCode = new AccessCodeSinks(
+      this.sinkService,
+      {
+        current: () => this.mediaRoutes().map((r) => ({ id: r.id, sinkId: r.sinkId, isLocal: r.isLocal })),
+        observe: (listener) => this.observeSessions(listener),
+      },
+      options.accessCode,
+    );
   }
 
   /** The devices that can be cast to: those with an open, authenticated channel (as Chrome lists sinks). */
@@ -392,7 +406,33 @@ export class CastSessionService {
 
   /** Resolves when no channel is being opened and none is scheduled to be; for tests. */
   settled(options?: { retries?: boolean }): Promise<void> {
-    return this.sinkService.settled(options);
+    // no extra wait when nothing is being read: callers of settled() depend on how soon it resolves
+    const reading = this.accessCode.ready();
+    return reading === undefined ? this.sinkService.settled(options) : reading.then(() => this.sinkService.settled(options));
+  }
+
+  /**
+   * Add a device whose address the app knows, as Chrome adds the one an access code resolved to: a channel is opened and
+   * the device is listed like any other, remembered for `accessCode.deviceDuration`, then removed. Rejects with
+   * `AccessCodeCastDisabledError` unless access code casting is enabled.
+   */
+  addSinkByAddress(device: AccessCodeDevice): Promise<AddSinkResult> {
+    return this.accessCode.addSinkByAddress(device);
+  }
+
+  /** Change `enabled` and `deviceDuration` while running, as Chrome applies its policies. */
+  configureAccessCode(settings: { enabled?: boolean; deviceDuration?: number }): Promise<void> {
+    return this.accessCode.configure(settings);
+  }
+
+  /** The devices added by address that are remembered now. */
+  rememberedSinks(): AccessCodeRememberedSink[] {
+    return this.accessCode.remembered();
+  }
+
+  /** Tell the service the network changed; see {@link AccessCodeSinks.networksChanged}. */
+  networksChanged(): void {
+    this.accessCode.networksChanged();
   }
 
   /** Handle one bridge call; never throws or rejects. */
@@ -477,6 +517,7 @@ export class CastSessionService {
     if (this.disposed) return;
     this.disposed = true;
     this.sinks.dispose();
+    this.accessCode.dispose();
     for (const pending of this.pendingRequests.values()) pending.picker?.close();
     this.sessions.clear();
     this.tracker.dispose();

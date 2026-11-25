@@ -14,6 +14,7 @@ import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-presentation.ts";
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
+import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
@@ -37,6 +38,11 @@ export {
   type WiredDisplayApi, type WiredDisplayOptions, type WiredDisplayRequest, type WiredDisplaySink, type WiredDisplayRoute,
   type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
+export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type {
+  AccessCodeCapabilities, AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AccessCodeStore, AddSinkResult,
+  SinkCreationFailure,
+} from "./access-code.ts";
 export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
@@ -120,6 +126,11 @@ export interface CastManagerOptions {
    * imports Electron. See {@link WiredDisplayOptions}.
    */
   wiredDisplay?: WiredDisplayOptions;
+  /**
+   * Adding a device by its address, as Chrome's access code casting adds the device a code resolved to (see
+   * {@link CastManager.addSinkByAddress}). Off unless `enabled`, as Chrome's `AccessCodeCastEnabled` policy is.
+   */
+  accessCode?: AccessCodeOptions;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -134,6 +145,25 @@ export interface CastManager extends CastManagerApi {
    * some time after `start()`.
    */
   settled(options?: { retries?: boolean }): Promise<void>;
+  /**
+   * Add a device whose address the app knows, as Chrome adds the device an access code resolved to. electron-cast does not
+   * resolve codes: that is a private Google service (docs/DESIGN.md, "Access code casting"), so the app supplies the
+   * address. A channel is opened to the device and it is listed like a discovered one, then removed 20 s after
+   * `accessCode.deviceDuration` seconds, or once a route to it ends after that. Rejects with `AccessCodeCastDisabledError`
+   * unless `accessCode.enabled`. The address rules of discovered devices apply: a public or loopback address is refused
+   * (`channel_open_error`) unless `sinks.allowAllIps` is set.
+   */
+  addSinkByAddress(device: AccessCodeDevice): Promise<AddSinkResult>;
+  /** Change `accessCode.enabled` and `accessCode.deviceDuration` while running, as Chrome applies its policies. */
+  configureAccessCode(settings: { enabled?: boolean; deviceDuration?: number }): Promise<void>;
+  /** The devices added by address that are remembered now. */
+  rememberedSinks(): AccessCodeRememberedSink[];
+  /**
+   * The machine's network changed. Devices added by address and not in use are removed, and the remembered ones are tried
+   * again 4.45 s later, so those on the new network come back (Chrome: `AccessCodeCastSinkService::OnNetworksChanged`).
+   * electron-cast does not see networks come and go, so call it from the app's own network monitoring.
+   */
+  networksChanged(): void;
   dispose(): Promise<void>;
   /** The wired display sinks and routes; present when the `wiredDisplay` option was given. */
   readonly wiredDisplay?: WiredDisplayApi;
@@ -211,6 +241,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       verifyDevice: options.verifyDevices !== false,
       connectTimeoutMs: params.connectTimeoutMs,
       heartbeatTimeoutMs: params.livenessTimeoutMs,
+      heartbeatIntervalMs: params.pingIntervalMs,
     }));
   // The receiver labels of Cast and DIAL routes are hashed with one per-process token, as in Chrome.
   const hashToken = randomBytes(16).toString("hex");
@@ -356,6 +387,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     } : {}),
+    accessCode: options.accessCode,
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -878,6 +910,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
     settled: (options) => service.settled(options),
+    addSinkByAddress: (device) => service.addSinkByAddress(device),
+    configureAccessCode: (settings) => service.configureAccessCode(settings),
+    rememberedSinks: () => service.rememberedSinks(),
+    networksChanged: () => service.networksChanged(),
     async dispose() {
       if (disposed) return;
       disposed = true;

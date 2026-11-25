@@ -1,6 +1,6 @@
 # Main-process API
 
-`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()` and the API below, which lets the
+`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()`, `addSinkByAddress()` (see [Adding a device by address](#adding-a-device-by-address)) and the API below, which lets the
 app observe and control casting from the main process. It follows Chrome's Media Router, so the same concepts and
 method names apply: devices are **sinks**, running sessions are **routes**, and you watch both with **observers**.
 
@@ -26,6 +26,7 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `startCasting(sinkId, { webContentsId, castMode: "presentation" })` | `MediaRouterUI::StartCasting(sink_id, MediaCastMode::PRESENTATION)`, then `MediaRouteStarter::CreateRouteParameters` (the source for the sink comes from the default request's URLs; none gives an "unable to cast" issue), `StartRoute` (`MediaRouter::CreateRoute`, with `WebContentsPresentationManager::OnPresentationResponse` as the response callback) and `OnPresentationResponse`, which adds the presentation and runs the default-presentation callback; `RouteRequestResultCode` is the error set | `chrome/browser/ui/media_router/media_router_ui.cc`, `media_route_starter.cc`, `components/media_router/common/mojom/route_request_result_code.mojom` |
 | `getMediaController(id, observer?)` | `MediaRouter::GetMediaController`: binds a `mojom::MediaController` (`Play`, `Pause`, `SetMute`, `SetVolume`, `Seek`, `NextTrack`, `PreviousTrack`) and a `mojom::MediaStatusObserver` (`OnMediaStatusUpdated(MediaStatus)`). `CastMediaController` builds the status from the receiver volume (`SetSession`) and MEDIA_STATUS messages (`SetMediaStatus`, `UpdateMediaStatus`), which `CastSessionTracker::HandleMediaStatusMessage` first completes from the media it saved | `components/media_router/common/mojom/media_controller.mojom`, `media_status.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `cast_session_tracker.cc` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
+| `addSinkByAddress`, `configureAccessCode`, `networksChanged` | `AccessCodeCastSinkService` after the discovery server has answered (`OnAccessCodeValidated`, `OnEnabledPrefChange`, `OnNetworksChanged`) | `chrome/browser/media/router/discovery/access_code/access_code_cast_sink_service.cc`; see [DESIGN.md](DESIGN.md#access-code-casting-access-codets) |
 | Sinks listed only once a channel is open and authenticated, with retry and removal; the session tracker; non-local routes | `CastMediaSinkServiceImpl`, `MediaSinkServiceBase`, `CastSessionTracker`, `CastActivityManager::AddNonLocalActivity` | see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts) for each rule and its source |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
@@ -373,3 +374,48 @@ manager.wiredDisplay?.registerMediaRoutesObserver({ onRoutesUpdated: (routes) =>
 | `availableDisplays(all, primary)`, `wiredDisplaySinks(all, primary)` | The displays that are sinks, in Chrome's order (primary first, then top-left; none for a single or mirrored setup), and their sinks. |
 | `WiredDisplayOptions`, `WiredDisplayRequest`, `WiredDisplayApi`, `WiredDisplaySink`, `WiredDisplayRoute`, `DisplayChoice` | The types above. |
 | `ScreenLike`, `DisplayLike`, `WindowLike` | The parts of Electron's `screen`, `Display` and `BrowserWindow` that are used. |
+
+## Adding a device by address
+
+Chrome's Access Code Cast lets a user type the code a device shows to cast to it from another network. electron-cast does
+not turn codes into addresses (that is a Google service that needs Chrome's own sign-in; see
+[DESIGN.md](DESIGN.md#access-code-casting-access-codets)), but it does what Chrome does once the address is known: the app
+supplies it.
+
+<!-- no-check -->
+```ts
+const manager = createCastManager({
+  ipcMain, selectDevice,
+  accessCode: { enabled: true, deviceDuration: 3600 },   // Chrome's AccessCodeCastEnabled and AccessCodeCastDeviceDuration
+});
+const result = await manager.addSinkByAddress({
+  id: "a1b2c3d4e5f60718293a4b5c6d7e8f90",               // the device's unique id
+  name: "Seminar Room 4",
+  capabilities: { videoOut: true, audioOut: true },
+  ipV4Address: "10.20.30.40",                            // or ipV6Address, which is preferred
+  port: 8009,                                            // optional, 8009 by default
+});
+// { code: "ok", sinkId } | { code: "response_malformed" | "sink_creation_error" | "channel_open_error", message, ... }
+```
+
+The device is then in `devices()` and the sinks observers, offered to the picker and to pages' availability checks like any
+discovered device. It is removed `deviceDuration` seconds after it was added (plus 20 s), or when the cast to it ends after
+that. A public or loopback address is refused as for any device, unless `sinks.allowAllIps` is set. Call `networksChanged()`
+when the machine's network changes. `configureAccessCode({ enabled, deviceDuration })` changes the settings while running,
+`rememberedSinks()` lists what is remembered, and `accessCode.store` (`load`, `save`) keeps it between runs.
+
+**Validate the address.** In Chrome it comes from Google's server; here it comes from your app. electron-cast only applies
+Chrome's rules, which allow every private address and every port, so an address a user typed and you passed on unchecked
+lets that user make the app open TLS connections to any host and port on your network and read from the result whether
+something answered. Accept only addresses you expect (a known subnet, port 8009 unless you know otherwise) before
+calling `addSinkByAddress`. The sink's id is the device id, in lower case without dashes, in angle brackets (`<uuid>`, Chrome's `cast:<uuid>`), so a
+device that mDNS also finds is a second sink until the same-address rule removes one, as in Chrome.
+
+| Export | What it is |
+|---|---|
+| `AccessCodeOptions` | The `accessCode` option: `enabled`, `deviceDuration` (seconds), `store`, and optional `log` and `now` (tests). |
+| `AccessCodeDevice`, `AccessCodeCapabilities` | What `addSinkByAddress` takes: `id`, `name`, `capabilities` (`videoOut`, `videoIn`, `audioOut`, `audioIn`, `devMode`), `ipV6Address` or `ipV4Address`, and `port`. |
+| `AddSinkResult`, `SinkCreationFailure` | How adding ended: `ok` with the `sinkId`, or `response_malformed`, `sink_creation_error` (with its `reason`) or `channel_open_error`. |
+| `AccessCodeRememberedSink`, `AccessCodeStore` | A remembered device, and where they are kept between runs (`load`, `save`). |
+| `AccessCodeCastDisabledError` | What `addSinkByAddress` rejects with unless access code casting is enabled. |
+| `createAccessCodeSink(device)` | Chrome's checks on a device, without opening anything: the sink it would be, or why it cannot be one. |

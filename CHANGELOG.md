@@ -97,6 +97,18 @@ is frozen and behaves as before for pages; it shares the device list.
     `ipcMain` and a folder for the generated receiver preload; calling it twice on one `ipcMain` and channel throws),
     the display rules (`isWiredDisplaySource`, `availableDisplays`, `wiredDisplaySinks`), and `manager.wiredDisplay`
     (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+- **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
+  `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
+  address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
+  with Chrome's checks, quick open parameters (2 s connect, 3 attempts 1 s apart) and expiry: it stays for
+  `accessCode.deviceDuration` seconds (default 0) plus 20 s, a device a page is casting to stays until the cast ends, and a
+  network change (`manager.networksChanged()`, called by the app) removes it and brings the remembered ones back. It is off
+  unless `createCastManager({ accessCode: { enabled: true } })`, as Chrome's `AccessCodeCastEnabled` policy is. Turning a
+  typed code into an address is a private Google service that needs Chrome's sign-in, so it is not part of electron-cast;
+  [DESIGN.md](docs/DESIGN.md#access-code-casting-access-codets) says why. The address comes from the app, not from
+  Google's server as in Chrome, so validate what users type: Chrome's rules allow any private address and port. New: `addSinkByAddress`, `configureAccessCode`,
+  `rememberedSinks`, `networksChanged`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
+  between runs), and `pingIntervalMs` in `createClient`'s second argument.
 - Presentation mode: `PresentationConnection.send()` takes ArrayBuffer, ArrayBufferView and Blob as well as strings,
   and `binaryType` (`arraybuffer` or `blob`) picks what `message` events carry, as in Chrome. Binary goes to wired
   displays, in both directions. To a Cast device it is dropped without an error, as Chrome's

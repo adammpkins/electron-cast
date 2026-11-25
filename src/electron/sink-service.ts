@@ -12,6 +12,8 @@ export interface ChannelParams {
   connectTimeoutMs: number;
   /** Idle time without a reply before the channel is declared dead. 10 s, longer after failures when a delta is set. */
   livenessTimeoutMs: number;
+  /** Idle time before the device is pinged (Chrome: `ping_interval_in_seconds`). 5 s; 4 s for a device added by access code. */
+  pingIntervalMs: number;
 }
 
 /** A device and the open channel to it. */
@@ -103,7 +105,23 @@ const endpointOf = (device: CastDevice): string => `${device.host}:${device.port
 
 const sameDevice = (a: CastDevice, b: CastDevice): boolean => JSON.stringify(a) === JSON.stringify(b);
 
-type OpenSource = "discovery" | "retry-on-error";
+type OpenSource = "discovery" | "retry-on-error" | "access-code";
+
+/** The delays between attempts (`BackoffEntry`'s policy); the number of attempts is the service's `retry.maxAttempts`. */
+export type OpenBackoff = Required<Omit<SinkRetryOptions, "maxAttempts">>;
+
+/** What a caller of {@link CastSinkService.openSink} may change about the run of attempts to open a channel. */
+export interface OpenSinkOptions {
+  /** Timeouts for the channel, instead of the service's own (Chrome: the `CastSocketOpenParams` passed to `OpenChannel`). */
+  params?: ChannelParams;
+  /** Delays between attempts, instead of the service's `retry` (Chrome: the `BackoffEntry` passed to `OpenChannel`). */
+  backoff?: OpenBackoff;
+}
+
+/** Carries one run of attempts: its options and who to tell how it ended (Chrome's `ChannelOpenedCallback`). */
+interface OpenContext extends OpenSinkOptions {
+  done?: (opened: boolean, error?: Error) => void;
+}
 
 const MAX_CONNECT_TIMEOUT_MS = 30_000;
 const MAX_LIVENESS_TIMEOUT_MS = 60_000;
@@ -154,6 +172,8 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   private reportTimer: ReturnType<typeof setTimeout> | undefined;
   private batchTimer: ReturnType<typeof setTimeout> | undefined;
   private reopening = 0;
+  /** Callers of {@link openSink} still waiting; they are told "not opened" on `dispose()`. */
+  private readonly waiting = new Set<(opened: boolean) => void>();
   private disposed = false;
   private readonly onSourceEvent = (): void => this.openChannelsWithRandomizedDelay();
 
@@ -200,6 +220,50 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   sinkOf(deviceId: string): CastDevice | undefined {
     const rec = this.sinkMap.get(deviceId);
     return rec === undefined ? undefined : { ...rec.device };
+  }
+
+  /** Whether a device is a sink now (Chrome: `CastMediaSinkServiceImpl::HasSink`). */
+  hasSink(deviceId: string): boolean {
+    return this.sinkMap.has(deviceId);
+  }
+
+  /**
+   * Open a channel to a device that discovery did not report, and list it once the channel has opened and authenticated
+   * (what `AccessCodeCastSinkService` does through `CastMediaSinkServiceImpl::OpenChannel`). Resolves true when the sink
+   * has a channel, false when none could be opened: the address is not one a channel may be opened to, the attempts ran
+   * out, or the service was disposed. Failed attempts are retried as discovery's are, with `options.backoff` between them.
+   */
+  openSink(device: CastDevice, options: OpenSinkOptions = {}): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      if (this.disposed) {
+        resolve(false);
+        return;
+      }
+      this.waiting.add(resolve);
+      this.openChannel(device, "access-code", 0, {
+        ...options,
+        done: (opened) => {
+          this.waiting.delete(resolve);
+          resolve(opened);
+        },
+      });
+    });
+  }
+
+  /** A sink takes a new name and capabilities (Chrome: `AddOrUpdateSink` on a copy of the existing sink, as `UpdateExistingSink` does). */
+  updateSinkDetails(deviceId: string, details: { name: string; capabilities: number }): void {
+    const record = this.sinkMap.get(deviceId);
+    if (record === undefined) return;
+    const next: CastDevice = { ...record.device, name: details.name, capabilities: details.capabilities };
+    if (sameDevice(next, record.device)) return;
+    record.device = next;
+    this.markChanged();
+  }
+
+  /** Remove a sink and close its channel (Chrome: `CastMediaSinkServiceImpl::DisconnectAndRemoveSink`). */
+  disconnectAndRemoveSink(deviceId: string): void {
+    const record = this.sinkMap.get(deviceId);
+    if (record !== undefined) this.removeSink(record);
   }
 
   /**
@@ -253,6 +317,7 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     return {
       connectTimeoutMs: Math.min(10_000 + grow, MAX_CONNECT_TIMEOUT_MS),
       livenessTimeoutMs: Math.min(10_000 + grow, MAX_LIVENESS_TIMEOUT_MS),
+      pingIntervalMs: 5000,
     };
   }
 
@@ -274,6 +339,8 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     for (const rec of records) this.closeClient(rec);
     for (const client of this.retired) this.closeQuietly(client);
     this.retired.clear();
+    for (const resolve of [...this.waiting]) resolve(false);
+    this.waiting.clear();
     this.removeAllListeners();
   }
 
@@ -302,17 +369,22 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   }
 
   /** `CastMediaSinkServiceImpl::OpenChannel`. `failures` counts the failed attempts so far in this run of retries. */
-  private openChannel(device: CastDevice, source: OpenSource, failures: number, params?: ChannelParams): void {
-    if (this.disposed) return;
+  private openChannel(device: CastDevice, source: OpenSource, failures: number, ctx: OpenContext = {}): void {
+    if (this.disposed) {
+      ctx.done?.(false);
+      return;
+    }
     if (parseIpBytes(device.host) === null) {
       // Chrome opens channels to IP endpoints only (`IPEndPoint`), and a name cannot be vetted against the address rules.
       this.skip(device, `"${device.host}" is a host name, not an IP address; a channel is opened to IP addresses only`);
+      ctx.done?.(false);
       return;
     }
     // Chrome checks the one endpoint it is about to open, here and nowhere else (`OpenChannel`), with
     // net::IPAddress::IsPubliclyRoutable and IsLoopback (ported byte for byte in ip-policy.ts)
     if (!this.allowAllIps && (isPubliclyRoutable(device.host) || isLoopback(device.host))) {
       this.skip(device, `${device.host} is ${isLoopback(device.host) ? "a loopback" : "a publicly routable"} address (allowAllIps is off)`);
+      ctx.done?.(false);
       return;
     }
     const existing = this.sinkMap.get(device.id);
@@ -326,17 +398,22 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     // after an error reopens the channel).
     if (source !== "retry-on-error" && existing !== undefined && existing.endpoint === endpoint) {
       if (source === "discovery") this.updateSink(existing, device);
+      ctx.done?.(true);
       return;
     }
-    if (this.pending.has(endpoint)) return;
+    if (this.pending.has(endpoint)) {
+      ctx.done?.(false);
+      return;
+    }
     this.pending.add(endpoint);
-    const openParams = params ?? this.paramsFor(device.id);
+    const run: OpenContext = { ...ctx, params: ctx.params ?? this.paramsFor(device.id) };
+    const openParams = run.params as ChannelParams;
     let client: CastClientLike;
     try {
       client = this.createClient(device, openParams);
     } catch (err) {
       this.pending.delete(endpoint);
-      this.onOpenError(device, source, failures, err, openParams);
+      this.onOpenError(device, source, failures, err, run);
       return;
     }
     client.connect().then(
@@ -344,21 +421,26 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
         this.pending.delete(endpoint);
         if (this.disposed) {
           client.close();
+          run.done?.(false);
           return;
         }
         this.onOpened(device, client);
+        run.done?.(true);
       },
       (err: unknown) => {
         this.pending.delete(endpoint);
         client.close();
-        this.onOpenError(device, source, failures, err, openParams);
+        this.onOpenError(device, source, failures, err, run);
       },
     );
   }
 
   /** `OnChannelErrorMayRetry`: wait out the backoff and try again, or give up after `maxAttempts` failures in a row. */
-  private onOpenError(device: CastDevice, source: OpenSource, failuresBefore: number, err: unknown, params: ChannelParams): void {
-    if (this.disposed) return;
+  private onOpenError(device: CastDevice, source: OpenSource, failuresBefore: number, err: unknown, run: OpenContext): void {
+    if (this.disposed) {
+      run.done?.(false);
+      return;
+    }
     this.failureCounts.set(device.id, Math.min((this.failureCounts.get(device.id) ?? 0) + 1, MAX_FAILURE_COUNT));
     const error = err instanceof Error ? err : new Error(String(err));
     this.lastErrors.set(device.id, error.message);
@@ -367,11 +449,13 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     this.emit("openFailed", device, error, !giveUp);
     if (giveUp) {
       this.onOpenGaveUp(device);
+      run.done?.(false, error);
       return;
     }
     // BackoffEntry::CalculateReleaseTime: initial * factor^(failures - 1), cut by up to `jitter`, at most the maximum
-    const nominal = this.retry.initialDelayMs * this.retry.multiplyFactor ** (failures - 1);
-    const delay = Math.min(nominal - this.random() * this.retry.jitter * nominal, this.retry.maxDelayMs);
+    const backoff = run.backoff ?? this.retry;
+    const nominal = backoff.initialDelayMs * backoff.multiplyFactor ** (failures - 1);
+    const delay = Math.min(nominal - this.random() * backoff.jitter * nominal, backoff.maxDelayMs);
     const endpoint = endpointOf(device);
     this.later(delay, () => {
       // A retry captured an endpoint; if the device has meanwhile been reached at another one, or discovery now names
@@ -379,8 +463,11 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
       // endpoint is no longer the sink's for the same reason).
       const now = this.sinkMap.get(device.id);
       const offered = this.source.devices().find((d) => d.id === device.id);
-      if ((now !== undefined && now.endpoint !== endpoint) || (offered !== undefined && !endpointStillOffered(endpoint, offered))) return;
-      this.openChannel(device, source, failures, params);
+      if ((now !== undefined && now.endpoint !== endpoint) || (offered !== undefined && !endpointStillOffered(endpoint, offered))) {
+        run.done?.(false);
+        return;
+      }
+      this.openChannel(device, source, failures, run);
     });
   }
 

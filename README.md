@@ -144,7 +144,7 @@ electron-cast does what Chrome does on the Presentation API path. Where it does 
 | Wired display (presenting to a second monitor) | Yes | Yes (`wiredDisplay` option) | A page's https (or localhost) `PresentationRequest` opens fullscreen in a sandboxed receiver window on the chosen screen; a request that also has a Cast URL gets one picker for both kinds ([DESIGN](docs/DESIGN.md#wired-displays)). Unit tests with fakes; tried live on one second display |
 | Presentation Receiver API (`navigator.presentation.receiver` on the presented page) | Yes | Yes | `connectionList`, `connectionavailable`, messages in both directions, `close`, `terminate` |
 | Binary messages on a presentation connection (`ArrayBuffer`, `Blob`, `binaryType`) | Yes | Yes | Carried to wired displays; dropped for Cast devices, as Chrome's Cast provider does |
-| Access-code casting | Yes | Under study (`feat/access-code`) | |
+| Access-code casting | Yes | Partly: adding the device by address (`addSinkByAddress`) | Chrome's checks, open parameters, expiry and network-change handling are ported. Turning a typed code into an address is a private Google service behind Chrome's sign-in, so the app supplies the address and **must validate it**: private addresses and any port are allowed ([why](docs/DESIGN.md#access-code-casting-access-codets)). Unit tests only so far |
 | `mode: "chromecast"`, a legacy `chrome.cast` polyfill | n/a | Frozen | Gets no new features; use the default mode ([notes](docs/FAQ.md#what-is-mode-chromecast)) |
 
 ## Platforms and what was tested
