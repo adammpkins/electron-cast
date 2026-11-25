@@ -7,6 +7,8 @@
  * Times are epoch milliseconds (`performance.timeOrigin + performance.now()`), the one clock both sides can read.
  */
 
+import type { ResolutionChangePolicy } from "../mirror-settings.ts";
+
 /** What to capture. */
 export type CaptureSource =
   | { kind: "tab"; /** `webContents.getMediaSourceId(agent)` of the mirrored page. */ mediaSourceId: string }
@@ -25,7 +27,8 @@ export type CaptureSource =
 export interface AgentStartMessage {
   t: "start";
   source: CaptureSource;
-  video?: { width: number; height: number; frameRate: number };
+  /** `VideoCaptureParams`: the policy decides whether the capture letterboxes into a fixed frame (see agent-source.ts). */
+  video?: { width: number; height: number; frameRate: number; resolutionChangePolicy: ResolutionChangePolicy };
   audio?: { sampleRate: number; channels: number };
 }
 
@@ -33,7 +36,8 @@ export type EngineToAgent =
   | AgentStartMessage
   | { t: "encode"; rtp: number }
   | { t: "set-bitrate"; bps: number }
-  | { t: "set-codec"; codec: "vp8" | "vp9" | "h264" | "av1"; codecString: string }
+  /** `hardware` is the offer's `use_hardware_encoder`: the encoder must be one (`prefer-hardware`) or must not be. */
+  | { t: "set-codec"; codec: "vp8" | "vp9" | "h264" | "hevc" | "av1"; codecString: string; hardware: boolean }
   | { t: "key-frame" }
   | { t: "pause" }
   | { t: "resume" }
@@ -53,7 +57,7 @@ export type AgentToEngine =
   | { t: "audio-drop"; seq: number }
   | { t: "audio-buffer"; seq: number; frames: number; recMs: number }
   | { t: "audio-chunk"; seq: number; data: ArrayBuffer }
-  | { t: "encoder-status"; kind: "video" | "audio"; status: "initialized" | "unsupported_codec" | "codec_init_failed" | "codec_runtime_error" };
+  | { t: "encoder-status"; kind: "video" | "audio"; status: "initialized" | "unsupported_codec" | "codec_init_failed" | "codec_runtime_error"; message?: string };
 
 /** The slice of Electron's `MessagePortMain` the engine side uses. */
 export interface AgentPort {

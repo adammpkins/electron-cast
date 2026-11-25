@@ -158,7 +158,11 @@ route on a device ends the one already running there, as in Chrome. Mirroring ro
 `registerMediaRoutesObserver` and end on `terminateRoute`, when the receiver's app closes, or on a stream error.
 
 `mirroring` options: `electron` (the Electron objects to use), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
-`engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
+`argv` (where Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>` switches are looked for; default
+`process.argv`, which is also where `--disable-cast-letterboxing` is read), `engineModulePath` (only if a bundler moved the library's files) and
+`log`. Opus audio is always offered. Video is chosen as Chrome chooses it: H.264 in hardware when the machine has an
+encoder for it (`VideoEncoder.isConfigSupported` with `prefer-hardware`), VP8 in software otherwise; a hardware encoder
+that fails during a session is dropped for the rest of the app's run and the session offers again without it.
 Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
 route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)
 to try it on a real device.

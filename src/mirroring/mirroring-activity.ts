@@ -30,6 +30,16 @@ export interface MirroringClient {
   on(event: "close", listener: (error?: Error) => void): unknown;
 }
 
+/**
+ * `ShouldForceLetterboxing` (mirroring_activity.cc): a Nest Hub is always sent letterboxed video, whatever its ANSWER
+ * says about scaling, unless the app was started with `--disable-cast-letterboxing`. Chrome marks it for removal
+ * (crbug.com/41363512).
+ */
+export function shouldForceLetterboxing(modelName: string, argv: readonly string[] = process.argv): boolean {
+  if (argv.includes("--disable-cast-letterboxing")) return false;
+  return modelName.includes("Nest Hub");
+}
+
 /** `mirroring::mojom::SessionObserver`. */
 export interface MirroringSessionObserver {
   didStart?(): void;
@@ -160,6 +170,7 @@ export class MirroringActivity {
       sourceId: this.sourceId,
       destinationId,
       targetPlayoutDelayMs: this.source.targetPlayoutDelayMs,
+      forceLetterboxing: shouldForceLetterboxing(this.sink.model),
     };
     this.service = this.createService(params, observer, channel, this.source);
   }

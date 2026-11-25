@@ -16,7 +16,19 @@ import { PortBackend } from "./port-backend.ts";
 
 /** Main to engine. */
 export type ToEngine =
-  | { type: "start"; params: SessionParameters; source: CaptureSource; softwareCodecs: VideoCodec[]; env?: Record<string, string | undefined> }
+  | {
+      type: "start";
+      params: SessionParameters;
+      source: CaptureSource;
+      /** What `VideoEncoder.isConfigSupported` found: `prefer-hardware` and `prefer-software` respectively. */
+      hardwareCodecs: VideoCodec[];
+      softwareCodecs: VideoCodec[];
+      /** Codecs whose hardware encoder failed earlier in the app's run (`GetHardwareCodecDenyList`). */
+      hardwareDenyList: VideoCodec[];
+      /** The `--cast-streaming-force-{enable,disable}-hardware-*` switches the app was started with. */
+      hardwareSwitches: { forceEnable: VideoCodec[]; forceDisable: VideoCodec[] };
+      env?: Record<string, string | undefined>;
+    }
   | { type: "message"; namespace: string; json: string }
   | { type: "stop" };
 
@@ -26,7 +38,9 @@ export type FromEngine =
   | { type: "did-start" }
   | { type: "did-stop" }
   | { type: "error"; error: string; message: string }
-  | { type: "log"; message: string };
+  | { type: "log"; message: string }
+  /** A hardware encoder failed and the codec is no longer offered in hardware: the main process keeps the list. */
+  | { type: "deny-hardware-codec"; codec: VideoCodec };
 
 /** The slice of `process.parentPort` and of a `MessagePortMain` this file uses. */
 export interface ParentPortLike {
@@ -60,7 +74,14 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
       const source = data.source;
       const factory = createMirroringServiceFactory({
         createBackend: () => new PortBackend(agentPortFrom(agent), source),
-        encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(data.softwareCodecs) }),
+        encodingSupport: createEncodingSupport(
+          { hardware: new Set(data.hardwareCodecs), software: new Set(data.softwareCodecs) },
+          {
+            denyListed: new Set(data.hardwareDenyList),
+            onDenyListed: (codec) => parentPort.postMessage({ type: "deny-hardware-codec", codec }),
+            switches: { forceEnable: new Set(data.hardwareSwitches.forceEnable), forceDisable: new Set(data.hardwareSwitches.forceDisable) },
+          },
+        ),
         env: data.env,
       });
       service = factory(

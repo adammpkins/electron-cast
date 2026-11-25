@@ -9,7 +9,7 @@ import { createCastManager } from "electron-cast/main";
 import { FakeClient, FakeDiscovery, TV } from "./fakes.mjs";
 import { runMirroringScenario } from "./mirroring.mjs";
 
-const TIMEOUT_MS = 60_000;
+const TIMEOUT_MS = 150_000;
 const SCHEME = "smoke";
 const PAGE_ORIGIN = `${SCHEME}://app`;
 const APP_ID = "233637DE";
@@ -211,6 +211,9 @@ async function main() {
 
   // 3. tab mirroring against the fake receiver
   await runMirroringScenario({ pass, fail });
+  // A 4:3 page must still come out 16:9 (letterboxed), and the software path must work on a machine with a hardware encoder.
+  await runMirroringScenario({ pass, fail, content: [640, 480] });
+  await runMirroringScenario({ pass, fail, hardware: "off" });
   await runMirroringScenario({ pass, fail, mode: "desktop" });
 
   await cast.dispose();

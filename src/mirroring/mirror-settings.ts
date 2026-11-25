@@ -161,11 +161,13 @@ const CODEC_PARAMETER_CONFIGS = {
 
 /**
  * `GetCodecParameterString`. Above 1080p or above 30 fps the high level is used. H.264 needs
- * `media::BuildH264MimeSuffix` (profile Main, level 40 or 42), which is ".%s%04x" (video_codecs.cc), e.g. "avc1.4d0028" for level 40.
+ * `media::BuildH264MimeSuffix` (level 40 or 42), which is ".%s%04x" (video_codecs.cc): profile 4d (Main) gives
+ * "avc1.4d0028" for level 40. `ToProfile` picks Baseline (42) on macOS (`kCastMacForceBaselineProfile`, on by default)
+ * and Main elsewhere.
  */
-export function getCodecParameterString(codec: VideoCodec, width: number, height: number, frameRate: number): string {
+export function getCodecParameterString(codec: VideoCodec, width: number, height: number, frameRate: number, h264Profile: "main" | "baseline" = "main"): string {
   const high = width * height > 1920 * 1080 || frameRate > 30;
-  if (codec === "h264") return `avc1.4d${(high ? 42 : 40).toString(16).padStart(4, "0")}`;
+  if (codec === "h264") return `avc1.${h264Profile === "baseline" ? "42" : "4d"}${(high ? 42 : 40).toString(16).padStart(4, "0")}`;
   if (codec === "vp8") return "";
   const c = CODEC_PARAMETER_CONFIGS[codec];
   return `${c.prefix}${high ? c.high : c.low}${c.suffix}`;

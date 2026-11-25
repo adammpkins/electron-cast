@@ -12,7 +12,7 @@ import { ALL_PACKETS_LOST } from "../../src/mirroring/protocol/constants.ts";
 import { FrameCrypto } from "../../src/mirroring/rtp/frame-crypto.ts";
 import { NtpTimeConverter } from "../../src/mirroring/rtcp/ntp.ts";
 import { buildReceiverRtcp, parseRtpPacket } from "./receiver-wire.ts";
-import { validateOpusPacket, validateVp8Frame } from "./media-validate.ts";
+import { validateH264Frame, validateOpusPacket, validateVp8Frame } from "./media-validate.ts";
 
 export interface FakeReceiverOptions {
   /** Probability of dropping each incoming RTP packet. */
@@ -25,6 +25,8 @@ export interface FakeReceiverOptions {
   playoutDelayMs?: number;
   /** Check the bodies produced by the test encoder (`fakeFrameBody`). */
   verifyBody?: boolean;
+  /** The ANSWER's `display.aspectRatioConstraint`: `variable` is a receiver that scales, so needs no letterboxing. */
+  aspectRatioConstraint?: "variable" | "fixed";
   /** Stop answering feedback (to test the sender with a silent receiver). */
   silent?: boolean;
 }
@@ -67,6 +69,7 @@ export interface FakeReceiverStats {
   videoFrames: number;
   audioFrames: number;
   validVideoFrames: number;
+  videoSizes: Set<string>;
   validAudioFrames: number;
   videoKeyFrames: number;
   invalidFrames: number;
@@ -100,6 +103,8 @@ export class FakeReceiver {
     audioFrames: 0,
     audioBytes: 0,
     validVideoFrames: 0,
+    /** The picture sizes of the key frames seen (VP8 and H.264 carry them). */
+    videoSizes: new Set<string>(),
     validAudioFrames: 0,
     videoKeyFrames: 0,
     invalidFrames: 0,
@@ -120,6 +125,11 @@ export class FakeReceiver {
   private tokens = 8192;
   private tokensAt = performance.now();
   private readonly random: () => number;
+  /** The codec of the video stream the last ANSWER selected. */
+  get selectedVideoCodec(): string | undefined {
+    for (const s of this.streams.values()) if (s.kind === "video") return s.codec;
+    return undefined;
+  }
   /** The most recent OFFER's streams, for tests that want to look at them. */
   lastOffer: Record<string, unknown> | undefined;
 
@@ -204,7 +214,7 @@ export class FakeReceiver {
       this.sendControl(JSON.stringify({ type: "ANSWER", seqNum: message.seqNum, result: "error", error: { code: 10107, description: "no stream selected" } }));
       return;
     }
-    this.sendControl(JSON.stringify({ type: "ANSWER", seqNum: message.seqNum, result: "ok", answer: { udpPort: this.port, sendIndexes, ssrcs } }));
+    this.sendControl(JSON.stringify({ type: "ANSWER", seqNum: message.seqNum, result: "ok", answer: { udpPort: this.port, sendIndexes, ssrcs, ...(this.opts.aspectRatioConstraint === undefined ? {} : { display: { scaling: this.opts.aspectRatioConstraint === "variable" ? "receiver" : "sender", aspectRatio: "16:9" } }) } }));
   }
 
   private onPacket(buf: Buffer, rinfo: RemoteInfo): void {
@@ -281,11 +291,12 @@ export class FakeReceiver {
     if (stream.kind === "video") {
       this.stats.videoFrames++;
       this.stats.videoBytes += data.length;
-      const info = stream.codec === "vp8" ? validateVp8Frame(data) : { key: frame.isKey };
+      const info = stream.codec === "vp8" ? validateVp8Frame(data) : stream.codec === "h264" ? validateH264Frame(data) : { key: frame.isKey };
       const ok = info !== undefined && info.key === frame.isKey && this.bodyOk(frame, data, 10);
       if (ok) this.stats.validVideoFrames++;
       else this.stats.invalidFrames++;
       if (info?.key === true) this.stats.videoKeyFrames++;
+      if (info !== undefined && "width" in info && info.width !== undefined) this.stats.videoSizes.add(`${info.width}x${info.height}`);
       if (this.keepFrames) this.decodedVideo.push({ frameId, data });
     } else {
       this.stats.audioFrames++;

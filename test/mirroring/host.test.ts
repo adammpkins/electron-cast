@@ -11,6 +11,9 @@ function fakeElectron() {
     request: undefined as ((wc: unknown, permission: string, cb: (granted: boolean) => void) => void) | undefined,
     display: undefined as ((request: unknown, cb: (streams: { video?: unknown; audio?: string }) => void) => void) | undefined,
     check: undefined as ((wc: unknown, permission: string) => boolean) | undefined,
+    /** What the capture page's `isConfigSupported` probes find, and the probes it was asked. */
+    found: [{ codec: "vp8", hardware: false }] as { codec: string; hardware: boolean }[],
+    probes: [] as { codec: string; hardware: boolean; string: string; width: number; height: number }[],
     procs: [] as { handlers: { message: ((m: FromEngine) => void)[]; exit: ((code: number) => void)[] }; posted: unknown[]; killed: boolean }[],
   };
   const page = {
@@ -21,7 +24,11 @@ function fakeElectron() {
     setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); },
     isDestroyed: () => false,
     getMediaSourceId: () => "id",
-    executeJavaScript: async (code: string) => (code.includes("isConfigSupported") ? ["vp8"] : undefined),
+    executeJavaScript: async (code: string) => {
+      if (!code.startsWith("(async () => { const out = [];")) return undefined;
+      state.probes = JSON.parse(/of (\[.*?\])\) \{/s.exec(code)![1]!);
+      return state.found;
+    },
     postMessage() {},
     setWindowOpenHandler() {},
     on() {},
@@ -60,10 +67,11 @@ function fakeElectron() {
   return { electron, state, page };
 }
 
-async function start(alreadyMuted = false) {
+async function start(alreadyMuted = false, options: Partial<Parameters<typeof createElectronMirroringServiceFactory>[0]> = {}, found?: { codec: string; hardware: boolean }[]) {
   const { electron, state, page } = fakeElectron();
   page.muted = alreadyMuted;
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  if (found !== undefined) state.found = found;
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", argv: [], ...options });
   const errors: string[] = [];
   const service = host.factory(
     { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
@@ -150,4 +158,58 @@ test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep
     assert.deepEqual(streams?.video, { id: "screen:1:0", name: "Screen 1" });
     host.dispose();
   }
+});
+
+// encoding_support.cc IsHardwareEnabled: the hardware probe is `prefer-hardware`, which in Chromium's VideoEncoder means
+// no software fallback (blink video_encoder.cc `GetRequiredEncoderType`).
+
+test("host: H.264 is probed in hardware at 1080p with Chrome's codec string, VP8 in software, and HEVC, AV1 and VP9 not at all", async () => {
+  const { state, host } = await start(false, {}, [{ codec: "h264", hardware: true }, { codec: "vp8", hardware: false }]);
+  assert.deepEqual(state.probes.map((p) => `${p.codec}:${p.hardware ? "hw" : "sw"}:${p.string}:${p.width}x${p.height}`), [
+    "h264:hw:avc1.4d0028:1920x1080",
+    "vp8:hw:vp8:1920x1080",
+    "vp8:sw:vp8:1280x720",
+  ]);
+  const msg = state.procs[0]!.posted.find((m) => (m as { type: string }).type === "start") as { hardwareCodecs: string[]; softwareCodecs: string[]; hardwareDenyList: string[] };
+  assert.deepEqual(msg.hardwareCodecs, ["h264"]);
+  assert.deepEqual(msg.softwareCodecs, ["vp8"]);
+  assert.deepEqual(msg.hardwareDenyList, []);
+  host.dispose();
+});
+
+test("host: VP9 is probed (in hardware and software) only when the app opts in", async () => {
+  const { state, host } = await start(false, { extraVideoCodecs: ["vp9"] });
+  assert.deepEqual(state.probes.filter((p) => p.codec === "vp9").map((p) => `${p.hardware ? "hw" : "sw"}:${p.string}`), ["hw:vp09.00.40.08", "sw:vp09.00.40.08"]);
+  host.dispose();
+});
+
+test("host: Chrome's force-enable and force-disable switches, found in argv, change what is probed", async () => {
+  const { state, host } = await start(false, { argv: ["electron", "--cast-streaming-force-enable-hardware-hevc", "--cast-streaming-force-disable-hardware-h264", "--cast-streaming-force-enable-hardware-av1", "--cast-streaming-force-disable-hardware-av1"] });
+  assert.deepEqual(state.probes.filter((p) => p.hardware).map((p) => p.codec), ["hevc", "vp8"], "force-disable wins over force-enable, and HEVC is on by switch only");
+  host.dispose();
+});
+
+test("host: a hardware codec the engine reports as failed stays out of later sessions for the app's run", async () => {
+  const { electron, state } = fakeElectron();
+  state.found = [{ codec: "h264", hardware: true }, { codec: "vp8", hardware: false }];
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", argv: [] });
+  const begin = async (n: number): Promise<{ hardwareDenyList: string[] }> => {
+    host.factory({ type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never, {}, { send() {} }, { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never);
+    for (let i = 0; i < 100 && state.procs.length < n; i++) await sleep(5);
+    return state.procs[n - 1]!.posted.find((m) => (m as { type: string }).type === "start") as { hardwareDenyList: string[] };
+  };
+  assert.deepEqual((await begin(1)).hardwareDenyList, []);
+  state.procs[0]!.handlers.message.forEach((h) => h({ type: "deny-hardware-codec", codec: "h264" }));
+  assert.deepEqual((await begin(2)).hardwareDenyList, ["h264"]);
+  host.dispose();
+});
+
+test("host: a Mac offers H.264 Baseline, as Chrome's ToProfile does", async () => {
+  const { electron, state } = fakeElectron();
+  state.found = [{ codec: "vp8", hardware: false }];
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", argv: [] }, "darwin");
+  host.factory({ type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never, {}, { send() {} }, { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never);
+  for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
+  assert.equal(state.probes.find((p) => p.codec === "h264")?.string, "avc1.420028");
+  host.dispose();
 });

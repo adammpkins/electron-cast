@@ -3,7 +3,8 @@
 //   npm run tab -- "Living Room"      mirrors an animated demo page ("Casting tab")
 //   npm run desktop -- "Living Room"  mirrors the primary screen, with system audio where the OS allows ("Casting screen")
 // A dialog asks before anything starts, and closing the window or pressing Ctrl+C ends the route (the TV returns to
-// its idle screen). Add --extra-codecs to let the sender offer VP9 as well as VP8.
+// its idle screen). Add --extra-codecs to let the sender offer VP9 as well as VP8. Chrome's
+// --cast-streaming-force-{enable,disable}-hardware-{h264,hevc,vp8,vp9,av1} switches given here are honoured.
 import { app, BrowserWindow, MessageChannelMain, desktopCapturer, dialog, ipcMain, utilityProcess, webContents } from "electron";
 import { createCastManager } from "electron-cast/main";
 

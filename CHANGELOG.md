@@ -10,7 +10,16 @@
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route. No new
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
   tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
-  pause and resume, hardware codecs.
+  pause and resume.
+- **Mirroring uses a hardware encoder when there is one, as Chrome does.** The capture page asks WebCodecs
+  (`prefer-hardware`) which of H.264, VP8 and VP9 a hardware encoder takes, and offers those hardware-first (H.264 as
+  Annex B); VP8 in software is offered only when no hardware codec is, or when the receiver takes none of the hardware
+  ones. A hardware encoder that fails mid-session no longer stops mirroring: the codec is dropped for the rest of the
+  app's run and the session negotiates again. Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>` and
+  `--disable-cast-letterboxing` switches are honoured (new `mirroring.argv` option says where to read the hardware ones from).
+- **Mirroring letterboxes like Chrome.** The capture now asks for the `fixed_aspect_ratio` policy when the receiver
+  cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
+  no longer upscaled to 1920x1080.
 
 ## 0.4.0
 

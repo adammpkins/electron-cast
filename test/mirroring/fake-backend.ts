@@ -26,6 +26,16 @@ export function makeVp8Frame(key: boolean, rtpTimestamp: number, size: number, w
   return Buffer.concat([head, fakeFrameBody(rtpTimestamp, Math.max(0, size - headerLength))]);
 }
 
+/** An Annex B H.264 access unit: SPS, PPS and an IDR slice for a key frame, one non-IDR slice otherwise. */
+export function makeH264Frame(key: boolean, rtpTimestamp: number, size: number): Buffer {
+  const nal = (header: number, body: Buffer): Buffer => Buffer.concat([Buffer.from([0, 0, 0, 1, header]), body]);
+  // Bodies avoid 00 00 01 by starting with a non-zero byte and holding only 0x55 filler.
+  const filler = (n: number): Buffer => Buffer.concat([Buffer.from([0x80]), Buffer.alloc(Math.max(0, n), 0x55)]);
+  const parts = key ? [nal(0x67, filler(8)), nal(0x68, filler(2)), nal(0x65, filler(size - 30))] : [nal(0x41, filler(size - 6))];
+  void rtpTimestamp;
+  return Buffer.concat(parts);
+}
+
 export function makeOpusPacket(rtpTimestamp: number, size: number): Buffer {
   return Buffer.concat([Buffer.from([0x78]), fakeFrameBody(rtpTimestamp, Math.max(0, size - 1))]);
 }
@@ -33,6 +43,13 @@ export function makeOpusPacket(rtpTimestamp: number, size: number): Buffer {
 export class FakeBackend implements MirroringBackend {
   readonly videoBitrates: number[] = [];
   readonly keyFramesRequested: number[] = [];
+  /** The configuration of every video encoder the session created, in order (a renegotiation creates another). */
+  readonly videoEncoderConfigs: FrameSenderConfig[] = [];
+  /** The newest video encoder's callbacks, to make it report a status as a failing encoder would. */
+  videoCallbacks: VideoEncoderCallbacks | undefined;
+  videoEncodersCreated = 0;
+  /** The parameters of every `startVideoCapture`. */
+  readonly videoCaptureStarts: VideoCaptureParams[] = [];
   videoFramesProduced = 0;
   audioFramesProduced = 0;
   feedback: number[] = [];
@@ -56,6 +73,12 @@ export class FakeBackend implements MirroringBackend {
   createVideoEncoder(config: FrameSenderConfig, callbacks: VideoEncoderCallbacks): VideoEncoderPort {
     const fps = config.maxFrameRate;
     const self = this;
+    this.videoEncoderConfigs.push({ ...config });
+    this.videoCallbacks = callbacks;
+    this.videoEncodersCreated++;
+    this.nextVideoFrameId = 0;
+    this.lastVideoFrameId = -1;
+    this.needKey = true;
     queueMicrotask(() => callbacks.onStatus("initialized"));
     return {
       generateKeyFrame: () => {
@@ -75,7 +98,7 @@ export class FakeBackend implements MirroringBackend {
         const frameId = self.nextVideoFrameId++;
         const referenced = key ? frameId : self.lastVideoFrameId;
         self.lastVideoFrameId = frameId;
-        const data = makeVp8Frame(key, frame.rtpTimestamp, size);
+        const data = config.videoCodec === "h264" ? makeH264Frame(key, frame.rtpTimestamp, size) : makeVp8Frame(key, frame.rtpTimestamp, size);
         setTimeout(() => {
           self.videoFramesProduced++;
           callbacks.onEncoded(referenceTimeMs, {
@@ -136,6 +159,7 @@ export class FakeBackend implements MirroringBackend {
 
   startVideoCapture(params: VideoCaptureParams, sink: VideoCaptureSink): void {
     this.lastVideoParams = params;
+    this.videoCaptureStarts.push(params);
     this.videoSink = sink;
     this.paused = false;
     let last = 0;

@@ -7,7 +7,7 @@ import { performance } from "node:perf_hooks";
 import type {
   AudioCaptureSink, AudioEncoderCallbacks, AudioEncoderPort, MirroringBackend, VideoCaptureSink, VideoEncoderCallbacks,
 } from "../backend.ts";
-import type { FrameSenderConfig, VideoCaptureParams } from "../mirror-settings.ts";
+import type { FrameSenderConfig, ResolutionChangePolicy, VideoCaptureParams } from "../mirror-settings.ts";
 import type { RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
 import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.ts";
 
@@ -59,7 +59,7 @@ export class PortBackend implements MirroringBackend {
       case "error":
         if (m.where === "video") this.videoSink?.onCaptureError(m.message);
         else if (m.where === "audio") this.audioSink?.onCaptureError(m.message);
-        else this.videoCallbacks?.onStatus("codec_runtime_error");
+        else this.videoCallbacks?.onStatus("codec_runtime_error", m.message);
         break;
       case "frame":
         this.videoSink?.insertVideoFrame({ rtpTimestamp: m.rtp, referenceTimeMs: toLocalMs(m.refMs), visibleRectEmpty: false });
@@ -139,7 +139,8 @@ export class PortBackend implements MirroringBackend {
         break;
       }
       case "encoder-status":
-        (m.kind === "video" ? this.videoCallbacks : this.audioCallbacks)?.onStatus(m.status);
+        if (m.kind === "video") this.videoCallbacks?.onStatus(m.status, m.message);
+        else this.audioCallbacks?.onStatus(m.status);
         break;
     }
   }
@@ -147,7 +148,12 @@ export class PortBackend implements MirroringBackend {
   createVideoEncoder(config: FrameSenderConfig, callbacks: VideoEncoderCallbacks): VideoEncoderPort {
     this.videoCallbacks = callbacks;
     this.frameInterval = 1000 / config.maxFrameRate;
-    this.port.postMessage({ t: "set-codec", codec: (config.videoCodec ?? "vp8") as "vp8", codecString: config.codecParameter });
+    // A new encoder numbers its frames from 0 and owns no frames of the one before (a renegotiation after an encoder
+    // failure replaces it while the capture goes on); answers to the old one's frames are ignored from here on.
+    this.pendingVideo.clear();
+    this.nextVideoFrameId = 0;
+    this.lastVideoFrameId = -1;
+    this.port.postMessage({ t: "set-codec", codec: config.videoCodec ?? "vp8", codecString: config.codecParameter, hardware: config.useHardwareEncoder });
     this.port.postMessage({ t: "set-bitrate", bps: config.startBitrate });
     // The agent reports unsupported or failed codecs; "initialized" is the default until it says otherwise.
     queueMicrotask(() => callbacks.onStatus("initialized"));
@@ -170,6 +176,11 @@ export class PortBackend implements MirroringBackend {
   createAudioEncoder(config: FrameSenderConfig, callbacks: AudioEncoderCallbacks): AudioEncoderPort {
     this.audioCallbacks = callbacks;
     this.audioSenderConfig = config;
+    this.nextAudioFrameId = 0;
+    this.audioRtp = 0;
+    this.audioCaptureTimeMs = undefined;
+    this.samplesDroppedFromBuffer = 0;
+    this.audioMeta.clear();
     this.port.postMessage({ t: "set-audio", bps: config.maxBitrate });
     queueMicrotask(() => callbacks.onStatus("initialized"));
     return {
@@ -222,11 +233,11 @@ export class PortBackend implements MirroringBackend {
   startVideoCapture(params: VideoCaptureParams, sink: VideoCaptureSink): void {
     this.videoSink = sink;
     this.lastVideoParams = JSON.stringify(params);
-    this.videoParams = { width: params.width, height: params.height, frameRate: params.frameRate };
+    this.videoParams = { width: params.width, height: params.height, frameRate: params.frameRate, resolutionChangePolicy: params.resolutionChangePolicy };
     this.maybeStart();
   }
 
-  private videoParams: { width: number; height: number; frameRate: number } | undefined;
+  private videoParams: { width: number; height: number; frameRate: number; resolutionChangePolicy: ResolutionChangePolicy } | undefined;
   private started = false;
 
   /** Audio and video capture start together, as one `getUserMedia` or `getDisplayMedia` call can serve both. */
