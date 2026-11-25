@@ -4,6 +4,7 @@
 // presentation-envelope.ts.
 import { randomBytes } from "node:crypto";
 import type { BridgeEvent, InitializeResult, SessionSnapshot } from "../polyfill/bridge-types.ts";
+import type { CastMessageLog } from "./message-logging.ts";
 import type { CastSessionService } from "./session-service.ts";
 import type { DialService } from "../dial/index.ts";
 import { DialRouteError, DialRouteProvider } from "../dial/route-provider.ts";
@@ -188,6 +189,8 @@ class Conn implements PresentationConnectionHandle {
   /** Handler -> page: deliver directly, or queue until onmessage is assigned. */
   deliver(message: string): void {
     if (this.isClosed) return;
+    // CastSessionClientImpl::SendMessageToClient; a DIAL or mirroring route is not a Cast activity
+    if (this.dialRouteId === null && this.mirrorRouteId === null) this.owner.logSentToClient(this, message);
     if (this.msgHandler !== null) this.msgHandler(message);
     else this.queue.push(message);
   }
@@ -210,6 +213,8 @@ export class CastPresentationHandler {
   private readonly mirroring: SiteMirroringHooks | undefined;
   private readonly currentRoutes: (() => JoinableRoute[]) | undefined;
   private readonly token: string;
+  /** `CastMessageLogging`'s log, when the feature is on. */
+  private readonly messageLog: CastMessageLog | undefined;
   private readonly senders = new Map<number, SenderState>();
   private nextRequestId: number;
   private watchSeq = 0;
@@ -228,12 +233,15 @@ export class CastPresentationHandler {
     mirroring?: SiteMirroringHooks;
     /** The routes `MediaRouterDesktop::JoinRoute` knows (`GetCurrentRoutes`), for the desktop capture escalation guard. */
     currentRoutes?: () => JoinableRoute[];
+    /** `CastMessageLogging`: where the messages of a Cast route's connections are written; given only when the feature is on. */
+    messageLog?: CastMessageLog;
   }) {
     this.service = opts.service;
     this.dial = opts.dial;
     this.dialRoutesChanged = opts.dialRoutesChanged;
     this.mirroring = opts.mirroring;
     this.currentRoutes = opts.currentRoutes;
+    this.messageLog = opts.messageLog;
     this.token = opts.token ?? randomBytes(16).toString("hex");
     this.nextRequestId = 1 + Math.floor(Math.random() * (2 ** 30 - 1));
     if (this.dial !== undefined) {
@@ -697,6 +705,9 @@ export class CastPresentationHandler {
     const env = parseEnvelope(raw);
     if (env === null) return;
     if (env.clientId !== conn.clientId) return;
+    // CastSessionClientImpl::HandleParsedClientMessage logs once the client and (for a message that names one) the session match
+    const named = env.type === "app_message" || env.type === "v2_message" ? (env.message as { sessionId: string }).sessionId : undefined;
+    if (named === undefined || named === conn.sessionId) this.messageLog?.fromClient({ type: env.type, clientId: env.clientId, message: env.message });
     switch (env.type) {
       case "client_connect":
         return;
@@ -817,6 +828,11 @@ export class CastPresentationHandler {
     }
     // CastActivity::HandleLeaveSession closes the leaving clients' connections with CLOSED
     conn.end("closed", "closed");
+  }
+
+  /** @internal Called by Conn. */
+  logSentToClient(conn: Conn, message: string): void {
+    this.messageLog?.sentToClient({ clientId: conn.clientId, origin: conn.origin, sessionId: conn.sessionId }, message);
   }
 
   /** @internal Called by Conn. */
