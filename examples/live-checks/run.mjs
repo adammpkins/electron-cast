@@ -12,7 +12,7 @@ const electronDir = fileURLToPath(new URL("../../smoke/.out/electron/", import.m
 const [check, ...rest] = process.argv.slice(2);
 const script = { "dial-dedup": "dial-dedup.mjs", cast: "cast.mjs", parity: "parity.mjs" }[check];
 if (script === undefined) {
-  console.error("usage: npm run live:checks -- dial-dedup [--secs 60]\n       npm run live:checks -- cast --sink <device name> --test top|iframe-same|iframe-cross|sandbox-no-presentation|sandbox-presentation|default-presentation --yes [--secs 80]\n       npm run live:checks -- parity --sink <device name> --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling --yes [--secs 85] [--token-file <path>] [--logdir <dir>]");
+  console.error("usage: npm run live:checks -- dial-dedup [--secs 60]\n       npm run live:checks -- cast --sink <device name> --test top|iframe-same|iframe-cross|sandbox-no-presentation|sandbox-presentation|default-presentation --yes [--secs 80]\n       npm run live:checks -- parity --sink <device name> --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling|nonlocal-join|nonlocal-terminate --yes [--secs 85] [--token-file <path>] [--logdir <dir>]");
   process.exit(2);
 }
 const run = (command) => {

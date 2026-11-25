@@ -263,6 +263,8 @@ which joins a session it holds (no origin check either; `joinSession` of `mode: 
 status and registers the session it finds. The one difference from Chrome: the lookup runs on request instead of
 tracking every device continuously. The page must supply the id (Google's SDK stores nothing itself).
 
+Tried on a Nest Hub Max with a second sender (a Node script on its own connection, own sender id) that launched the Default Media Receiver and played a video. The route was listed with `isLocal` false, no member and the description "Default Media Receiver" (the status text), on the right sink. A page with the plain `chrome.cast` API (auto-join `ORIGIN_SCOPED`) had not joined it; `requestSessionById(id)` then reached the session listener through `reconnect("cast-session_<id>")`, media status reached the page and the route became local. When the other sender stopped the app the route went in about 0.3 s and the page's session listener got `isAlive` false with its connection terminated. A second run stopped the non-local route with `terminateRoute`, and the other sender's receiver status then showed the idle screen. Run with `npm run live:checks -- parity --test nonlocal-join` and `nonlocal-terminate`. Not tried: a session of another app than the Default Media Receiver, and a join from the framework API (`cast.framework`).
+
 ### Frames
 
 Presentation mode follows Chrome: the Presentation API is scoped to a frame. In Chromium,

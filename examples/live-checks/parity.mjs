@@ -1,11 +1,12 @@
 // Live checks of the Chrome-parity features, on ONE named device, no key presses.
-//   electron parity.mjs --sink "<device name>" --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling --yes [--secs 85]
+//   electron parity.mjs --sink "<device name>" --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling|nonlocal-join|nonlocal-terminate --yes [--secs 85]
 //        [--token-file <path>] [--logdir <dir>]
 // Same rules as cast.mjs: the only device ever selected is --sink, a casting run discovers nothing else (the other devices are
 // never even asked), the run refuses to start unless the device is idle, ends its own session and quits within --secs.
 // `sinks` is the one test that discovers every device (a sink exists only once its channel is open, as in Chrome); it launches
 // and selects nothing.
 import { app, BrowserWindow, MessageChannelMain, ipcMain, utilityProcess, webContents } from "electron";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,7 +24,7 @@ const t0 = Date.now();
 const out = (m) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(5)}] ${m}`);
 const here = (f) => fileURLToPath(new URL(f, import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const TESTS = ["wire", "close-leave", "close-stop", "token", "sinks", "issues", "site-mirror", "fling"];
+const TESTS = ["wire", "close-leave", "close-stop", "token", "sinks", "issues", "site-mirror", "fling", "nonlocal-join", "nonlocal-terminate"];
 if (!TESTS.includes(test)) { console.error(`pass --test ${TESTS.join("|")}`); process.exit(2); }
 if (SINK === "") { console.error("pass --sink <device name>: the one device this will cast to"); process.exit(2); }
 if (!args.includes("--yes")) { console.error("pass --yes: this casts to " + SINK); process.exit(2); }
@@ -92,6 +93,7 @@ const pageHtml = (kind, q) => `<!doctype html><meta charset=utf-8><title>${kind}
 const serve = () => createServer((req, res) => {
   const u = new URL(req.url, "http://x");
   if (u.pathname === "/sender.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/sender.js")));
+  if (u.pathname === "/join.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/join.js")));
   if (u.pathname === "/chromecast.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/chromecast.js")));
   if (u.pathname === "/page.html") return res.writeHead(200, { "content-type": "text/html" }).end(pageHtml(test, u.searchParams));
   res.writeHead(404).end();
@@ -124,6 +126,7 @@ const cast = createCastManager({
   },
 });
 let finished = false, sink = null;
+const cleanups = [];
 const issuesSeen = [];
 cast.registerIssuesObserver({
   onIssue: (i) => { issuesSeen.push({ at: Date.now() - t0, id: i.id, ...i.info }); out(`ISSUE onIssue ${JSON.stringify({ id: i.id, ...i.info })}`); },
@@ -141,6 +144,7 @@ const ok = (name, pass, detail) => { result.checks[name] = pass; out(`CHECK ${pa
 const end = async (code, why) => {
   if (finished) return; finished = true;
   out(`ending: ${why}`);
+  for (const c of cleanups) { try { await c(); } catch (e) { out(`cleanup: ${e.message}`); } }
   try { for (const r of cast.getRoutes().filter((r) => sink && r.sinkId === sink.id)) { out(`terminating route ${r.id.slice(0, 14)}`); await cast.terminateRoute(r.id); } } catch (e) { out(`terminate: ${e.message}`); }
   await sleep(1500);
   const left = cast.getRoutes().filter((r) => sink && r.sinkId === sink.id);
@@ -190,12 +194,14 @@ app.whenReady().then(async () => {
 
   if (test === "sinks") return sinksTest(sinkLog);
 
+  const nonLocal = test === "nonlocal-join" || test === "nonlocal-terminate";
   const chromecastMode = test === "issues";
   const win = new BrowserWindow({ width: 640, height: 400, show: mirrors, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, preload: here(chromecastMode ? ".out/preload-chromecast.cjs" : ".out/preload.cjs"), backgroundThrottling: false } });
   win.webContents.on("console-message", (...a) => { const m = typeof a[0]?.message === "string" ? a[0].message : String(a[2] ?? ""); if (m.startsWith("LIVE ")) out(`page ${m}`); });
   win.webContents.on("preload-error", (_e, p, e) => out(`PRELOAD ERROR ${p} ${e?.message}`));
   const q = new URLSearchParams();
   if (chromecastMode) q.set("script", "chromecast.js");
+  if (nonLocal) q.set("script", "join.js");
   if (mirrors) q.set("sdk", "0");
   await win.loadURL(`${oa}/page.html?${q}`);
   const wcId = win.webContents.id;
@@ -207,6 +213,8 @@ app.whenReady().then(async () => {
   const sessionUp = (ms) => pollFor(async () => { const s = await live(); return s.session && s.session.state === "SESSION_STARTED" ? s : (s.requestResult && s.requestResult !== "ok" ? s : null); }, ms);
   const routesOnSink = () => cast.getRoutes().filter((x) => x.sinkId === sink.id);
   const goneFromSink = (ms) => pollFor(async () => routesOnSink().length === 0, ms);
+
+  if (nonLocal) return nonLocalTest({ ev, ready, routesOnSink, goneFromSink });
 
   if (test === "wire" || test === "token" || test === "close-leave" || test === "close-stop") {
     ok("SDK ready", (await live()).ready === true);
@@ -362,6 +370,102 @@ app.whenReady().then(async () => {
     return end(null, "done");
   }
 }).catch((e) => { console.error(e); end(1, String(e)); });
+
+// A session another sender started, as a phone would start it: a plain Node script (other-sender.mjs) launches the Default Media
+// Receiver and plays flower.mp4 on the device. Chrome's CastActivityManager learns it from the receiver status
+// (OnSessionAddedOrUpdated -> AddNonLocalActivity: is_local false, description CastSession::GetRouteDescription), lets a page join it
+// by id alone (FindActivityForSessionJoin, "cast-session_<id>"; no origin check) but never by auto-join (FindActivityForAutoJoin
+// skips routes that are not local), and TerminateRoute stops it on the device.
+async function nonLocalTest({ ev, ready, routesOnSink, goneFromSink }) {
+  const jlive = async () => JSON.parse(await ev("JSON.stringify({ready:__live.ready,error:__live.error,sessions:__live.sessions,receivers:__live.receivers,media:__live.media,updates:__live.updates,conns:__live.conns})"));
+  ok("SDK ready on the page (chrome.cast.initialize, auto-join ORIGIN_SCOPED)", (await jlive()).ready === true, String(ready));
+  const lines = [];
+  let sessionInfo = null, mediaPlaying = false, stoppedByOther = false, childExit = null;
+  const budget = Math.max(10, Math.floor(secs - (Date.now() - t0) / 1000) - 3);
+  const child = spawn(process.execPath, [here("other-sender.mjs"), "--sink", SINK, "--secs", String(Math.min(90, budget))], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  child.stderr.on("data", (d) => out(`other sender stderr: ${String(d).trim()}`));
+  child.on("exit", (code) => { childExit = code; out(`other sender exited ${code}`); });
+  let buf = "";
+  child.stdout.on("data", (d) => {
+    buf += String(d);
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      try {
+        const m = JSON.parse(line);
+        lines.push(m);
+        if (m.ev !== "receiver-status") out(`OTHER ${line}`);
+        if (m.ev === "launched") sessionInfo = m;
+        if (m.ev === "media" && m.playerState === "PLAYING") mediaPlaying = true;
+        if (m.ev === "stopped") stoppedByOther = true;
+      } catch { out(`OTHER (raw) ${line}`); }
+    }
+  });
+  cleanups.push(async () => {
+    try { child.stdin.write("quit\n"); } catch { /* gone */ }
+    await pollFor(() => childExit !== null, 4000);
+    if (childExit === null) child.kill();
+  });
+  ok("the other sender launched CC1AD845", !!(await pollFor(() => sessionInfo, 25000)), JSON.stringify(sessionInfo));
+  if (!sessionInfo) return end(1, "the other sender did not start");
+  ok("the other sender's flower.mp4 reached PLAYING", !!(await pollFor(() => mediaPlaying, 25000)));
+  const sid = sessionInfo.sessionId;
+
+  // (a) the observer's routes
+  const route = await pollFor(() => routesOnSink().find((r) => r.id.includes(sid) || r.appId === APP_ID), 15000);
+  out(`ROUTE ${JSON.stringify(route)}`);
+  ok("(a) the observer lists a route for the other sender's session", !!route, route ? route.id : "none");
+  if (!route) return end(1, "no non-local route");
+  ok("(a) it is on the device (sink id and name)", route.sinkId === sink.id && route.sinkName === SINK, `${route.sinkId} ${route.sinkName}`);
+  ok("(a) isLocal is false and no page is a member", route.isLocal === false && (route.members ?? []).length === 0, `isLocal=${route.isLocal} members=${JSON.stringify(route.members)}`);
+  const known = lines.filter((m) => m.ev === "receiver-status").flatMap((m) => m.apps).filter((a) => a.sessionId === sid).pop();
+  const expected = (known?.statusText ?? "") !== "" ? known.statusText : sessionInfo.displayName;
+  ok("(a) the description is CastSession::GetRouteDescription (status text, else display name)", route.description === expected && route.description !== "", `route "${route.description}" expected "${expected}"`);
+  ok("(a) one route only on the device", routesOnSink().length === 1, String(routesOnSink().length));
+
+  if (test === "nonlocal-join") {
+    // (b) auto-join must not take it; joining by id is allowed for any origin
+    const before = await jlive();
+    ok("(b) the page's ORIGIN_SCOPED auto-join did not join the non-local session", before.sessions.length === 0 && before.conns.length === 0, JSON.stringify({ sessions: before.sessions.length, conns: before.conns.length }));
+    out(`page: chrome.cast.requestSessionById("${sid}") with a user gesture`);
+    await ev(`liveJoin(${JSON.stringify(sid)})`, true);
+    const joined = await pollFor(async () => (await jlive()).sessions.find((x) => x.sessionId === sid) ?? null, 20000);
+    const j1 = await jlive();
+    out(`page after the join: ${JSON.stringify(j1)}`);
+    ok("(b) requestSessionById reached the session listener with the session id", !!joined, JSON.stringify(joined));
+    ok("(b) the session is on the device, status connected, app CC1AD845", joined?.device === SINK && joined?.status === "connected" && joined?.appId === APP_ID, JSON.stringify(joined));
+    ok("(b) the join came through PresentationRequest.reconnect", j1.conns.some((c) => c.how === "reconnect"), JSON.stringify(j1.conns.map((c) => ({ how: c.how, urls: c.urls }))));
+    ok("(b) media status reached the page (a media object, PLAYING)", !!(await pollFor(async () => (await jlive()).media.some((m) => m.state === "PLAYING"), 15000)), JSON.stringify((await jlive()).media.slice(-3)));
+    const after = routesOnSink();
+    ok("(b) the route is local now (the page is a member), still one route", after.length === 1 && after[0].isLocal === true && after[0].members.length === 1, JSON.stringify(after.map((r) => ({ isLocal: r.isLocal, members: r.members }))));
+
+    // (c) the other sender ends it
+    out("the other sender stops the app");
+    const t = Date.now();
+    child.stdin.write("stop\n");
+    ok("(c) the route disappeared", !!(await goneFromSink(15000)), `${Date.now() - t} ms`);
+    const ended = await pollFor(async () => (await jlive()).updates.find((u) => u.alive === false) ?? null, 10000);
+    const j2 = await jlive();
+    out(`page after the stop: ${JSON.stringify({ updates: j2.updates, conns: j2.conns })}`);
+    ok("(c) the page's session update listener got isAlive=false (status stopped)", !!ended && ended.status === "stopped", JSON.stringify(j2.updates));
+    const connEnd = j2.conns.flatMap((c) => c.events).filter((e) => e.type === "terminate" || e.type === "close");
+    ok("(c) the page's PresentationConnection ended (terminate or close event)", connEnd.length > 0, JSON.stringify(connEnd));
+    ok("(c) the other sender's stop succeeded", !!(await pollFor(() => stoppedByOther, 3000)));
+  } else {
+    // (d) Electron stops it
+    out(`terminateRoute(${route.id.slice(0, 14)}) from Electron`);
+    const t = Date.now();
+    let res;
+    try { res = await cast.terminateRoute(route.id); } catch (e) { res = `threw ${e.message}`; }
+    out(`terminateRoute -> ${JSON.stringify(res)}`);
+    ok("(d) the route disappeared", !!(await goneFromSink(15000)), `${Date.now() - t} ms`);
+    const lastApps = () => lines.filter((m) => m.ev === "receiver-status").pop()?.apps;
+    const down = await pollFor(() => lastApps()?.every((a) => a.idle || a.sessionId !== sid), 10000);
+    ok("(d) the other sender's receiver status no longer lists the app (it stopped on the device)", !!down, JSON.stringify(lastApps()));
+  }
+  return end(null, "done");
+}
 
 // Sink order and validation: what the observer listed against what mDNS announced, read-only.
 async function sinksTest(sinkLog) {

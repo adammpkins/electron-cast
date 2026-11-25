@@ -27,6 +27,7 @@
   `AllowAllSitesToInitiateMirroring` started mirroring with a streaming delay of 300 ms (the OFFER carried it, about
   8,600 packets were sent and acknowledged in 30 s, and `terminate()` from the page ended the route); and a mirrored tab
   whose page's SDK auto-joined was replaced by a Default Media Receiver session.
+- **Sessions started by another sender, tested on a Nest Hub Max** (`npm run live:checks -- parity --test nonlocal-join` and `nonlocal-terminate`). A Node script on its own connection launched the Default Media Receiver and played `flower.mp4`. The route was listed as non-local (`isLocal` false, no member, Chrome's description, the right sink); a page's `ORIGIN_SCOPED` auto-join did not take it, `chrome.cast.requestSessionById` did, and media status reached the page; the other sender's stop removed the route and ended the page's session; and `terminateRoute` stopped the app on the device. No library change was needed.
 - **DIAL dedup tested with real Chromecasts.** With DIAL on, three Chromecasts that answer both mDNS and DIAL were each listed
   once over 60 s, as Cast sinks and never as DIAL sinks (the DIAL entry shows for about a second until the Cast channel
   opens and then goes, as in Chrome's `CastMediaSinkServiceImpl::OnChannelOpenSucceeded`); the other five devices were
