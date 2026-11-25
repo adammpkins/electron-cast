@@ -45,7 +45,8 @@
   `RemoveActivity`).
 - A Cast session launched by a page that is being mirrored now stops the mirroring app and waits for the receiver to answer
   the STOP before it sends the LAUNCH (`onSessionLaunched` is now `onSessionLaunching`, and may return a promise). Chrome
-  sends the two back to back; a Nest Hub Max answered a LAUNCH sent right behind the STOP with `LAUNCH_ERROR` `CANCELLED`.
+  sends the two back to back (`DoLaunchSession` terminates the frame's mirroring route first); a Nest Hub Max answered a
+  LAUNCH sent right behind the STOP, and a LAUNCH sent alone, with `LAUNCH_ERROR` `CANCELLED`.
 - A sandboxed iframe without `allow-presentation` can no longer construct a `PresentationRequest`: it throws Blink's
   `SecurityError` ("The document is sandboxed and lacks the 'allow-presentation' flag.") as
   `PresentationRequest::Create` does. A page cannot read its sandbox flags, so this is seen only for an iframe that is

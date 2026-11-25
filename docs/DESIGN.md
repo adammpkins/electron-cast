@@ -501,8 +501,14 @@ Two entry points, one rule (`CastActivityManager::JoinSession`, `cast_activity_m
 
 Differences: the sink is launched on whatever its capabilities are (Chrome's `ChooseAppId` only logs a mismatch) and
 without asking whether it has the app. The mirroring route is stopped before the LAUNCH is sent (`onSessionLaunching`), as
-`DoLaunchSession` does it: a version that waited until the new session was up was tried on a Nest Hub Max, and the receiver
-answered the LAUNCH it got while the mirroring app still ran with `LAUNCH_ERROR` `CANCELLED`. A route the receiver ended
+`DoLaunchSession` does it: `JoinSession` only launches when `GetSinkForMirroringActivity` found the frame's mirroring route
+in `routes_by_frame_`, so `DoLaunchSession` then finds that route there and calls `TerminateSession` on it, which sends the
+STOP, and sends the LAUNCH right after it without waiting. Deviation: electron-cast waits for the STOP to be answered
+before it sends the LAUNCH. Tried on a Nest Hub Max, Chrome's sequences all got `LAUNCH_ERROR` `CANCELLED` within 0.3 s:
+STOP then LAUNCH back to back, with and without the transport CLOSE sent first, and a LAUNCH alone with the mirroring app
+left to the receiver to replace (the `pending_activity_removal_` path of `LaunchSession`). Waiting for the STOP reply works
+(logs `live-parity/7-fling-order-stop-then-launch.log`, `chrome-sequence/fling-noclose.log` and `fling-launchonly.log` kept
+with the live-test run; passing run `7-fling.log`). A route the receiver ended
 itself (what a LAUNCH from another sender does) is dropped with no STOP or CLOSE, as `OnSessionRemoved` does
 (`MirroringActivity::onReceiverStatus`).
 
