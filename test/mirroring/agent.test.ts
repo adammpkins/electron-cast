@@ -609,7 +609,8 @@ test("agent: capture statistics are reported every five seconds", async () => {
   const a = startAgent();
   await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
   for (let i = 0; i < 40; i++) await a.capture(i * 133_333, { gapMs: 133 });
-  const logs = a.sent.filter((m) => m.t === "log") as { message: string }[];
+  // The first line is the track states at the start; the statistics follow.
+  const logs = (a.sent.filter((m) => m.t === "log") as { message: string }[]).filter((m) => !m.message.startsWith("capture: started"));
   assert.ok(logs.length >= 1);
   assert.match(logs[0]!.message, /^capture: [\d.]+ fps delivered, [\d.]+ fps kept, 0 dropped by the rate limit; capture interval p50 133\.3 ms/);
 });

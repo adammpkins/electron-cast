@@ -203,6 +203,10 @@ export const AGENT_SOURCE = String.raw`
     send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight, refresh: true });
   }
 
+  function trackStates(tracks) {
+    return tracks.length === 0 ? "none" : tracks.map((t) => t.readyState ?? "?").join(" ");
+  }
+
   // ResumeDevice restarts the capturer (FrameSinkVideoCaptureDevice::MaybeStartConsuming), and a restarted capturer
   // delivers a frame at once even when nothing on screen has changed: here the last one.
   function unfreeze() {
@@ -236,6 +240,7 @@ export const AGENT_SOURCE = String.raw`
         const display = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: displayConstraints(limits) });
         for (const t of display.getVideoTracks()) t.stop();
         const audioTracks = display.getAudioTracks();
+        send({ t: "log", message: "capture: system audio from getDisplayMedia, " + trackStates(audioTracks) });
         let videoTracks = [];
         try { videoTracks = (await acquire(false, true)).getVideoTracks(); }
         catch (err) { for (const t of audioTracks) t.stop(); throw err; }
@@ -293,6 +298,9 @@ export const AGENT_SOURCE = String.raw`
     }
     const video = stream.getVideoTracks()[0];
     const audio = stream.getAudioTracks()[0];
+    // Electron's capturer can hand over a track that is already ended (macOS system audio without the System Audio
+    // Recording permission) and say nothing, so the states are logged.
+    send({ t: "log", message: "capture: started, video " + trackStates(stream.getVideoTracks()) + ", audio " + trackStates(stream.getAudioTracks()) });
     if (m.source.kind === "desktop" && video && !m.video) video.stop();
     if (m.video && video) pumpVideo(video, m.video);
     else if (m.video) fail("video", "the capture has no video track");
