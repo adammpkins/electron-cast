@@ -33,7 +33,9 @@ await import("./build-preloads.mjs");
 
 // Even an empty value makes Electron run as plain Node, so remove it rather than blank it
 const { ELECTRON_RUN_AS_NODE: _unused, ...env } = process.env;
-const child = spawn(electron, [fileURLToPath(new URL("main.mjs", import.meta.url))], { cwd: root, stdio: "inherit", env });
+// `node smoke/run.mjs one-ua-main.mjs` runs another entry of this folder instead of the whole suite
+const entry = /^[\w-]+\.mjs$/.test(process.argv[2] ?? "") ? process.argv[2] : "main.mjs";
+const child = spawn(electron, [fileURLToPath(new URL(entry, import.meta.url))], { cwd: root, stdio: "inherit", env });
 // Backstop for a hang before main.mjs arms its own timeout
 let timedOut = false;
 const killer = setTimeout(() => {

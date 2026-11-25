@@ -1,11 +1,11 @@
 // Live checks of the Chrome-parity features, on ONE named device, no key presses.
-//   electron parity.mjs --sink "<device name>" --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling|nonlocal-join|nonlocal-terminate --yes [--secs 85]
+//   electron parity.mjs --sink "<device name>" --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|one-ua|fling|nonlocal-join|nonlocal-terminate --yes [--secs 85]
 //        [--token-file <path>] [--logdir <dir>]
 // Same rules as cast.mjs: the only device ever selected is --sink, a casting run discovers nothing else (the other devices are
 // never even asked), the run refuses to start unless the device is idle, ends its own session and quits within --secs.
 // `sinks` is the one test that discovers every device (a sink exists only once its channel is open, as in Chrome); it launches
 // and selects nothing.
-import { app, BrowserWindow, MessageChannelMain, ipcMain, utilityProcess, webContents } from "electron";
+import { app, BrowserWindow, MessageChannelMain, ipcMain, screen, utilityProcess, webContents } from "electron";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
@@ -24,7 +24,7 @@ const t0 = Date.now();
 const out = (m) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(5)}] ${m}`);
 const here = (f) => fileURLToPath(new URL(f, import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const TESTS = ["wire", "close-leave", "close-stop", "token", "sinks", "issues", "site-mirror", "fling", "nonlocal-join", "nonlocal-terminate"];
+const TESTS = ["wire", "close-leave", "close-stop", "token", "sinks", "issues", "site-mirror", "one-ua", "fling", "nonlocal-join", "nonlocal-terminate"];
 if (!TESTS.includes(test)) { console.error(`pass --test ${TESTS.join("|")}`); process.exit(2); }
 if (SINK === "") { console.error("pass --sink <device name>: the one device this will cast to"); process.exit(2); }
 if (!args.includes("--yes")) { console.error("pass --yes: this casts to " + SINK); process.exit(2); }
@@ -34,7 +34,7 @@ app.on("window-all-closed", () => {});
 const APP_ID = "CC1AD845";
 const STREAMING_APP = "0F5096E8";
 const casting = test !== "sinks";
-const mirrors = test === "site-mirror" || test === "fling";
+const mirrors = test === "site-mirror" || test === "one-ua" || test === "fling";
 
 // What goes over the wire to and from the device, so a run can show the JSON that was sent. Heartbeats and device
 // authentication are left out; nothing here is a credential.
@@ -90,8 +90,20 @@ const pageHtml = (kind, q) => `<!doctype html><meta charset=utf-8><title>${kind}
     g.fillStyle = "#fff"; g.font = "64px sans-serif"; g.fillText("electron-cast live check: ${kind}", 80, 300); g.fillText("frame " + n, 80, 400); requestAnimationFrame(draw); })();
 </script>
 <script src="/${q.get("script") ?? "sender.js"}"></script>`;
+// The page a presentation URL names (the `one-ua` test): the library renders it in an offscreen tab and mirrors that tab.
+// It makes no sound. Each message from the controlling page is drawn and echoed.
+const RECEIVER_HTML = `<!doctype html><meta charset=utf-8><title>electron-cast presentation</title><body style="margin:0;background:#103">
+<canvas id=c width=1280 height=720 style="width:100vw;height:100vh;display:block"></canvas>
+<script>
+  const g = document.getElementById("c").getContext("2d"); let n = 0, last = "(no message yet)";
+  (function draw() { n++; g.fillStyle = "hsl(" + (280 + n * 2 % 60) + ",60%,35%)"; g.fillRect(0, 0, 1280, 720);
+    g.fillStyle = "#fff"; g.font = "56px sans-serif"; g.fillText("electron-cast presentation page", 80, 240); g.fillText("frame " + n + ", " + innerWidth + "x" + innerHeight, 80, 340); g.fillText(last, 80, 440); requestAnimationFrame(draw); })();
+  const hook = (conn) => { conn.onmessage = (e) => { last = String(e.data); conn.send("echo:" + e.data + ":" + innerWidth + "x" + innerHeight); }; };
+  navigator.presentation.receiver.connectionList.then((list) => { list.connections.forEach(hook); list.onconnectionavailable = (e) => hook(e.connection); });
+</script>`;
 const serve = () => createServer((req, res) => {
   const u = new URL(req.url, "http://x");
+  if (u.pathname === "/receiver.html") return res.writeHead(200, { "content-type": "text/html" }).end(RECEIVER_HTML);
   if (u.pathname === "/sender.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/sender.js")));
   if (u.pathname === "/join.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/join.js")));
   if (u.pathname === "/chromecast.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(readFileSync(here("pages/chromecast.js")));
@@ -117,7 +129,7 @@ const cast = createCastManager({
   allowOrigin: (o) => origins.has(o),
   ...(casting ? { discovery: new OnlyDevice(new CastDiscovery(), SINK) } : {}),
   ...(store ? { receiverIdHashToken: store } : {}),
-  ...(mirrors ? { mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app }, log: (level, m) => out(`mirroring ${level}: ${m}`) } } : {}),
+  ...(mirrors ? { mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app, screen }, log: (level, m) => out(`mirroring ${level}: ${m}`) } } : {}),
   selectDevice: async (devices, request) => {
     const d = devices.find((x) => x.name === SINK);
     selects.push({ origin: request.origin, appId: request.appId, picked: d ? d.name : null, offered: devices.length });
@@ -343,6 +355,43 @@ app.whenReady().then(async () => {
     const s3 = await live();
     out(`connections the page saw: ${JSON.stringify(s3.conns)}`);
     ok("the page's connection ended as terminated", s3.conns.flatMap((c) => c.events).some((e) => e.type === "terminate"), JSON.stringify(s3.conns.flatMap((c) => c.events)));
+    return end(null, "done");
+  }
+
+  // A presentation URL that is not a Cast URL, on a Cast device: Chrome's 1-UA mode (CastMediaSource::FromMediaSource makes
+  // it a tab mirroring source; MirroringActivity renders it in an OffscreenTab and mirrors that).
+  if (test === "one-ua") {
+    const url = `${oa}/receiver.html`;
+    const tabOf = () => webContents.getAllWebContents().find((wc) => wc.getURL().startsWith(url));
+    cast.setMirroringStatsEnabled(true);
+    const avail = await pollFor(async () => ev(`liveAvailability(${JSON.stringify(url)})`), 10000);
+    ok("the page sees the device as available for an ordinary presentation URL", avail === true, url);
+    await ev(`liveSiteStart(${JSON.stringify(url)})`, true);
+    const route = await pollFor(async () => routesOnSink().find((r) => r.mediaSource === url), 30000);
+    out(`start() -> ${await ev("window.__live.siteResult")}; routes ${JSON.stringify(routesOnSink().map((r) => ({ id: r.id.slice(0, 14), src: r.mediaSource, desc: r.description, app: r.appId })))}`);
+    if (!route) { ok("a route started for the presentation URL", false); return end(1, "no route"); }
+    ok('the route is "Presenting (127.0.0.1)"', route.description === "Presenting (127.0.0.1)", route.description);
+    const connected = await pollFor(async () => (await ev("window.__live.siteConn ? window.__live.siteConn.state : null")) === "connected", 20000);
+    ok("the page's connection connected", connected === true, String(await ev("window.__live.siteConn && window.__live.siteConn.state")));
+    const tab = tabOf();
+    const tabWindow = tab ? BrowserWindow.fromWebContents(tab) : null;
+    const size = tabWindow ? tabWindow.getContentSize().join("x") : "none";
+    ok("the URL is rendered in a hidden, muted tab", !!tab && tabWindow.isVisible() === false && tab.isAudioMuted() === true, `size ${size}`);
+    await ev('window.__live.siteGot = []; window.__live.siteConn.onmessage = (e) => window.__live.siteGot.push(e.data); window.__live.siteConn.send("hello from the controller"); 1');
+    const echo = await pollFor(async () => (await ev("window.__live.siteGot[0]")) ?? null, 10000);
+    ok("a message reached the presented page and its answer came back", echo === `echo:hello from the controller:${size}`, String(echo));
+    const answer = await pollFor(async () => wire.find((m) => m.dir === "recv" && m.ns === "webrtc" && m.payload.includes('"ANSWER"')) ?? null, 15000);
+    ok("the device answered the OFFER", !!answer && /"result":"ok"/.test(answer.payload), answer ? trim(answer.payload).slice(0, 200) : "none");
+    out("presenting for 30 s: the TV shows the purple page with a running frame counter and the message");
+    for (let i = 0; i < 6; i++) { await sleep(5000); const s = cast.getMirroringStats(route.id); out(`stats ${JSON.stringify({ video: s.video && { ENQUEUE_FPS: s.video.ENQUEUE_FPS, NUM_FRAMES_CAPTURED: s.video.NUM_FRAMES_CAPTURED, NUM_PACKETS_SENT: s.video.NUM_PACKETS_SENT, NUM_PACKETS_RECEIVED: s.video.NUM_PACKETS_RECEIVED } })}`); }
+    const s = cast.getMirroringStats(route.id);
+    ok("frames of the tab flow (video packets sent and acknowledged)", Number(s.video?.NUM_PACKETS_SENT) > 100 && Number(s.video?.NUM_PACKETS_RECEIVED) > 0, JSON.stringify({ sent: s.video?.NUM_PACKETS_SENT, received: s.video?.NUM_PACKETS_RECEIVED, captured: s.video?.NUM_FRAMES_CAPTURED }));
+    ok("the tab is still hidden while it is captured", !!tabOf() && tabOf().isBeingCaptured() === true && tabWindow.isVisible() === false);
+    out("terminating from the page (connection.terminate())");
+    await ev("liveSiteTerminate()", true);
+    ok("route gone after the page terminated it", !!(await goneFromSink(10000)));
+    ok("the offscreen tab is destroyed", !!(await pollFor(async () => tabOf() === undefined, 5000)));
+    ok("the page's connection ended as terminated", !!(await pollFor(async () => (await ev("window.__live.siteConn.state")) === "terminated", 5000)));
     return end(null, "done");
   }
 
