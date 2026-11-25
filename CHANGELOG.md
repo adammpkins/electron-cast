@@ -41,6 +41,16 @@
   looks like a regression in Chromium; it is matched on purpose.
 - **Desktop audio on Linux needs `--enable-features=PulseaudioLoopbackForCast`**, as in Chrome: without it `withAudio` is
   ignored for a desktop capture and the sinks query does not ask for audio. Windows and macOS are unchanged.
+- **A presentation URL that is not a Cast URL can be presented on a Cast device** (Chrome's 1-UA mode,
+  `CastMediaSource::FromMediaSource`, `OffscreenTab`). With the `mirroring` option on, a page's `PresentationRequest` for
+  an https URL (or http on localhost) is available on every Cast sink that has a streaming app. `start()` opens the URL
+  in a hidden, muted window with `navigator.presentation.receiver`, mirrors it to the device at the primary display's
+  size (16:9, at most 1920x1080), and connects the page to it; the route is `Presenting (<host>)`. It was
+  `NotSupportedError`. There is no option to set; pass `screen` in `mirroring.electron` for Chrome's capture size. The
+  hidden window's session has no permissions: the presented page cannot capture the screen, the camera or the
+  microphone. Checked against the fake receiver on Windows (`npm run smoke:one-ua`); a real device is checked with
+  `npm run live:checks -- parity --test one-ua`. See
+  [DESIGN.md](docs/DESIGN.md#presentation-urls-on-a-cast-device).
 
 ### Fixed
 

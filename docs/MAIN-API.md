@@ -431,6 +431,29 @@ device that mDNS also finds is a second sink until the same-address rule removes
 | `AccessCodeCastDisabledError` | What `addSinkByAddress` rejects with unless access code casting is enabled. |
 | `createAccessCodeSink(device)` | Chrome's checks on a device, without opening anything: the sink it would be, or why it cannot be one. |
 
+## Presentation URLs on a Cast device
+
+With `mirroring` on (next section) and presentation mode, a page's `PresentationRequest` for an ordinary URL (https, or
+http on localhost) can start on a Cast device too, as in Chrome (its 1-UA mode): the library opens the URL in a hidden,
+muted window of its own, mirrors that window to the device, and connects the page to it. The presented page gets
+`navigator.presentation.receiver`, as on a wired display; the page that started it gets a `PresentationConnection` whose
+messages go to the presented page, and `terminate()` ends the route. There is nothing to switch on and no new method:
+
+- `getAvailability()` for such a URL is true when a Cast sink has a streaming app. Sinks queries with
+  `presentationUrls` list those sinks.
+- The route's `description` is `Presenting (<host>)`, its `castMode` is `"presentation"`, its `mediaSource` is the URL,
+  and it ends on `terminateRoute`, on the page's `terminate()`, when the presented page calls `window.close()`, or when
+  the device stops the app.
+- Pass `screen` in `mirroring.electron` so the hidden window is the primary display's size (16:9, at most 1920x1080), as
+  Chrome's is; without it the size is 1920x1080.
+- The hidden window has its own in-memory session with no permissions, no downloads, no popups and no input, and it is
+  never shown. It is muted locally; its sound plays on the device.
+- An app that passes `mirroring: { createService }` instead of `electron` gets this only when it also passes
+  `openOffscreenTab`, a function that opens the request's `url` at the request's `size` as a presentation receiver and
+  returns `{ webContentsId, destroy }`. That is for tests and unusual hosts; the type is on `CastManagerOptions`.
+
+Rules and their Chromium counterparts: [DESIGN.md](DESIGN.md#presentation-urls-on-a-cast-device).
+
 ## Tab and desktop mirroring
 
 `startCasting` also starts Chrome's other two cast modes, tab and desktop mirroring ("Cast tab" and "Cast screen"):
