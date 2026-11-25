@@ -132,6 +132,11 @@ export interface MediaRoute {
   parkedSenders: number[];
   /** True when no page is attached to a local route: the route lives on in the device only. Always false when `isLocal` is false. */
   parked: boolean;
+  /**
+   * Mirroring routes only (Chrome: `UIMediaSink::freeze_info`, from `MirroringMediaControllerHost::CanFreeze` and
+   * `IsFrozen`): whether the route's video can be frozen on its last frame, and whether it is.
+   */
+  freezeInfo?: { canFreeze: boolean; isFrozen: boolean };
 }
 
 /** Chrome: `MediaRoutesObserver`. */
@@ -208,6 +213,23 @@ export interface CastManagerApi {
    * `close()` on the controller to stop the reports.
    */
   getMediaController(routeId: string, observer?: MediaStatusObserver): MediaController;
+  /**
+   * `CastMirroringServiceHost::SwitchMirroringSourceTab`, which Chrome runs from the "Share this tab instead" control
+   * of its tab-sharing UI: a `tab_mirror` route carries on mirroring `webContentsId` in the same session, with the
+   * same route id and no renegotiation. The new page is muted locally and the old one is unmuted (if the library
+   * muted it); another mirroring route of the new page is terminated, since a page has one route
+   * (`CastActivityManager::OnSourceChanged`). Throws `route_not_found`, or `unable_to_cast` for a desktop route, a
+   * route that is still launching, or a page that cannot be captured. The route observers hear of the change.
+   */
+  switchMirroringSourceTab(routeId: string, webContentsId: number): void;
+  /**
+   * `MediaRouterUI::FreezeRoute`: pause a mirroring route's video on its last frame (the audio goes on). Takes effect
+   * after 500 ms, and a second call within that time is ignored (`MirroringMediaControllerHostImpl::kPauseDelay`).
+   * Does nothing while `freezeInfo.canFreeze` is false, or for a route that is not a mirroring route.
+   */
+  freezeRoute(routeId: string): void;
+  /** `MediaRouterUI::UnfreezeRoute`: resume a frozen route at once. */
+  unfreezeRoute(routeId: string): void;
 }
 
 /**
@@ -232,6 +254,10 @@ export interface SessionHost extends Omit<MediaControllerHost, "hasRoute"> {
   detachSession(sessionId: string): BridgeResult;
   /** Mirroring routes; present when the manager was given the `mirroring` option. */
   startCasting?(sinkId: string, options: StartMirroringCastingOptions): Promise<MediaRoute>;
+  switchMirroringSourceTab?(routeId: string, webContentsId: number): void;
+  /** False when the route is not a mirroring route. */
+  freezeRoute?(routeId: string): boolean;
+  unfreezeRoute?(routeId: string): boolean;
 }
 
 /** A Map that reports new and removed keys, so the service needs no per-site notification. */
@@ -531,6 +557,21 @@ export function createManagerApi(
       if (typeof o?.webContentsId !== "number") throw new TypeError("options.webContentsId must be a number");
       if (mode !== undefined && mode !== "presentation") throw new RangeError(`unsupported cast mode: ${String(mode)}`);
       return presentation.start(o.webContentsId, sinkId);
+    },
+    switchMirroringSourceTab(routeId, webContentsId) {
+      if (typeof webContentsId !== "number") throw new TypeError("webContentsId must be a number");
+      if (!Number.isInteger(webContentsId) || webContentsId < 0) throw new RangeError("webContentsId must be a non-negative integer");
+      need(routeId);
+      if (host.switchMirroringSourceTab === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
+      host.switchMirroringSourceTab(routeId, webContentsId);
+    },
+    freezeRoute(routeId) {
+      need(routeId);
+      host.freezeRoute?.(routeId);
+    },
+    unfreezeRoute(routeId) {
+      need(routeId);
+      host.unfreezeRoute?.(routeId);
     },
     getRouteController(routeId) {
       need(routeId);

@@ -114,7 +114,47 @@ async function runScenario({ pass, fail, engineModulePath, mode }) {
   assert.ok(s.videoKeyFrames >= 1);
   pass(`fake receiver decrypted and validated VP8 and Opus frames from the captured ${mode}`);
 
+  let page2;
+  if (mode === "tab") {
+    // Switch the mirrored tab and freeze the picture on a real capture, as Chrome's tab-sharing UI and freeze control do.
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    page2 = new BrowserWindow({ width: 640, height: 360, show: false, webPreferences: { backgroundThrottling: false } });
+    await page2.loadURL(`data:text/html;base64,${Buffer.from(MIRROR_PAGE.replace("hsl(", "hsl(180+").replace("frame ", "other tab ")).toString("base64")}`);
+    assert.equal(page.webContents.isAudioMuted(), true, "the mirrored tab is muted locally");
+    const offer = receiver.lastOffer;
+    const before = s.validVideoFrames;
+    cast.switchMirroringSourceTab(route.id, page2.webContents.id);
+    assert.equal(page.webContents.isAudioMuted(), false, "the old tab is audible again");
+    assert.equal(page2.webContents.isAudioMuted(), true, "the new tab is muted locally");
+    await wait(3000);
+    console.log(`smoke: [tab] after the switch: ${s.validVideoFrames - before} more valid VP8 frames, audio ${s.validAudioFrames}, invalid ${s.invalidFrames}`);
+    assert.ok(s.validVideoFrames - before >= 20, `only ${s.validVideoFrames - before} frames after the switch`);
+    assert.equal(receiver.lastOffer, offer, "the switch renegotiated");
+    assert.equal(s.invalidFrames, 0);
+    const [switched] = cast.getRoutes();
+    assert.equal(switched.id, route.id);
+    assert.deepEqual(switched.members, [page2.webContents.id]);
+    pass("switching the source tab kept the session and streamed frames from the new tab");
+
+    assert.equal(switched.freezeInfo.canFreeze, true);
+    cast.freezeRoute(route.id);
+    await wait(1200);
+    assert.equal(cast.getRoutes()[0].freezeInfo.isFrozen, true);
+    const frozenAt = { video: s.videoFrames, audio: s.audioFrames };
+    await wait(1500);
+    assert.ok(s.videoFrames - frozenAt.video <= 2, `${s.videoFrames - frozenAt.video} video frames while frozen`);
+    assert.ok(s.audioFrames - frozenAt.audio >= 100, "audio stopped while frozen");
+    cast.unfreezeRoute(route.id);
+    await wait(2000);
+    assert.equal(cast.getRoutes()[0].freezeInfo.isFrozen, false);
+    assert.ok(s.videoFrames - frozenAt.video >= 15, `${s.videoFrames - frozenAt.video} video frames after unfreezing`);
+    assert.equal(s.invalidFrames, 0);
+    pass("freezing stopped the video (audio went on) and unfreezing resumed it");
+  }
+
   await cast.terminateRoute(route.id);
+  if (page2 !== undefined) assert.equal(page2.webContents.isAudioMuted(), false, "the mirrored tab is unmuted when the route ends");
+  page2?.destroy();
   await new Promise((r) => setTimeout(r, 200));
   assert.deepEqual(cast.getRoutes(), []);
   assert.ok(calls.includes("stop mirror-session"), `calls: ${calls}`);

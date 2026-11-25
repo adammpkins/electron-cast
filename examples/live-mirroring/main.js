@@ -4,7 +4,9 @@
 //   npm run desktop -- "Living Room"  mirrors the primary screen, with system audio where the OS allows ("Casting screen")
 // A dialog asks before anything starts, and closing the window or pressing Ctrl+C ends the route (the TV returns to
 // its idle screen). Add --extra-codecs to let the sender offer VP9 as well as VP8.
-import { app, BrowserWindow, MessageChannelMain, desktopCapturer, dialog, ipcMain, utilityProcess, webContents } from "electron";
+// In tab mode a second, differently coloured window opens too. While casting, press in the terminal (or use the
+// "Cast" menu): s = switch the mirrored tab to the other window (and back), f = freeze the picture, u = unfreeze.
+import { app, BrowserWindow, Menu, MessageChannelMain, desktopCapturer, dialog, ipcMain, utilityProcess, webContents } from "electron";
 import { createCastManager } from "electron-cast/main";
 
 const args = process.argv.slice(app.isPackaged ? 1 : 2);
@@ -15,18 +17,21 @@ const value = (name) => {
 };
 const mode = value("mode") ?? "tab";
 
-const DEMO = `<!doctype html><meta charset=utf-8><title>electron-cast mirroring demo</title>
+const demo = (hue, label, tone) => `<!doctype html><meta charset=utf-8><title>electron-cast mirroring demo</title>
 <body style="margin:0;background:#123"><canvas id=c width=1280 height=720 style="width:100%"></canvas>
 <script>
   const g = document.getElementById("c").getContext("2d"); let n = 0;
-  (function draw() { n++; g.fillStyle = "hsl(" + (n * 2 % 360) + ",60%,40%)"; g.fillRect(0, 0, 1280, 720);
-    g.fillStyle = "#fff"; g.font = "64px sans-serif"; g.fillText("electron-cast mirroring demo", 120, 300); g.fillText("frame " + n, 120, 400);
+  (function draw() { n++; g.fillStyle = "hsl(" + (${hue} + n * 2 % 90) + ",60%,40%)"; g.fillRect(0, 0, 1280, 720);
+    g.fillStyle = "#fff"; g.font = "64px sans-serif"; g.fillText("${label}", 120, 300); g.fillText("frame " + n, 120, 400);
     requestAnimationFrame(draw); })();
   document.body.addEventListener("click", () => {
-    const ctx = new AudioContext(); const o = ctx.createOscillator(); const gain = ctx.createGain(); gain.gain.value = 0.05;
+    const ctx = new AudioContext(); const o = ctx.createOscillator(); o.frequency.value = ${tone}; const gain = ctx.createGain(); gain.gain.value = 0.05;
     o.connect(gain).connect(ctx.destination); o.start();
   }, { once: true });
 </script>`;
+
+const DEMO = demo(200, "electron-cast mirroring demo (window A)", 440);
+const DEMO_B = demo(0, "electron-cast mirroring demo (window B)", 660);
 
 async function main() {
   await app.whenReady();
@@ -71,6 +76,14 @@ async function main() {
   win.loadURL(`data:text/html;base64,${Buffer.from(DEMO).toString("base64")}`);
   await new Promise((r) => win.webContents.once("did-finish-load", r));
 
+  // The tab to switch to.
+  let other;
+  if (mode !== "desktop") {
+    other = new BrowserWindow({ width: 960, height: 540, x: 60, y: 60, title: "electron-cast mirroring demo (B)" });
+    other.loadURL(`data:text/html;base64,${Buffer.from(DEMO_B).toString("base64")}`);
+    await new Promise((r) => other.webContents.once("did-finish-load", r));
+  }
+
   const { response } = await dialog.showMessageBox(win, {
     type: "question",
     message: `Start ${mode === "desktop" ? "mirroring your screen" : "mirroring this window"} to "${sink.name}"?`,
@@ -109,12 +122,55 @@ async function main() {
     },
   });
 
+  // Switching and freezing, as Chrome's "share this tab instead" and freeze controls do them.
+  let current = win;
+  const switchTab = () => {
+    if (other === undefined) return console.log("Only tab mode can switch.");
+    const next = current === win ? other : win;
+    try {
+      cast.switchMirroringSourceTab(route.id, next.webContents.id);
+      current = next;
+      console.log(`Now mirroring window ${current === win ? "A" : "B"} (route id unchanged: ${cast.getRoutes()[0]?.id === route.id}).`);
+    } catch (err) {
+      console.error(`Could not switch: ${err.code ?? ""} ${err.message}`);
+    }
+  };
+  const freeze = () => {
+    console.log(`freezeInfo before: ${JSON.stringify(cast.getRoutes()[0]?.freezeInfo)}`);
+    cast.freezeRoute(route.id);
+    setTimeout(() => console.log(`freezeInfo after 0.7 s: ${JSON.stringify(cast.getRoutes()[0]?.freezeInfo)}`), 700);
+  };
+  const unfreeze = () => {
+    cast.unfreezeRoute(route.id);
+    console.log(`freezeInfo: ${JSON.stringify(cast.getRoutes()[0]?.freezeInfo)}`);
+  };
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: "Cast", submenu: [
+      { label: "Switch tab (s)", accelerator: "CmdOrCtrl+Shift+S", click: switchTab },
+      { label: "Freeze (f)", accelerator: "CmdOrCtrl+Shift+F", click: freeze },
+      { label: "Unfreeze (u)", accelerator: "CmdOrCtrl+Shift+U", click: unfreeze },
+    ] },
+  ]));
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (text) => {
+    for (const key of text) {
+      if (key === "s") switchTab();
+      else if (key === "f") freeze();
+      else if (key === "u") unfreeze();
+    }
+  });
+  console.log("Keys: s = switch tab, f = freeze, u = unfreeze (or the Cast menu).");
+
   const stop = async () => {
     await cast.terminateRoute(route.id).catch(() => {});
     await cast.dispose();
     app.quit();
   };
   win.on("closed", stop);
+  other?.on("closed", () => {
+    // Closing the page being mirrored ends capture in Chrome; closing the idle one changes nothing.
+    if (current === other) stop();
+  });
   process.on("SIGINT", stop);
   app.on("window-all-closed", () => {});
 }

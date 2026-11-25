@@ -24,8 +24,16 @@ function startAgent() {
   let listener: ((e: { data: unknown; ports: unknown[] }) => void) | undefined;
   let now = 1000;
   const encoders: FakeEncoder[] = [];
-  const waiters: ((r: { value?: FakeFrame; done: boolean }) => void)[] = [];
-  const queued: FakeFrame[] = [];
+  // One queue per captured track: a switched tab has its own track, and a stopped track ends its stream of frames.
+  interface FakeTrack { stopped: boolean; stop(): void; queued: FakeFrame[]; waiters: ((r: { value?: FakeFrame; done: boolean }) => void)[] }
+  const tracks: FakeTrack[] = [];
+  const refuse = { next: false };
+  const requests: { video?: { mandatory?: Record<string, unknown> } }[] = [];
+  const makeTrack = (): FakeTrack => {
+    const t: FakeTrack = { stopped: false, queued: [], waiters: [], stop() { t.stopped = true; for (const w of t.waiters.splice(0)) w({ done: true }); } };
+    tracks.push(t);
+    return t;
+  };
 
   class FakeEncoder {
     static async isConfigSupported() { return { supported: true }; }
@@ -44,12 +52,16 @@ function startAgent() {
     }
   }
 
-  const track = { stop() {} };
   const context = createContext({
     window: { addEventListener: (_: string, l: typeof listener) => { listener = l; } },
     performance: { timeOrigin: 0, now: () => now },
-    navigator: { mediaDevices: { getUserMedia: async () => ({ getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] }) } },
-    MediaStreamTrackProcessor: class { readable = { getReader: () => ({ read: () => queued.length > 0 ? Promise.resolve({ value: queued.shift(), done: false }) : new Promise((r) => waiters.push(r)) }) }; },
+    navigator: { mediaDevices: { getUserMedia: async (constraints: (typeof requests)[number]) => { requests.push(constraints); if (refuse.next) { refuse.next = false; throw new Error("denied"); } const track = makeTrack(); return { getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] }; } } },
+    MediaStreamTrackProcessor: class {
+      readable: { getReader(): { read(): Promise<{ value?: FakeFrame; done: boolean }> } };
+      constructor({ track }: { track: FakeTrack }) {
+        this.readable = { getReader: () => ({ read: () => track.stopped ? Promise.resolve({ done: true }) : track.queued.length > 0 ? Promise.resolve({ value: track.queued.shift(), done: false }) : new Promise((r) => track.waiters.push(r)) }) };
+      }
+    },
     VideoEncoder: FakeEncoder,
     ArrayBuffer, Uint8Array, Map, String, Math, Promise,
   });
@@ -58,14 +70,15 @@ function startAgent() {
 
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    sent, encoders, settle,
+    sent, encoders, settle, tracks, requests, refuse,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
     capture: async (ts: number) => {
       now += 33;
       const f = frame(ts);
-      const w = waiters.shift();
-      if (w) w({ value: f, done: false }); else queued.push(f);
+      const track = tracks.at(-1)!;
+      const w = track.waiters.shift();
+      if (w) w({ value: f, done: false }); else track.queued.push(f);
       await settle();
     },
     rtps: () => sent.filter((m) => m.t === "frame").map((m) => (m as { rtp: number }).rtp),
@@ -189,4 +202,85 @@ test("agent: a refresh frame on a static screen is stamped with the elapsed time
   // 33 ms passed between the capture's reference time and the first refresh request, then 200, then 50.
   assert.ok(Math.abs(second! - first - 200 * 90) < 90, `second ${second! - first}`);
   assert.ok(Math.abs(third! - second! - 50 * 90) < 90, `third ${third! - second!}`);
+});
+
+test("agent: a frozen device delivers nothing and ignores refresh requests; unfreezing sends the last frame again, and capture goes on", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0);
+  assert.equal(a.rtps().length, 1);
+  await a.command({ t: "freeze" });
+  await a.capture(33_000);
+  await a.capture(66_000);
+  a.advance(300);
+  await a.command({ t: "refresh" });
+  assert.equal(a.rtps().length, 1, "no frame while frozen, from capture or from a refresh request");
+  a.advance(100);
+  await a.command({ t: "unfreeze" });
+  const rtps = a.rtps();
+  assert.equal(rtps.length, 2, "a restarted capturer delivers a frame at once");
+  assert.ok(rtps[1]! > rtps[0]! + 400 * 90 - 90, `stamped with the time that passed: ${rtps[1]! - rtps[0]!}`);
+  await a.capture(99_000);
+  assert.equal(a.rtps().length, 3, "capture goes on");
+  await a.command({ t: "unfreeze" });
+  assert.equal(a.rtps().length, 3, "unfreezing a device that is not frozen does nothing");
+});
+
+test("agent: a tab switch captures the new source with the same limits and carries the RTP timeline and encoder over", async () => {
+  const a = startAgent();
+  const video = { width: 640, height: 360, frameRate: 30 };
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "old-tab" }, video });
+  await a.capture(5_000_000);
+  await a.capture(5_033_000);
+  await a.command({ t: "encode", rtp: a.rtps()[1]! });
+  const lastRtp = a.rtps()[1]!;
+  await a.command({ t: "freeze" });
+  await a.command({ t: "switch", source: { kind: "tab", mediaSourceId: "new-tab" }, video: true, audio: false });
+  assert.equal(a.requests.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(a.requests[1]!.video!.mandatory)), { chromeMediaSource: "tab", chromeMediaSourceId: "new-tab", maxWidth: 640, maxHeight: 360, maxFrameRate: 30 });
+  assert.equal(a.tracks[0]!.stopped, true, "the old tab's capture ends");
+  assert.equal(a.tracks[1]!.stopped, false);
+  // The refresh of the old tab's last frame must not be sent as the new tab's.
+  a.advance(500);
+  await a.command({ t: "refresh" });
+  assert.equal(a.rtps().length, 2);
+  // The new capture's clock starts elsewhere; its first frame continues 1 ms after the last frame sent, and it is not frozen.
+  await a.capture(100);
+  await a.capture(33_100);
+  const [first, second] = a.rtps().slice(2);
+  assert.equal(first, lastRtp + 90);
+  assert.equal(second! - first!, 33 * 90 - 0);
+  await a.command({ t: "encode", rtp: first! });
+  assert.equal(a.encoders.length, 1, "the session's encoder carries on (same frame size)");
+  assert.equal(a.encoders[0]!.encodes.map((e) => e.keyFrame).filter(Boolean).length, 1, "no new key frame is forced by a switch");
+});
+
+test("agent: a tab that cannot be captured is reported as a video capture error and the old capture is not touched", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  a.refuse.next = true;
+  await a.command({ t: "switch", source: { kind: "tab", mediaSourceId: "gone" }, video: true, audio: false });
+  assert.ok(a.sent.some((m) => m.t === "error" && m.where === "video" && m.message.includes("denied")));
+  assert.equal(a.tracks[0]!.stopped, false);
+});
+
+test("port backend: a switch is one agent message for both streams with the new source, and nothing is sent before capture started", async () => {
+  const port = new FakePort();
+  const backend = new PortBackend(port, { kind: "tab", mediaSourceId: "old" });
+  backend.switchVideoCaptureHost();
+  await Promise.resolve();
+  assert.equal(port.out.length, 0, "no capture yet: the start will carry the new source");
+  backend.startVideoCapture({ width: 640, height: 360, frameRate: 30 } as never, { insertVideoFrame() {}, onCaptureError() {} });
+  backend.startAudioCapture({ sampleRate: 48000, channels: 2, framesPerBuffer: 480 }, { insertAudio: () => true, onCaptureError() {} });
+  await Promise.resolve();
+  assert.deepEqual(port.out.map((m) => m.t), ["start"]);
+  assert.deepEqual((port.out[0] as { source: unknown }).source, { kind: "tab", mediaSourceId: "old" });
+  backend.setSource({ kind: "tab", mediaSourceId: "new" });
+  backend.switchVideoCaptureHost();
+  backend.restartAudioCapture();
+  await Promise.resolve();
+  assert.deepEqual(port.out.slice(1), [{ t: "switch", source: { kind: "tab", mediaSourceId: "new" }, video: true, audio: true }]);
+  backend.suspendVideoDevice();
+  backend.resumeVideoDevice();
+  assert.deepEqual(port.out.slice(2), [{ t: "freeze" }, { t: "unfreeze" }]);
 });

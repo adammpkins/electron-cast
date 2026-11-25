@@ -187,3 +187,37 @@ test("the receiver ending the app ends the route", async () => {
     h.receiver.close();
   }
 });
+
+test("a frozen route stops sending video on its last frame while audio goes on, and unfreezing resumes it; a tab switch carries on in the same session", async () => {
+  const h = await startManager(AV);
+  try {
+    const route = await h.manager.startMirroring("dev-1", { castMode: "tab_mirror", webContentsId: 5 });
+    await sleep(800);
+    assert.equal(h.manager.routes()[0]!.freezeInfo.canFreeze, true, "capture exists once the session started");
+    h.manager.freezeRoute(route.id);
+    await sleep(700);
+    assert.equal(h.manager.routes()[0]!.freezeInfo.isFrozen, true);
+    const frozenVideo = h.receiver.stats.videoFrames;
+    const frozenAudio = h.receiver.stats.audioFrames;
+    await sleep(500);
+    assert.ok(h.receiver.stats.videoFrames - frozenVideo <= 1, `video while frozen: ${h.receiver.stats.videoFrames - frozenVideo}`);
+    assert.ok(h.receiver.stats.audioFrames - frozenAudio > 30, "audio is not frozen");
+
+    h.manager.unfreezeRoute(route.id);
+    await sleep(500);
+    assert.ok(h.receiver.stats.videoFrames - frozenVideo > 8, "video resumed");
+    assert.equal(h.manager.routes()[0]!.freezeInfo.isFrozen, false);
+
+    const offer = h.receiver.lastOffer;
+    h.manager.switchMirroringSourceTab(route.id, 6);
+    const before = h.receiver.stats.videoFrames;
+    await sleep(600);
+    assert.equal(h.receiver.lastOffer, offer, "no renegotiation");
+    assert.ok(h.receiver.stats.videoFrames - before > 8, "video carries on");
+    assert.equal(h.receiver.stats.invalidFrames, 0);
+    assert.equal(h.manager.routes()[0]!.webContentsId, 6);
+  } finally {
+    h.manager.dispose();
+    h.receiver.close();
+  }
+});

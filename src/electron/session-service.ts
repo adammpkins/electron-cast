@@ -134,6 +134,11 @@ export interface CastSessionServiceOptions {
    * session no local activity has).
    */
   ownsSession?(sessionId: string, sinkId: string): boolean;
+  /**
+   * A session was launched for `senderId` (`CastActivityManager::DoLaunchSession`, where a route from the frame is
+   * recorded in `routes_by_frame_`). Not called for a join, which Chrome does not record there.
+   */
+  onSessionLaunched?(senderId: number): void;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -169,6 +174,8 @@ interface SessionRecord {
   origin: string;
   appId: string;
   members: Set<number>;
+  /** The sender that launched the session (Chrome's `routes_by_frame_` key); unset for a session found running. */
+  launchedBy?: number;
   /**
    * Senders whose page navigated away (a reload, say) while a member. Like Chrome's Media Router, the session outlives
    * the page: it stays open on the device so the sender's next page can rejoin it. Parked senders get no events.
@@ -1053,6 +1060,7 @@ export class CastSessionService {
       app,
       origin: sender.origin,
       appId,
+      launchedBy: sender.id,
       members: new Set([sender.id]),
       parked: new Set(),
       lastVolume: status.volume,
@@ -1061,6 +1069,11 @@ export class CastSessionService {
     const snapshot = this.snapshotOf(rec);
     rec.lastSnapshot = snapshot;
     this.sessions.set(app.sessionId, rec);
+    try {
+      this.options.onSessionLaunched?.(sender.id);
+    } catch (err) {
+      console.error("electron-cast: onSessionLaunched failed", err);
+    }
     return snapshot;
   }
 
@@ -1158,6 +1171,11 @@ export class CastSessionService {
   }
 
   // Main-process API (see manager-api.ts). Control goes through the paths the pages use, so pages see the same events.
+
+  /** The sessions `senderId` launched and that still run (`routes_by_frame_` lookup by frame). */
+  sessionsLaunchedBy(senderId: number): string[] {
+    return [...this.sessions.values()].filter((rec) => rec.launchedBy === senderId).map((rec) => rec.app.sessionId);
+  }
 
   /**
    * Every live session, parked ones included, then the sessions the devices run that this service does not hold

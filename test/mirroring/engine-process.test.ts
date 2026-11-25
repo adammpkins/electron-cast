@@ -123,3 +123,50 @@ test("the engine process streams frames from a port-driven agent to the receiver
     receiver.close();
   }
 });
+
+test("the engine process relays a tab switch and freeze and unfreeze to the agent, and the stream goes on", async () => {
+  const receiver = await FakeReceiver.create({ verifyBody: false });
+  let onToEngine: ((e: { data: ToEngine; ports: MessagePortLike[] }) => void) | undefined;
+  runEngineProcess(
+    {
+      postMessage: (m) => {
+        if (m.type === "send") receiver.onControlMessage(m.namespace, m.json);
+      },
+      on: (_event, listener) => {
+        onToEngine = listener;
+      },
+    },
+    () => {},
+  );
+  receiver.sendControl = (json) => setImmediate(() => onToEngine!({ data: { type: "message", namespace: "urn:x-cast:com.google.cast.webrtc", json }, ports: [] }));
+  const agent = new FakeAgentPort();
+  onToEngine!({
+    data: {
+      type: "start",
+      params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1" },
+      source: { kind: "tab", mediaSourceId: "old-tab" },
+      softwareCodecs: ["vp8"],
+      env: {},
+    },
+    ports: [agent],
+  });
+  try {
+    await sleep(1200);
+    const offers = receiver.lastOffer;
+    const before = receiver.stats.validVideoFrames;
+    onToEngine!({ data: { type: "switch-source", webContentsId: 8, source: { kind: "tab", mediaSourceId: "new-tab" } }, ports: [] });
+    onToEngine!({ data: { type: "pause" }, ports: [] });
+    onToEngine!({ data: { type: "resume" }, ports: [] });
+    await sleep(500);
+    const switched = agent.received.find((m) => m.t === "switch");
+    assert.deepEqual(switched, { t: "switch", source: { kind: "tab", mediaSourceId: "new-tab" }, video: true, audio: true });
+    assert.deepEqual(agent.received.filter((m) => m.t === "freeze" || m.t === "unfreeze").map((m) => m.t), ["freeze", "unfreeze"]);
+    assert.equal(receiver.lastOffer, offers, "no renegotiation");
+    assert.ok(receiver.stats.validVideoFrames > before + 5);
+    assert.equal(receiver.stats.invalidFrames, 0);
+  } finally {
+    onToEngine!({ data: { type: "stop" }, ports: [] });
+    await sleep(50);
+    receiver.close();
+  }
+});

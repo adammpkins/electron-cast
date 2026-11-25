@@ -49,6 +49,19 @@ export interface MirroringService {
   onMessage(namespace: string, jsonFormatData: string): void;
   /** Stops capture and streaming; the service never calls `didStop` for a stop the activity asked for. */
   stop(): void;
+  /**
+   * `CastMirroringServiceHost::SwitchMirroringSourceTab` then `MirroringService::SwitchMirroringSourceTab`: capture
+   * continues from another tab in the same session. Throws when the tab cannot be captured. A service without it
+   * cannot switch.
+   */
+  switchMirroringSourceTab?(webContentsId: number): void;
+  /**
+   * `CastMirroringServiceHost::Pause` / `Resume`: stop and restart the video capture device. The callback runs once the
+   * request has been made (Chrome posts it to the IO thread and runs it right after). A service without them
+   * cannot freeze.
+   */
+  pause?(onPaused: () => void): void;
+  resume?(onResumed: () => void): void;
 }
 
 /** `MirroringServiceHost::Start`. */
@@ -66,12 +79,24 @@ export interface MirroringActivityOptions {
   createService: MirroringServiceFactory;
   /** `on_stop_`: called once when the activity ends for any reason. The owner removes it. */
   onStop(): void;
-  /** A change of route state (description, launching to mirroring). */
+  /** A change of route state (description, launching to mirroring, freezing). */
   onChange(): void;
+  /** For a tab route: `webContents.id` of the page being mirrored (`frame_tree_node_id_`). */
+  webContentsId?: number;
+  /**
+   * `source_changed_callback_`: the route now mirrors another tab (`DidGetTabSourceId`). The owner keeps one route per
+   * tab (`CastActivityManager::OnSourceChanged`).
+   */
+  onSourceChanged?(oldWebContentsId: number, webContentsId: number): void;
+  /** `kPauseDelay` of `MirroringMediaControllerHostImpl`, for tests. */
+  freezeDelayMs?: number;
   log?(level: "info" | "error", message: string): void;
 }
 
 export type MirroringActivityState = "launching" | "mirroring" | "stopped";
+
+/** `kPauseDelay` (mirroring_media_controller_host_impl.cc): a second request within it is ignored. */
+export const FREEZE_DELAY_MS = 500;
 
 export class MirroringActivity {
   readonly sink: CastDevice;
@@ -87,6 +112,13 @@ export class MirroringActivity {
   private readonly log: (level: "info" | "error", message: string) => void;
   private service: MirroringService | undefined;
   private stopping = false;
+  private tabId: number | undefined;
+  private readonly onSourceChanged: ((oldId: number, newId: number) => void) | undefined;
+  private readonly freezeDelayMs: number;
+  private freezeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** `media_status_->can_play_pause` and `play_state == PAUSED`, as `MirroringMediaControllerHostImpl` reads them. */
+  private mirroringStarted = false;
+  private paused = false;
 
   constructor(options: MirroringActivityOptions) {
     this.sink = options.sink;
@@ -95,6 +127,9 @@ export class MirroringActivity {
     this.createService = options.createService;
     this.onStop = options.onStop;
     this.onChange = options.onChange;
+    this.tabId = options.webContentsId;
+    this.onSourceChanged = options.onSourceChanged;
+    this.freezeDelayMs = options.freezeDelayMs ?? FREEZE_DELAY_MS;
     // One id for what is sent and what is accepted, as in Chrome: both are `message_handler_->source_id()`. A receiver
     // addresses its replies to the source id of the message it answers, so a second id would drop every ANSWER.
     this.sourceId = options.client.senderId;
@@ -102,6 +137,21 @@ export class MirroringActivity {
     this.client.on("message", (msg) => this.onAppMessage(msg));
     this.client.on("receiverStatus", (status) => this.onReceiverStatus(status));
     this.client.on("close", () => this.stopMirroring());
+  }
+
+  /** `MirroringActivity::frame_tree_node_id`: the page a tab route mirrors now. */
+  get webContentsId(): number | undefined {
+    return this.tabId;
+  }
+
+  /** `MirroringMediaControllerHost::CanFreeze`: the service can pause capture and a mirroring offer has been made. */
+  get canFreeze(): boolean {
+    return this.state === "mirroring" && this.mirroringStarted && this.service?.pause !== undefined;
+  }
+
+  /** `MirroringMediaControllerHost::IsFrozen`. */
+  get isFrozen(): boolean {
+    return this.canFreeze && this.paused;
   }
 
   /** `GetRouteDescription` for a mirroring route. */
@@ -145,7 +195,15 @@ export class MirroringActivity {
       return;
     }
     const observer: MirroringSessionObserver = {
-      didStart: () => this.log("info", "mirroring started"),
+      didStart: () => {
+        this.log("info", "mirroring started");
+        // `OnRemotingStateChanged(false)` at the end of `NegotiateMirroring` sets `can_play_pause`; the session reports
+        // it here once its first offer is answered, as capture exists only from then on.
+        if (!this.mirroringStarted) {
+          this.mirroringStarted = true;
+          this.onChange();
+        }
+      },
       didStop: () => this.stopMirroring(),
       onError: (error, message) => {
         this.log("error", `Mirroring will stop. MirroringService.SessionError: ${error}: ${message}`);
@@ -162,6 +220,67 @@ export class MirroringActivity {
       targetPlayoutDelayMs: this.source.targetPlayoutDelayMs,
     };
     this.service = this.createService(params, observer, channel, this.source);
+  }
+
+  /**
+   * `CastMirroringServiceHost::SwitchMirroringSourceTab` and then, when the service has reported the change,
+   * `MirroringActivity::DidGetTabSourceId`: capture moves to another page without ending the session. The route keeps
+   * its id and media source, as in Chrome; what changes is the page it is bound to. A tab that is already the source
+   * is a no-op here (Chrome restarts the capture for it and then ignores the unchanged id).
+   */
+  switchMirroringSourceTab(webContentsId: number): void {
+    if (this.state !== "mirroring" || this.service === undefined) throw new Error("the route is not mirroring");
+    if (this.source.type !== "tab" || this.tabId === undefined) throw new Error("only a tab route can switch its source tab");
+    if (this.service.switchMirroringSourceTab === undefined) throw new Error("the mirroring service cannot switch tabs");
+    if (webContentsId === this.tabId) return;
+    this.service.switchMirroringSourceTab(webContentsId);
+    const old = this.tabId;
+    this.tabId = webContentsId;
+    // A new capturer is sending frames: the state is PLAYING again (`DidGetTabSourceId`).
+    this.paused = false;
+    this.onSourceChanged?.(old, webContentsId);
+    // The owner may have ended this route meanwhile.
+    if ((this.state as MirroringActivityState) !== "stopped") this.onChange();
+  }
+
+  /**
+   * `MirroringMediaControllerHostImpl::Freeze`: pause the stream on its last frame after `kPauseDelay`; a request made
+   * while one is pending is ignored.
+   */
+  freeze(): void {
+    if (this.freezeTimer !== undefined) return;
+    this.freezeTimer = setTimeout(() => {
+      this.freezeTimer = undefined;
+      this.pause();
+    }, this.freezeDelayMs);
+    this.freezeTimer.unref?.();
+  }
+
+  /** `MirroringMediaControllerHostImpl::Unfreeze` (`MediaController::Play`): at once, no delay. */
+  unfreeze(): void {
+    this.resume();
+  }
+
+  /** `MirroringActivity::Pause`. */
+  private pause(): void {
+    const service = this.service;
+    // Before capture exists there is no video capture host, and Chrome's request does nothing.
+    if (!this.canFreeze || service?.pause === undefined) return;
+    service.pause(() => this.setPaused(true));
+  }
+
+  /** `MirroringActivity::Play`. */
+  private resume(): void {
+    const service = this.service;
+    if (!this.canFreeze || service?.resume === undefined) return;
+    service.resume(() => this.setPaused(false));
+  }
+
+  /** `SetPlayState`. */
+  private setPaused(paused: boolean): void {
+    if (this.state === "stopped") return;
+    this.paused = paused;
+    this.onChange();
   }
 
   /** `HandleParseJsonResult`: a message from the service goes to the receiver, in the namespace its type implies. */
@@ -233,6 +352,8 @@ export class MirroringActivity {
     if (this.stopping) return;
     this.stopping = true;
     this.state = "stopped";
+    if (this.freezeTimer !== undefined) clearTimeout(this.freezeTimer);
+    this.freezeTimer = undefined;
     try {
       this.service?.stop();
     } catch (err) {

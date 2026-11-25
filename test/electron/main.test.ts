@@ -289,3 +289,72 @@ test("the manager lists no device at a public or loopback address unless sinks.a
     console.warn = quiet;
   }
 });
+
+// Chrome keeps one route per frame (`CastActivityManager::routes_by_frame_`) across route kinds: the wiring between the
+// session service and the mirroring manager in createCastManager.
+function withMirroring() {
+  const stops: string[] = [];
+  const env = setup({
+    mirroring: {
+      createService: () => ({ onMessage() {}, stop: () => void stops.push("stop"), switchMirroringSourceTab() {} }),
+    },
+  });
+  const sessionIds = async (wc: FakeWebContents) => {
+    await env.call(wc, "initialize", INIT);
+    const r = (await env.call(wc, "requestSession", REQ)) as { ok: true; value: { sessionId: string } };
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return r.value.sessionId;
+  };
+  const ids = () => env.manager.getRoutes().map((r) => r.id);
+  return { ...env, stops, sessionIds, ids };
+}
+
+test("a page that starts tab mirroring loses the Cast session it launched, but not one it only joined", async () => {
+  const { manager, call, sessionIds, ids, stops } = withMirroring();
+  const launcher = new FakeWebContents(7);
+  const joiner = new FakeWebContents(8);
+  const sessionId = await sessionIds(launcher);
+  await call(joiner, "initialize", INIT);
+  const joined = await call(joiner, "joinSession", { sessionId });
+  assert.equal((joined as { ok: boolean }).ok, true, JSON.stringify(joined));
+  assert.ok(ids().includes(sessionId));
+
+  // The joiner mirrors: the session it merely joined survives.
+  const m1 = await manager.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: 8 });
+  await tick();
+  assert.deepEqual(ids().sort(), [sessionId, m1.id].sort());
+
+  // The launcher mirrors (one mirroring route per sink, so the first ends): its session is terminated.
+  await manager.terminateRoute(m1.id);
+  const m2 = await manager.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: 7 });
+  for (let i = 0; i < 20 && ids().includes(sessionId); i++) await tick();
+  assert.deepEqual(ids(), [m2.id]);
+  assert.deepEqual(stops, ["stop"], "only the first mirroring route, which the test ended");
+  await manager.dispose();
+});
+
+test("a switch onto a page that launched a Cast session ends that session", async () => {
+  const { manager, sessionIds, ids } = withMirroring();
+  const sessionId = await sessionIds(new FakeWebContents(7));
+  const route = await manager.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: 5 });
+  assert.ok(ids().includes(sessionId));
+  manager.switchMirroringSourceTab(route.id, 7);
+  for (let i = 0; i < 20 && ids().includes(sessionId); i++) await tick();
+  assert.deepEqual(ids(), [route.id]);
+  await manager.dispose();
+});
+
+test("a page being mirrored that launches a Cast session loses its mirroring route; a desktop route stays", async () => {
+  const { manager, call, ids, stops } = withMirroring();
+  const wc = new FakeWebContents(7);
+  await manager.settled(); // a device is a sink once its channel is open
+  const tab = await manager.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: 7 });
+  const desktop = await manager.startCasting(TV.id, { castMode: "desktop_mirror", desktopSourceId: "screen:0:0" });
+  await call(wc, "initialize", INIT);
+  const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { sessionId: string } };
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(ids().sort(), [desktop.id, r.value.sessionId].sort());
+  assert.equal(ids().includes(tab.id), false);
+  assert.deepEqual(stops, ["stop"], "the tab route's service was stopped");
+  await manager.dispose();
+});

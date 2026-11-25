@@ -41,3 +41,40 @@ test("router: consumes incoming packets with its first sender and drops them aft
   router.onSenderDestroyed(2);
   assert.deepEqual(calls, ["consume", "drop"]);
 });
+
+import { createManagerApi, MediaRouteError, type MediaRoute } from "../../src/electron/manager-api.ts";
+
+test("switchMirroringSourceTab, freezeRoute and unfreezeRoute: argument checks, unknown routes, and the host does the work", () => {
+  const route = { id: "r1" } as MediaRoute;
+  const calls: string[] = [];
+  const mk = (withMirroring: boolean) =>
+    createManagerApi({ register: () => () => {}, dispose() {} } as never, {
+      mediaRoutes: () => [route],
+      observeSessions: () => () => {},
+      terminateSession: async () => ({ ok: true, value: null }),
+      setSessionVolume: async () => ({ ok: true, value: null }),
+      detachSession: () => ({ ok: true, value: null }),
+      ...(withMirroring
+        ? {
+            switchMirroringSourceTab: (id: string, tab: number) => void calls.push(`switch ${id} ${tab}`),
+            freezeRoute: (id: string) => (calls.push(`freeze ${id}`), true),
+            unfreezeRoute: (id: string) => (calls.push(`unfreeze ${id}`), true),
+          }
+        : {}),
+    } as never, { requests: { observe: () => () => {} }, start: async () => route } as never);
+  const api = mk(true);
+  api.switchMirroringSourceTab("r1", 4);
+  api.freezeRoute("r1");
+  api.unfreezeRoute("r1");
+  assert.deepEqual(calls, ["switch r1 4", "freeze r1", "unfreeze r1"]);
+  assert.throws(() => api.switchMirroringSourceTab("r1", "4" as never), TypeError);
+  assert.throws(() => api.switchMirroringSourceTab("r1", -2), RangeError);
+  assert.throws(() => api.switchMirroringSourceTab("nope", 4), { code: "route_not_found" });
+  assert.throws(() => api.freezeRoute("nope"), { code: "route_not_found" });
+  assert.throws(() => api.unfreezeRoute("nope"), MediaRouteError);
+  const without = mk(false);
+  assert.throws(() => without.switchMirroringSourceTab("r1", 4), { code: "unable_to_cast" });
+  without.freezeRoute("r1");
+  api.dispose();
+  without.dispose();
+});

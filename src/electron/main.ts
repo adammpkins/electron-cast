@@ -449,6 +449,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     } : {}),
     accessCode: options.accessCode,
     ...(networkMonitor !== undefined ? { networkMonitor } : {}),
+    // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
+    // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
+    onSessionLaunched: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -900,6 +903,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       findDevice: (id) => service.devices().find((d) => d.id === id),
       createClient: (d) => sharedChannelClient(d.id, service.channelClient(d.id)),
       createService,
+      terminateRoutesOfPage: (wcId) => {
+        for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
+      },
       log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
     });
   }
@@ -938,6 +944,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     members: r.webContentsId === undefined ? [] : [r.webContentsId],
     parkedSenders: [],
     parked: false,
+    freezeInfo: r.freezeInfo,
   }));
   const routes = (): MediaRoute[] => [
     ...service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
@@ -1006,6 +1013,19 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     observeSessionStatus: (l) => service.observeSessionStatus(l),
     observeMediaStatus: (l) => service.observeMediaStatus(l),
     sessionVolume: (id) => service.sessionVolume(id),
+    switchMirroringSourceTab:
+      mirroring === undefined
+        ? undefined
+        : (id, webContentsId) => {
+            try {
+              mirroring!.switchMirroringSourceTab(id, webContentsId);
+            } catch (err) {
+              if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+              throw err;
+            }
+          },
+    freezeRoute: (id) => mirroring?.freezeRoute(id) ?? false,
+    unfreezeRoute: (id) => mirroring?.unfreezeRoute(id) ?? false,
   }, {
     requests: defaults,
     start: (webContentsId, sinkId) => {

@@ -28,7 +28,12 @@ export const AGENT_SOURCE = String.raw`
   let port = null;
   let stream = null;
   let paused = false;
+  // Frozen by the browser side (CastMirroringServiceHost::Pause): the device delivers nothing. Apart from the
+  // session's own pause above, which the engine uses while it reconfigures the capture.
+  let frozen = false;
   let stopped = false;
+  let captureAudioParams = null;
+  let audioTimestamp = 0;
   let videoEncoder = null;
   let audioEncoder = null;
   let videoCodec = { codec: "vp8", string: "vp8" };
@@ -36,6 +41,8 @@ export const AGENT_SOURCE = String.raw`
   let audioBitrate = 128000;
   let keyNext = true;
   let videoReader = null;
+  let videoEpoch = 0;
+  let audioEpoch = 0;
   let audioReader = null;
   let videoInfo = null;
   let encoderSize = null;
@@ -87,18 +94,14 @@ export const AGENT_SOURCE = String.raw`
       case "key-frame": keyNext = true; return;
       case "pause": paused = true; return;
       case "resume": paused = false; return;
+      case "freeze": frozen = true; return;
+      case "unfreeze": return unfreeze();
+      case "switch": return switchSource(m);
       case "refresh":
         // OpenscreenSessionHost::OnRefreshTimerFired -> RequestRefreshFrame: a static screen produces no capture
-        // frames, so the last one is sent again. It is stamped with the time that has passed, on the same
-        // capture-clock-to-RTP mapping as real frames, so the receiver's playout clock keeps running.
-        if (lastFrameClone && lastCapture) {
-          const clone = lastFrameClone.clone();
-          const nowMs = epochNow();
-          const rtp = rtpFor(lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000);
-          lastCapture = { timestamp: lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000, refMs: nowMs };
-          holdFrame(rtp, clone);
-          send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight });
-        }
+        // frames, so the last one is sent again. FrameSinkVideoCaptureDevice::RequestRefreshFrame does nothing while
+        // the device is suspended.
+        if (!frozen) refreshFrame();
         return;
       case "encode": return encodeFrame(m.rtp);
       case "encode-audio": return encodeAudio(m.seq);
@@ -107,33 +110,89 @@ export const AGENT_SOURCE = String.raw`
     }
   }
 
-  async function start(m) {
-    // getDisplayMedia would need transient user activation, which this hidden page never has (NotAllowedError, shown
-    // as "Permission denied"). Chrome's own mirroring service does not ask either: CastMirroringServiceHost hands the
-    // desktop media id straight to the capture host and opens the system loopback device for audio
-    // (CreateAudioStreamForDesktop). The legacy constraints are the renderer-side equivalent: the source id the app
-    // chose, and chromeMediaSource "desktop" (no id) for loopback audio.
-    const tab = m.source.kind === "tab";
+  function refreshFrame() {
+    if (!lastFrameClone || !lastCapture) return;
+    // Stamped with the time that has passed, on the same capture-clock-to-RTP mapping as real frames, so the
+    // receiver's playout clock keeps running.
+    const clone = lastFrameClone.clone();
+    const nowMs = epochNow();
+    const rtp = rtpFor(lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000);
+    lastCapture = { timestamp: lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000, refMs: nowMs };
+    holdFrame(rtp, clone);
+    send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight });
+  }
+
+  // ResumeDevice restarts the capturer (FrameSinkVideoCaptureDevice::MaybeStartConsuming), and a restarted capturer
+  // delivers a frame at once even when nothing on screen has changed: here the last one.
+  function unfreeze() {
+    if (!frozen) return;
+    frozen = false;
+    refreshFrame();
+  }
+
+  // getDisplayMedia would need transient user activation, which this hidden page never has (NotAllowedError, shown
+  // as "Permission denied"). Chrome's own mirroring service does not ask either: CastMirroringServiceHost hands the
+  // desktop media id straight to the capture host and opens the system loopback device for audio
+  // (CreateAudioStreamForDesktop). The legacy constraints are the renderer-side equivalent: the source id the app
+  // chose, and chromeMediaSource "desktop" (no id) for loopback audio. Used by start and by a tab switch; a refusal
+  // is thrown with the track that caused it.
+  async function openStream(source, video, audio) {
+    const tab = source.kind === "tab";
     const sourceKind = tab ? "tab" : "desktop";
-    const idConstraint = tab ? { chromeMediaSourceId: m.source.mediaSourceId } : { chromeMediaSourceId: m.source.sourceId };
-    const limits = m.video ? { maxWidth: m.video.width, maxHeight: m.video.height, maxFrameRate: m.video.frameRate } : {};
-    const videoWanted = !!m.video || !tab;
+    const idConstraint = tab ? { chromeMediaSourceId: source.mediaSourceId } : { chromeMediaSourceId: source.sourceId };
+    const limits = video ? { maxWidth: video.width, maxHeight: video.height, maxFrameRate: video.frameRate } : {};
+    const videoWanted = !!video || !tab;
     const acquire = (withAudio, withVideo) => navigator.mediaDevices.getUserMedia({
       audio: withAudio ? { mandatory: tab ? { chromeMediaSource: "tab", ...idConstraint } : { chromeMediaSource: "desktop" } } : false,
       video: withVideo ? { mandatory: { chromeMediaSource: sourceKind, ...idConstraint, ...limits } } : false,
     });
     try {
-      stream = !tab && m.audio && m.source.audio === "loopbackWithMute"
+      return !tab && audio && source.audio === "loopbackWithMute"
         // The host's handler on this window's own session answers with the app's source and 'loopbackWithMute'.
         ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: { frameRate: { max: limits.maxFrameRate || 30 } } })
-        : await acquire(!!m.audio, videoWanted);
+        : await acquire(!!audio, videoWanted);
     } catch (err) {
       // One call serves both tracks, so say which one the browser refused: try the video alone.
-      let which = m.video ? "video" : "audio";
-      if (m.audio && videoWanted) {
+      let which = video ? "video" : "audio";
+      if (audio && videoWanted) {
         try { (await acquire(false, true)).getTracks().forEach((t) => t.stop()); which = "audio"; } catch { which = "video"; }
       }
-      fail(which, err);
+      throw { which, err };
+    }
+  }
+
+  // OpenscreenSessionHost::SwitchSourceTab: the video capture client gets the new tab's capture host and restarts with
+  // the same parameters, and the audio input device is stopped and started. Encoders, frame ids and timelines belong to
+  // the session and carry on; a new capturer is not suspended (DidGetTabSourceId sets PLAYING).
+  async function switchSource(m) {
+    if (!stream || stopped) return;
+    const video = m.video ? videoInfo : null;
+    const audio = m.audio ? captureAudioParams : null;
+    let next;
+    try { next = await openStream(m.source, video, audio); }
+    catch (e) { fail(e.which, e.err); return; }
+    if (stopped) { for (const t of next.getTracks()) t.stop(); return; }
+    for (const t of stream.getTracks()) t.stop();
+    stream = next;
+    frozen = false;
+    // The old page's last frame is not a refresh of the new page's.
+    if (lastFrameClone) { lastFrameClone.close(); lastFrameClone = null; }
+    lastCapture = null;
+    firstTimestamp = null;
+    const nextVideo = next.getVideoTracks()[0];
+    const nextAudio = next.getAudioTracks()[0];
+    if (video && nextVideo) pumpVideo(nextVideo, video);
+    else if (video) fail("video", "the capture has no video track");
+    if (audio && nextAudio) pumpAudio(nextAudio, audio);
+    else if (audio) fail("audio", "the capture has no audio track");
+  }
+
+  async function start(m) {
+    captureAudioParams = m.audio || null;
+    try {
+      stream = await openStream(m.source, m.video, m.audio);
+    } catch (e) {
+      fail(e.which, e.err);
       return;
     }
     const video = stream.getVideoTracks()[0];
@@ -146,9 +205,15 @@ export const AGENT_SOURCE = String.raw`
   }
 
   // Presentation time in RTP ticks (90 kHz) from the capture clock, made strictly increasing.
+  // A new capture (a switched tab) has its own clock: its first frame continues 1 ms after the last one sent, as
+  // VideoCaptureClient does (accumulated_time_ = last_timestamp_ + 1 ms).
+  let baseRtp = 90000;
   function rtpFor(timestamp) {
-    if (firstTimestamp === null) firstTimestamp = timestamp;
-    let rtp = Math.round(((timestamp - firstTimestamp) * 90) / 1000) + 90000;
+    if (firstTimestamp === null) {
+      firstTimestamp = timestamp;
+      baseRtp = lastRtp === 0 ? 90000 : lastRtp + 90;
+    }
+    let rtp = Math.round(((timestamp - firstTimestamp) * 90) / 1000) + baseRtp;
     if (rtp <= lastRtp) rtp = lastRtp + 1;
     lastRtp = rtp;
     return rtp;
@@ -165,12 +230,14 @@ export const AGENT_SOURCE = String.raw`
 
   async function pumpVideo(track, params) {
     videoInfo = params;
-    videoReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    // A switch starts another pump on the new track; this one ends with its own track.
+    const epoch = ++videoEpoch;
+    const reader = videoReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     let lastAcceptedAt = -1e9;
     for (;;) {
-      const { value: frame, done } = await videoReader.read();
-      if (done || stopped) { if (frame) frame.close(); return; }
-      if (paused) { frame.close(); continue; }
+      const { value: frame, done } = await reader.read();
+      if (done || stopped || epoch !== videoEpoch) { if (frame) frame.close(); return; }
+      if (paused || frozen) { frame.close(); continue; }
       // The capture may deliver faster than the requested rate (a 60 Hz page); keep the minimum frame interval.
       const nowMs = performance.now();
       if (nowMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { frame.close(); continue; }
@@ -243,10 +310,13 @@ export const AGENT_SOURCE = String.raw`
   }
 
   async function pumpAudio(track, params) {
-    audioReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    const epoch = ++audioEpoch;
+    const reader = audioReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     const channels = params.channels, rate = params.sampleRate, block = rate / 100;
     const planes = [];
     for (let c = 0; c < channels; c++) planes.push(new Float32Array(0));
+    // A switched tab keeps the session's audio encoder: its frames and timeline go on.
+    if (!audioEncoder || audioEncoder.state === "closed") {
     audioEncoder = new AudioEncoder({
       output: (chunk) => {
         const seq = audioInFlight.shift();
@@ -262,11 +332,11 @@ export const AGENT_SOURCE = String.raw`
       if (!support.supported) { send({ t: "encoder-status", kind: "audio", status: "unsupported_codec" }); return; }
       audioEncoder.configure({ codec: "opus", sampleRate: rate, numberOfChannels: channels, bitrate: audioBitrate, opus: { frameDuration: 10000, application: "lowdelay" } });
     } catch (err) { fail("encoder", err); return; }
-    let timestamp = 0;
+    }
     let audioClock = null;               // epoch ms of the first sample of the next 10 ms buffer
     for (;;) {
-      const { value: data, done } = await audioReader.read();
-      if (done || stopped) { if (data) data.close(); return; }
+      const { value: data, done } = await reader.read();
+      if (done || stopped || epoch !== audioEpoch) { if (data) data.close(); return; }
       // The time of the oldest sample we hold. A capture gap (underrun) moves the clock forward, a burst (overrun) does
       // not move it back, so buffer times keep increasing by 10 ms; the engine's EncodeAudio port resolves gaps.
       const startOfHeld = epochNow() - (data.numberOfFrames + planes[0].length) * 1000 / rate;
@@ -284,8 +354,8 @@ export const AGENT_SOURCE = String.raw`
         const buffer = new Float32Array(block * channels);
         for (let c = 0; c < channels; c++) { buffer.set(planes[c].subarray(0, block), c * block); planes[c] = planes[c].slice(block); }
         const seq = audioSeq++;
-        pendingAudio.set(seq, new AudioData({ format: "f32-planar", sampleRate: rate, numberOfFrames: block, numberOfChannels: channels, timestamp, data: buffer }));
-        timestamp += 10000;
+        pendingAudio.set(seq, new AudioData({ format: "f32-planar", sampleRate: rate, numberOfFrames: block, numberOfChannels: channels, timestamp: audioTimestamp, data: buffer }));
+        audioTimestamp += 10000;
         send({ t: "audio-buffer", seq, frames: block, recMs: audioClock });
         audioClock += 10;
         if (pendingAudio.size > 50) { const first = pendingAudio.keys().next().value; pendingAudio.get(first).close(); pendingAudio.delete(first); dropAudio(first); }

@@ -121,10 +121,20 @@ is frozen and behaves as before for pages; it shares the device list.
   and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
   software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
   audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
-  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)), tab
-  switching and the pause and resume UI, re-offering when the encoder changes, session stats, hardware codecs. Like
-  Chrome, a mirroring session sends `GET_CAPABILITIES` once after the first negotiation and keeps the receiver's
-  remoting capabilities.
+  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)), re-offering
+  when the encoder changes, session stats, hardware codecs. Like Chrome, a mirroring session sends `GET_CAPABILITIES`
+  once after the first negotiation and keeps the receiver's remoting capabilities.
+- **Switch the mirrored tab, freeze the picture.** `switchMirroringSourceTab(routeId, webContentsId)` moves a
+  `tab_mirror` route to another page without ending or renegotiating the session (Chrome's "share this tab instead":
+  capture and the audio stream restart on the new page, encoders and timelines carry on, local muting moves to the new
+  page, and a second route on the same page ends). `freezeRoute` / `unfreezeRoute` pause and resume the video on its last
+  frame as Chrome's freeze does (audio goes on, 500 ms delay), and mirroring routes report `freezeInfo` (`canFreeze`,
+  `isFrozen`). Tested against the fake receiver and the capture agent's stand-ins; the receiver's behaviour while frozen
+  and a real tab switch are for a live test (`examples/live-mirroring`).
+- **One route per page, and a closed tab ends its mirroring.** As in Chrome, a page that becomes a mirroring source
+  (a launch or a switch) loses the Cast SDK / Presentation API sessions it launched, and a page that launches one
+  loses its mirroring routes (`CastActivityManager::routes_by_frame_`). Closing the page being mirrored ends a tab route
+  (`CastMirroringServiceHost::WebContentsDestroyed`); a desktop route is unaffected.
 - **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
   `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
