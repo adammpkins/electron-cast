@@ -1,5 +1,7 @@
 import type { BridgeEvent, CastBridge } from "./bridge-types.ts";
 
+export { installPresentation } from "./presentation.ts";
+
 export type {
   BridgeEvent,
   BridgeMethod,

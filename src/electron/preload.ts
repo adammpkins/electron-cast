@@ -1,4 +1,5 @@
 import { installChromeCast } from "../polyfill/install.ts";
+import { installPresentation } from "../polyfill/presentation.ts";
 import type { BridgeEvent, BridgeMethod, BridgeResult } from "../polyfill/bridge-types.ts";
 
 /** The subset of an Electron `contextBridge` the bridge needs. */
@@ -17,13 +18,18 @@ export interface CastBridgeOptions {
   ipcRenderer: IpcRendererLike;
   channel?: string;    // default "electron-cast"
   bridgeKey?: string;  // default "__electronCastBridge"
+  /**
+   * What the page is given. `"chrome.cast"` (the default) is electron-cast's own implementation of the sender API.
+   * `"presentation"` backs the browser's Presentation API instead, for pages that load Google's Cast SDK themselves.
+   */
+  api?: "chrome.cast" | "presentation";
 }
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Call from a preload script: exposes the bridge and installs chrome.cast in the page before its scripts run. */
+/** Call from a preload script: exposes the bridge and installs the chosen API in the page before its scripts run. */
 export function installCastBridge(options: CastBridgeOptions): void {
   const channel = options.channel ?? "electron-cast";
   const bridgeKey = options.bridgeKey ?? "__electronCastBridge";
@@ -53,5 +59,5 @@ export function installCastBridge(options: CastBridgeOptions): void {
     },
   };
   options.contextBridge.exposeInMainWorld(bridgeKey, bridge);
-  options.contextBridge.executeInMainWorld({ func: installChromeCast, args: [bridgeKey] });
+  options.contextBridge.executeInMainWorld({ func: options.api === "presentation" ? installPresentation : installChromeCast, args: [bridgeKey] });
 }

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `installCastBridge` takes `api: "presentation"`. Instead of defining `chrome.cast`, electron-cast then backs the
+  browser's Presentation API for `cast:` URLs, and the page's own copy of Google's Cast SDK runs on top of it
+  unchanged. The default is still electron-cast's own `chrome.cast`.
 - `createCastManager` takes an optional `sessionStore`. With it, the session a page started last is saved, and a
   page that initializes later (after an app restart, for example) rejoins it through its `sessionListener` when the
   device still runs that same session. Stopping the session clears the store; leaving it does not.

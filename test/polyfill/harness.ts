@@ -20,7 +20,7 @@ export interface Harness {
  * Evaluates the polyfill from its source text in a fresh vm context that has only the bridge and timers, which
  * proves the install function is self-contained (as contextBridge.executeInMainWorld requires).
  */
-export function createHarness(opts: { install?: boolean; before?: string; withBridge?: boolean } = {}): Harness {
+export function createHarness(opts: { install?: boolean | ((bridgeKey: string) => boolean); before?: string; withBridge?: boolean } = {}): Harness {
   const calls: Harness["calls"] = [];
   const handlers: Harness["handlers"] = {};
   const errors: unknown[] = [];
@@ -39,6 +39,12 @@ export function createHarness(opts: { install?: boolean; before?: string; withBr
     setTimeout,
     clearTimeout,
     queueMicrotask,
+    // The browser globals the Presentation installer relies on.
+    EventTarget,
+    Event,
+    DOMException,
+    URLSearchParams,
+    navigator: Object.create({}),
     console: { ...console, error: (...a: unknown[]) => errors.push(a) },
   };
   if (opts.withBridge !== false) sandbox[BRIDGE_KEY] = bridge;
@@ -53,12 +59,12 @@ export function createHarness(opts: { install?: boolean; before?: string; withBr
     emit: (e) => listener?.(e),
     run: (code) => vm.runInContext(code, ctx),
   };
-  if (opts.install !== false) install(h);
+  if (opts.install !== false) install(h, opts.install === true ? undefined : opts.install);
   return h;
 }
 
-export function install(h: Harness): boolean {
-  return h.run(`(${installChromeCast.toString()})(${JSON.stringify(BRIDGE_KEY)})`);
+export function install(h: Harness, installer: (bridgeKey: string) => boolean = installChromeCast): boolean {
+  return h.run(`(${installer.toString()})(${JSON.stringify(BRIDGE_KEY)})`);
 }
 
 export const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { installCastBridge, type ContextBridgeLike, type IpcRendererLike } from "../../src/electron/preload.ts";
 import { installChromeCast } from "../../src/polyfill/install.ts";
+import { installPresentation } from "../../src/polyfill/presentation.ts";
 import type { BridgeEvent, BridgeResult, CastBridge } from "../../src/polyfill/bridge-types.ts";
 
 class FakeContextBridge implements ContextBridgeLike {
@@ -36,7 +37,7 @@ class FakeIpcRenderer implements IpcRendererLike {
   }
 }
 
-function setup(opts: { channel?: string; bridgeKey?: string } = {}) {
+function setup(opts: { channel?: string; bridgeKey?: string; api?: "chrome.cast" | "presentation" } = {}) {
   const contextBridge = new FakeContextBridge();
   const ipcRenderer = new FakeIpcRenderer();
   installCastBridge({ contextBridge, ipcRenderer, ...opts });
@@ -49,6 +50,12 @@ test("exposes the bridge, then installs the polyfill in the main world with the 
   const { contextBridge } = setup();
   assert.deepEqual(contextBridge.order, ["expose __electronCastBridge", "execute"]);
   assert.equal(contextBridge.executed[0]?.func, installChromeCast);
+  assert.deepEqual(contextBridge.executed[0]?.args, ["__electronCastBridge"]);
+});
+
+test("api: \"presentation\" installs the Presentation API instead of chrome.cast", () => {
+  const { contextBridge } = setup({ api: "presentation" });
+  assert.deepEqual(contextBridge.executed.map((script) => script.func), [installPresentation]);
   assert.deepEqual(contextBridge.executed[0]?.args, ["__electronCastBridge"]);
 });
 

@@ -73,6 +73,26 @@ that load media through the Default Media Receiver need those.
 Casting is tested end to end with a Chromecast (YouTube Music). Discovery and connections are tested with Chromecast
 Ultra, Google Home Mini, Nest Hub, Nest Hub Max and speaker groups.
 
+### Running Google's own SDK instead
+
+Pages such as YouTube Music load Google's Cast SDK (`cast_sender.js`) themselves. In Chrome that SDK defines
+`chrome.cast` on top of the browser's Presentation API. Electron has the API but nothing behind it, so by default
+electron-cast defines `chrome.cast` itself. It can supply the missing half of the Presentation API instead:
+
+```ts
+installCastBridge({ contextBridge, ipcRenderer, api: "presentation" });
+```
+
+The page then runs Google's code unchanged, and electron-cast only answers `PresentationRequest` for `cast:` URLs.
+Nothing changes in the main process. Two things to know before choosing it:
+
+- The SDK and the browser talk in a JSON message format that Google does not document, and the page downloads the
+  SDK from Google for the browser's Chrome version. A new SDK version can change that format.
+- The SDK follows one session per page, so starting a session on another device stops the one before it.
+
+Tested with YouTube Music on Electron 45 (SDK version 156): cast, pause, resume, volume, switching to a speaker
+group, stop, and rejoining after a reload and after a restart.
+
 ## Lower layers
 
 The package root exports every layer, if you want to use them without Electron:

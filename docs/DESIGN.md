@@ -99,6 +99,29 @@ values (`"available"`, `"tab_and_origin_scoped"`, `"cancel"`, …). After instal
 true` and calls `window.__onGCastApiAvailable(true)` if the page defined it. v0.1 covers sessions and custom
 namespace messages; `chrome.cast.media` comes after.
 
+### Presentation mode (`presentation.ts`)
+
+The alternative page half, chosen with `api: "presentation"`. It replaces `PresentationRequest` and
+`navigator.presentation` and leaves `chrome.cast` to Google's SDK, which the page loads itself. It uses the same
+bridge and the same main-process service as the polyfill, and plays the part of Chrome's media router:
+
+- `getAvailability()`, `start()` and `reconnect()` on a `cast:<appId>?...` URL become `initialize`,
+  `requestSession` and `joinSession`. The SDK builds a new request for every call, so the app is registered with the
+  main process once per app, not once per request.
+- The SDK sends JSON envelopes over the connection, `{ type, message, sequenceNumber, clientId }`:
+  `client_connect`, `app_message`, `v2_message` (`SET_VOLUME`, `STOP`) and `leave_session`. A reply repeats the
+  `sequenceNumber`, with type `error` and a `{ code, description }` message on failure. The router sends
+  `receiver_action`, `new_session`, `update_session` and `app_message` unasked.
+- A request names its session, and that is not always the connection's own: YouTube Music stops the session it just
+  replaced over the new connection.
+- A session that ends on the device terminates the connection; one the page only lost closes it.
+- A session rejoined after a restart (`sessionJoined`) arrives as `connectionavailable` on
+  `navigator.presentation.defaultRequest`, where the SDK listens for it.
+- The SDK tracks one session and one connection. Chrome ends a page's cast route before starting another, so a new
+  session here ends the previous connection first, before the page is handed the new one.
+
+The envelope format is not documented by Google; it was read from `cast_sender.js` version 156.
+
 ## Electron layer (`src/electron/`)
 
 No Electron import: both modules take the Electron objects they need as parameters, typed by small structural
