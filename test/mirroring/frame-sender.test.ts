@@ -215,6 +215,7 @@ test("VideoSender raises the playout delay to 4 round trips + 75 ms on a drop, c
   vs.insertRawVideoFrame(raw(1), 33);
   assert.deepEqual(delays, [275, 400]);
   assert.equal(vs.framesDroppedBeforeEncoding, 2);
+  assert.deepEqual([...vs.dropReasons], [["kTooManyFramesInFlight", 2]]);
 });
 
 test("interactive content drops to the minimum playout delay and prefers dropping frames to raising it", () => {
@@ -232,6 +233,7 @@ test("a frame refused after encoding makes the encoder produce a key frame", () 
   vs.onEncodedVideoFrame(0, frame(0));
   assert.equal(encoder.keyFrames, 1);
   assert.equal(vs.framesDroppedAfterEncoding, 1);
+  assert.deepEqual([...vs.dropReasons], [["kInFlightDurationTooHighAfterEncoding", 1]]);
 });
 
 test("encoder utilization feedback is attenuated by 75%, key frames cap at 1, and an encoder drop reports at least 1", () => {
@@ -246,6 +248,8 @@ test("encoder utilization feedback is attenuated by 75%, key frames cap at 1, an
   assert.ok(Math.abs(feedback[1]! - 0.4) < 1e-9);
   assert.ok(Math.abs(feedback[2]! - 1 / 0.75) < 1e-9);
   assert.equal(vs.framesDroppedByEncoder, 1);
+  assert.deepEqual([...vs.dropReasons], [["kDroppedByEncoder", 1]]);
+  assert.equal(vs.framesDroppedBeforeEncoding + vs.framesDroppedAfterEncoding, 0, "encoder drops are not part of GetFramesDropped");
 });
 
 test("AudioSender sets the max frame rate from samples per frame, counts partial frames, and drops under the limits", () => {
@@ -267,4 +271,5 @@ test("AudioSender sets the max frame rate from samples per frame, counts partial
   sender.inFlightFrameCount = 120;
   assert.equal(as.insertAudio(480), false);
   assert.equal(as.framesDropped, 1);
+  assert.deepEqual([...as.dropReasons], [["kTooManyFramesInFlight", 1]]);
 });

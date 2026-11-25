@@ -203,15 +203,23 @@ export const AGENT_SOURCE = String.raw`
       },
       error: (err) => { abandonInFlight(); send({ t: "encoder-status", kind: "video", status: "codec_runtime_error" }); fail("encoder", err); },
     });
+    // Chrome's MediaVideoEncoderWrapper asks for a constant bitrate (Bitrate::ConstantBitrate in the constructor and
+    // SetBitRate): a variable one is unconstrained in blink (peak = 10x target, VideoEncoder::ParseConfigStatic), so the
+    // target the bandwidth logic picks would not hold. It also tunes for screen content except for software VP9
+    // (its TODO crbug.com/572902679), which WebCodecs expresses as contentHint "text" (blink maps it to ContentHint::Screen).
+    // The framerate is left unset for VP8, which is always software, as Chrome does for software encoders so that the
+    // per-frame durations of variable-rate capture drive the rate control.
+    const isVp9 = videoCodec.string.indexOf("vp09") === 0 || videoCodec.string === "vp9";
     videoConfig = {
       codec: videoCodec.string,
       width, height,
       bitrate: videoBitrate,
-      framerate: videoInfo ? videoInfo.frameRate : 30,
       latencyMode: "realtime",
-      bitrateMode: "variable",
+      bitrateMode: "constant",
       hardwareAcceleration: "no-preference",
     };
+    if (!isVp9) videoConfig.contentHint = "text";
+    if (videoCodec.string !== "vp8") videoConfig.framerate = videoInfo ? videoInfo.frameRate : 30;
     videoEncoder.configure(videoConfig);
     keyNext = true;
   }

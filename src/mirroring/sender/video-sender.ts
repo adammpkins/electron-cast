@@ -65,6 +65,8 @@ export class VideoSender implements FrameSenderClient {
   framesDroppedBeforeEncoding = 0;
   framesDroppedAfterEncoding = 0;
   framesDroppedByEncoder = 0;
+  /** Drops by reason, the counterpart of the `CastStreaming.Sender.Video.FrameDropped` histogram (video_sender.cc `kHistogramFrameDropped`). */
+  readonly dropReasons = new Map<FrameDropReason, number>();
 
   constructor(
     frameSender: FrameSender,
@@ -134,6 +136,7 @@ export class VideoSender implements FrameSenderClient {
         this.onPlayoutDelayChange(newTargetDelay);
       }
       this.framesDroppedBeforeEncoding++;
+      this.dropReasons.set(reason, (this.dropReasons.get(reason) ?? 0) + 1);
       return;
     }
 
@@ -190,6 +193,7 @@ export class VideoSender implements FrameSenderClient {
     const reason: FrameDropReason = this.frameSender.enqueueFrame(encoded);
     if (reason !== "kNotDropped") {
       this.framesDroppedAfterEncoding++;
+      this.dropReasons.set(reason, (this.dropReasons.get(reason) ?? 0) + 1);
       // The encoder's reference chain is broken, so the next frame must be a key frame.
       this.encoder.generateKeyFrame();
     }
@@ -198,6 +202,7 @@ export class VideoSender implements FrameSenderClient {
   /** `OnFrameDroppedByEncoder`. */
   private onFrameDroppedByEncoder(encoded: SenderEncodedFrame): void {
     this.framesDroppedByEncoder++;
+    this.dropReasons.set("kDroppedByEncoder", (this.dropReasons.get("kDroppedByEncoder") ?? 0) + 1);
     this.lastReportedEncoderUtilization = encoded.encoderUtilization;
     this.reportResourceUtilization(
       Math.max(this.lastReportedEncoderUtilization, this.lastReportedLossiness ?? -1, ENCODER_DROPPED_FRAME_UTILIZATION),
