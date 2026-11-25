@@ -50,8 +50,8 @@ test("installs PresentationRequest and replaces navigator.presentation", () => {
 
 test("PresentationRequest validates URLs", () => {
   const h = setup();
-  assert.deepEqual(h.run(`Array.from(new PresentationRequest(${JSON.stringify(URL1)}).urls)`), [URL1]);
-  assert.deepEqual(h.run(`Array.from(new PresentationRequest(["cast:A", ${JSON.stringify(URL1)}]).urls)`), ["cast:A", URL1]);
+  assert.deepEqual(Array.from(h.run(`new PresentationRequest(${JSON.stringify(URL1)}).urls`)), [URL1]);
+  assert.deepEqual(Array.from(h.run(`new PresentationRequest(["cast:A", ${JSON.stringify(URL1)}]).urls`)), ["cast:A", URL1]);
   assert.equal(h.run(`(() => { try { new PresentationRequest("not a url"); } catch (e) { return e.name; } })()`), "SyntaxError");
   assert.equal(h.run(`(() => { try { new PresentationRequest([]); } catch (e) { return e.name; } })()`), "NotSupportedError");
 });
