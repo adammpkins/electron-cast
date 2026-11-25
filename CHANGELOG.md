@@ -17,6 +17,19 @@
 - **A `castMode: "tab_mirror"` sinks query listed every device**, DIAL sinks and speakers without audio out included: it asked
   for a tab source Chrome's `IsTabMirroringSource` does not accept. It now lists the Cast sinks that can run a streaming app.
 
+### Fixed
+
+- **Software VP8 and VP9 and hardware HEVC read the quantizer too, as H.264 does since 0.5.0-next.2**, so a PC without a hardware H.264 encoder no longer
+  mirrors a blocky tab at full size. The quantizer is read from the VP8 frame header, the VP9 uncompressed header and
+  the HEVC slice header, and normalized as Chrome's encoders report it: libvpx's 0 to 63 scale over 63
+  (`VpxVideoEncoder::GetEncoderOutput`; Chrome lets libvpx go up to 58), the HEVC slice QP over 51, and a hardware VP8
+  or VP9 q index over 127 or 255 (`VideoEncodeAcceleratorAdapter::BitstreamBufferReady`). The stage log names the
+  scale with the QP (`video QP (of 63)`).
+- **A mirrored tab whose size keeps changing no longer gets a new encoder and a key frame for every size.** As in
+  Chrome (`resize_debounce_timer_` of `MediaVideoEncoderWrapper`), a new frame size has to last 250 ms before the
+  encoder is rebuilt for it; until then the running encoder scales the frames to its own size, and a size that goes
+  back within that time costs nothing. The first frame still makes its encoder at once.
+
 ### Documentation
 
 - `FallbackToAudioTabMirroring` stays "does not apply", now with Chrome's reason: only the Global Media Controls panel reads
@@ -93,12 +106,6 @@ Chrome more closely.
   capture stayed at full size. The quantizer is now read from each H.264 frame's slice header, and the complexity
   estimate (a copy of every frame's pixels) is skipped while it can be. The stage log adds the QP, each frame's bitrate
   as a share of the target, the capture area the feedback allows, and a line for every capture size change.
-- **The same holds for software VP8 and VP9 and for hardware HEVC**, so a PC without a hardware H.264 encoder no longer
-  mirrors a blocky tab at full size. The quantizer is read from the VP8 frame header, the VP9 uncompressed header and
-  the HEVC slice header, and normalized as Chrome's encoders report it: libvpx's 0 to 63 scale over 63
-  (`VpxVideoEncoder::GetEncoderOutput`; Chrome lets libvpx go up to 58), the HEVC slice QP over 51, and a hardware VP8
-  or VP9 q index over 127 or 255 (`VideoEncodeAcceleratorAdapter::BitstreamBufferReady`). The stage log names the
-  scale with the QP (`video QP (of 63)`).
 - A mirroring route the receiver ended itself (its app is gone from the receiver status) no longer sends a CLOSE and a STOP
   for the session the receiver dropped; it only closes its channel (`CastActivityManager::OnSessionRemoved`,
   `RemoveActivity`).

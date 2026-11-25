@@ -83,10 +83,18 @@ function startAgent() {
   }
 
   const timeouts: number[] = [];
+  // The encoder's resize debounce (250 ms) is the one timer a test runs by hand; the others fire at once.
+  const debounces: { id: number; cb: () => void }[] = [];
+  let debounceStarts = 0;
   const context = createContext({
     window: { addEventListener: (_: string, l: typeof listener) => { listener = l; } },
     performance: { timeOrigin: 0, now: () => now },
-    setTimeout: (cb: () => void, ms: number) => { timeouts.push(ms); return setTimeout(cb, 0); },
+    setTimeout: (cb: () => void, ms: number) => {
+      if (ms === 250) { const id = ++debounceStarts; debounces.push({ id, cb }); return id; }
+      timeouts.push(ms);
+      return setTimeout(cb, 0);
+    },
+    clearTimeout: (id: unknown) => { const i = debounces.findIndex((d) => d.id === id); if (i >= 0) debounces.splice(i, 1); },
     navigator: { mediaDevices: {
       getDisplayMedia: async (constraints: Record<string, unknown>) => {
         displayMedia.push(constraints);
@@ -112,6 +120,12 @@ function startAgent() {
   return {
     sent, encoders, settle, tracks, timeouts, requests, refuse, supportChecks, userMedia, displayMedia, control,
     advance: (ms: number) => { now += ms; },
+    /** The resize debounce: how many waits were started, whether one is running, and the 250 ms passing. */
+    debounce: {
+      starts: () => debounceStarts,
+      running: () => debounces.length > 0,
+      elapse: async () => { for (const d of debounces.splice(0)) d.cb(); await settle(); },
+    },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
     capture: async (ts: number, options: FrameOptions = {}) => {
       now += options.gapMs ?? 33;
@@ -590,30 +604,130 @@ test("agent: no complexity is estimated while the engine has it turned off, and 
   await a.command({ t: "estimate-complexity", on: false });
   await encodeNext(3);
   a.encoders[0]!.emit(0, true); a.encoders[0]!.emit(1); a.encoders[0]!.emit(2); a.encoders[0]!.emit(3);
-  // A frame of another size makes a new encoder (ConstructEncoder), which knows nothing of the old one's quantizer.
+  // A size that lasted 250 ms makes a new encoder (ConstructEncoder), which knows nothing of the old one's quantizer.
   await encodeNext(4, { luma: () => 9, width: 320, height: 180 });
+  a.encoders[0]!.emit(4);
+  await a.debounce.elapse();
+  await encodeNext(5, { luma: () => 9, width: 320, height: 180 });
   a.encoders[1]!.emit(0, true);
   const c = chunksOf(a.sent);
-  assert.deepEqual(c.map((m) => "complexity" in m), [true, false, true, false, true]);
+  assert.deepEqual(c.map((m) => "complexity" in m), [true, false, true, false, false, true]);
 });
 
 test("agent: the engine's capture size sets the size the encoder is configured for, and only while the aspect ratio matches", async () => {
   const a = startAgent();
   await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 1280, height: 720, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
   const sizes = () => a.encoders.flatMap((e) => e.configures.map((c) => `${c.width}x${c.height}`));
-  await a.capture(0, { width: 1280, height: 720 });
-  await a.command({ t: "encode", rtp: a.rtps()[0]! });
+  let n = 0;
+  // One frame of the given size, encoded, and the 250 ms a new size has to last before the encoder follows it.
+  const frameThenWait = async (width: number, height: number) => {
+    await a.capture(n * 33_000, { width, height });
+    await a.command({ t: "encode", rtp: a.rtps()[n++]! });
+    await a.debounce.elapse();
+  };
+  await frameThenWait(1280, 720);
   await a.command({ t: "capture-size", width: 640, height: 360 });
-  await a.capture(33_000, { width: 1280, height: 720 });
-  await a.command({ t: "encode", rtp: a.rtps()[1]! });
+  await frameThenWait(1280, 720);
   // The source became portrait before the oracle caught up: its own size wins.
-  await a.capture(66_000, { width: 720, height: 1280 });
-  await a.command({ t: "encode", rtp: a.rtps()[2]! });
+  await frameThenWait(720, 1280);
   // A capture size larger than the frame is the frame's size.
   await a.command({ t: "capture-size", width: 1920, height: 1080 });
-  await a.capture(99_000, { width: 1280, height: 720 });
-  await a.command({ t: "encode", rtp: a.rtps()[3]! });
+  await frameThenWait(1280, 720);
   assert.deepEqual(sizes(), ["1280x720", "640x360", "720x1280", "1280x720"]);
+});
+
+/** A started tab capture whose frames are encoded as they come; `frame` takes the next one's size (640x360 unless given). */
+async function resizingAgent() {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 1280, height: 720, frameRate: 30, resolutionChangePolicy: "any_within_limit" as const } });
+  let n = 0;
+  const frame = async (width = 640, height = 360) => {
+    await a.capture(n * 33_000, { width, height });
+    await a.command({ t: "encode", rtp: a.rtps()[n++]! });
+  };
+  const sizes = () => a.encoders.flatMap((e) => e.configures.map((c) => `${c.width}x${c.height}`));
+  const drops = () => a.sent.filter((m) => m.t === "video-drop").map((m) => (m as { rtp: number }).rtp);
+  return { a, frame, sizes, drops };
+}
+
+test("agent: a new frame size rebuilds the encoder only after 250 ms; until then the old encoder takes the frames (resize_debounce_timer_)", async () => {
+  const { a, frame, sizes, drops } = await resizingAgent();
+  await frame();
+  assert.deepEqual(sizes(), ["640x360"], "the first frame makes the encoder at once");
+  assert.equal(a.debounce.starts(), 0);
+  a.encoders[0]!.emit(0, true);
+
+  await frame(800, 450);
+  await frame(800, 450);
+  await frame(800, 450);
+  assert.equal(a.debounce.starts(), 1, "frames of the size already waited for do not start the wait over");
+  assert.deepEqual(sizes(), ["640x360"]);
+  // EncodeVideoFrame goes on to encode: no frame is dropped or held, and none is made a key frame.
+  assert.deepEqual(a.encoders[0]!.encodes.map((e) => [e.frame.displayWidth, e.keyFrame]), [[640, true], [800, false], [800, false], [800, false]]);
+  assert.deepEqual(drops(), []);
+  a.encoders[0]!.emit(1);
+
+  // ReconstructEncoderForNewSize -> ConstructEncoder: the frames still in the old encoder are reported dropped.
+  await a.debounce.elapse();
+  assert.deepEqual(sizes(), ["640x360", "800x450"]);
+  assert.equal(a.encoders[0]!.state, "closed");
+  assert.deepEqual(drops(), [a.rtps()[2], a.rtps()[3]]);
+  await frame(800, 450);
+  assert.deepEqual(a.encoders[1]!.encodes.map((e) => e.keyFrame), [true], "a new encoder starts with a key frame");
+  assert.equal(a.debounce.starts(), 1, "a frame of the encoder's size starts no wait");
+});
+
+test("agent: a frame size that goes back to the encoder's within 250 ms cancels the resize", async () => {
+  const { a, frame, sizes } = await resizingAgent();
+  await frame();
+  await frame(800, 450);
+  assert.equal(a.debounce.running(), true);
+  await frame();
+  assert.equal(a.debounce.running(), false, "the timer is stopped");
+  await a.debounce.elapse();
+  assert.deepEqual(sizes(), ["640x360"]);
+  assert.equal(a.encoders.length, 1);
+  // The same size again is a new wait of its own: the target was forgotten with the timer.
+  await frame(800, 450);
+  assert.equal(a.debounce.starts(), 2);
+  await a.debounce.elapse();
+  assert.deepEqual(sizes(), ["640x360", "800x450"]);
+});
+
+test("agent: each other size starts the 250 ms over, so a size that keeps changing costs one new encoder", async () => {
+  const { a, frame, sizes } = await resizingAgent();
+  await frame();
+  for (const [w, h] of [[656, 370], [672, 378], [688, 388], [704, 396]] as const) await frame(w, h);
+  assert.equal(a.debounce.starts(), 4, "one wait per size");
+  assert.deepEqual(sizes(), ["640x360"]);
+  assert.equal(a.encoders[0]!.encodes.length, 5, "every frame was encoded meanwhile");
+  // Only the last wait is left, and it ends without another frame: the timer does not need one.
+  await a.debounce.elapse();
+  assert.deepEqual(sizes(), ["640x360", "704x396"]);
+  assert.equal(a.encoders.length, 2);
+});
+
+test("agent: a new codec choice ends a pending resize, and its encoder is made at once for the next frame's size", async () => {
+  const { a, frame, sizes } = await resizingAgent();
+  await frame();
+  await frame(800, 450);
+  await a.command({ t: "set-codec", codec: "vp9", codecString: "vp09.00.40.08", hardware: false });
+  assert.equal(a.debounce.running(), false);
+  await frame(800, 450);
+  assert.deepEqual(sizes(), ["640x360", "800x450"]);
+  assert.equal(a.encoders[1]!.configures[0]!.codec, "vp09.00.40.08");
+  assert.equal(a.debounce.starts(), 1);
+});
+
+test("agent: a size the encoder cannot be rebuilt for is reported after the 250 ms, and the frames before it were still encoded", async () => {
+  const { a, frame, sizes } = await resizingAgent();
+  await frame();
+  a.control.supported = (config) => config.width === 640;
+  await frame(800, 450);
+  assert.equal(a.sent.filter((m) => m.t === "encoder-status").length, 0);
+  await a.debounce.elapse();
+  assert.deepEqual(plain(a.sent.filter((m) => m.t === "encoder-status")), [{ t: "encoder-status", kind: "video", status: "unsupported_codec", message: "vp8 at 800x450" }]);
+  assert.deepEqual(sizes(), ["640x360"]);
 });
 
 test("agent: the rate limit goes by capture time, so frames that arrive bunched after a stall are kept", async () => {
