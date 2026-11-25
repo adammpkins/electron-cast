@@ -46,6 +46,7 @@ export const AGENT_SOURCE = String.raw`
   let lastFrameClone = null;
   let lastRtp = 0;
   let firstTimestamp = null;
+  let lastCapture = null;              // { timestamp (capture clock, us), refMs (epoch ms) } of the newest frame, refresh or not
   const pendingAudio = new Map();      // seq -> AudioData
   const audioInFlight = [];
   let audioSeq = 0;
@@ -87,11 +88,16 @@ export const AGENT_SOURCE = String.raw`
       case "pause": paused = true; return;
       case "resume": paused = false; return;
       case "refresh":
-        if (lastFrameClone) {
+        // OpenscreenSessionHost::OnRefreshTimerFired -> RequestRefreshFrame: a static screen produces no capture
+        // frames, so the last one is sent again. It is stamped with the time that has passed, on the same
+        // capture-clock-to-RTP mapping as real frames, so the receiver's playout clock keeps running.
+        if (lastFrameClone && lastCapture) {
           const clone = lastFrameClone.clone();
-          lastRtp += 1;
-          holdFrame(lastRtp, clone);
-          send({ t: "frame", rtp: lastRtp, refMs: epochNow(), width: clone.displayWidth, height: clone.displayHeight });
+          const nowMs = epochNow();
+          const rtp = rtpFor(lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000);
+          lastCapture = { timestamp: lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000, refMs: nowMs };
+          holdFrame(rtp, clone);
+          send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight });
         }
         return;
       case "encode": return encodeFrame(m.rtp);
@@ -139,6 +145,15 @@ export const AGENT_SOURCE = String.raw`
     else if (m.audio) fail("audio", "the capture has no audio track");
   }
 
+  // Presentation time in RTP ticks (90 kHz) from the capture clock, made strictly increasing.
+  function rtpFor(timestamp) {
+    if (firstTimestamp === null) firstTimestamp = timestamp;
+    let rtp = Math.round(((timestamp - firstTimestamp) * 90) / 1000) + 90000;
+    if (rtp <= lastRtp) rtp = lastRtp + 1;
+    lastRtp = rtp;
+    return rtp;
+  }
+
   function holdFrame(rtp, frame) {
     pendingFrames.set(rtp, frame);
     while (pendingFrames.size > MAX_PENDING) {
@@ -160,11 +175,8 @@ export const AGENT_SOURCE = String.raw`
       const nowMs = performance.now();
       if (nowMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { frame.close(); continue; }
       lastAcceptedAt = nowMs;
-      if (firstTimestamp === null) firstTimestamp = frame.timestamp;
-      // Presentation time in RTP ticks (90 kHz), made strictly increasing.
-      let rtp = Math.round(((frame.timestamp - firstTimestamp) * 90) / 1000) + 90000;
-      if (rtp <= lastRtp) rtp = lastRtp + 1;
-      lastRtp = rtp;
+      const rtp = rtpFor(frame.timestamp);
+      lastCapture = { timestamp: frame.timestamp, refMs: epochNow() };
       if (lastFrameClone) lastFrameClone.close();
       lastFrameClone = frame.clone();
       holdFrame(rtp, frame);

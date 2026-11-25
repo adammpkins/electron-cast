@@ -22,10 +22,27 @@ const LOOPBACK_TV = {
 };
 
 export async function runMirroringScenario({ pass, fail, engineModulePath, mode = "tab" }) {
+  // Every line says which scenario it belongs to, so a failure in a run of both is not ambiguous.
+  try {
+    await runScenario({ pass: (m) => pass(`[${mode}] ${m}`), fail: (e) => fail(e), engineModulePath, mode });
+  } catch (err) {
+    if (err instanceof Error) err.message = `[${mode}] ${err.message}`;
+    throw err;
+  }
+}
+
+async function runScenario({ pass, fail, engineModulePath, mode }) {
   let screen;
   if (mode === "desktop") {
     [screen] = await desktopCapturer.getSources({ types: ["screen"] });
     if (screen === undefined) { pass("desktop mirroring skipped: this machine has no screen to capture"); return; }
+  }
+  // A desktop capture is damage driven, so a still screen yields few frames; give it something that moves.
+  let mover;
+  if (mode === "desktop") {
+    mover = new BrowserWindow({ width: 320, height: 200, x: 40, y: 40, show: false, alwaysOnTop: true, focusable: false, skipTaskbar: true, webPreferences: { backgroundThrottling: false } });
+    await mover.loadURL(`data:text/html;base64,${Buffer.from(MIRROR_PAGE.replace("new AudioContext()", "{ resume() { return Promise.resolve(); }, createOscillator: () => ({ connect() {}, start() {} }), destination: null }")).toString("base64")}`);
+    mover.showInactive();
   }
   const receiver = await FakeReceiver.create({ verifyBody: false });
   const calls = [];
@@ -53,7 +70,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   const discovery = Object.assign(new EventEmitter(), { devices: () => [{ ...LOOPBACK_TV }], async start() {}, stop() {} });
   const cast = createCastManager({
     ipcMain, discovery, createClient: () => client, selectDevice: async () => null, presentation: false, channel: "electron-cast-mirroring-smoke",
-    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, log: (l, m) => console.log(`smoke: mirroring ${l}: ${m}`) },
+    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, log: (l, m) => console.log(`smoke: [${mode}] mirroring ${l}: ${m}`) },
   });
   await cast.start();
 
@@ -83,7 +100,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   while (Date.now() < deadline && !(s.validVideoFrames >= 30 && s.validAudioFrames >= 60)) await new Promise((r) => setTimeout(r, 100));
   await new Promise((r) => setTimeout(r, 3000));
   const seconds = ((s.lastFrameAt ?? 0) - (s.firstFrameAt ?? 0)) / 1000;
-  console.log(`smoke: mirroring video ${s.videoFrames} frames (${s.validVideoFrames} valid VP8, ${s.videoKeyFrames} key, ${(s.videoFrames / seconds).toFixed(1)} fps, ${Math.round((s.videoBytes * 8) / seconds / 1000)} kbps), audio ${s.audioFrames} frames (${s.validAudioFrames} valid Opus, ${Math.round(s.audioBytes / Math.max(1, s.audioFrames))} B avg), invalid ${s.invalidFrames}`);
+  console.log(`smoke: [${mode}] mirroring video ${s.videoFrames} frames (${s.validVideoFrames} valid VP8, ${s.videoKeyFrames} key, ${(s.videoFrames / seconds).toFixed(1)} fps, ${Math.round((s.videoBytes * 8) / seconds / 1000)} kbps), audio ${s.audioFrames} frames (${s.validAudioFrames} valid Opus, ${Math.round(s.audioBytes / Math.max(1, s.audioFrames))} B avg), invalid ${s.invalidFrames}`);
   assert.ok(s.validVideoFrames >= 30, `only ${s.validVideoFrames} valid VP8 frames reached the receiver`);
   assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
   assert.equal(s.invalidFrames, 0);
@@ -97,6 +114,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   pass("terminateRoute stopped the capture, the engine and the receiver app");
 
   page.destroy();
+  mover?.destroy();
   await cast.dispose();
   receiver.close();
 }
