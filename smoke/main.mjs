@@ -211,6 +211,7 @@ async function main() {
 
   // 3. tab mirroring against the fake receiver
   await runMirroringScenario({ pass, fail });
+  await runMirroringScenario({ pass, fail, mode: "desktop" });
 
   await cast.dispose();
   clearTimeout(timer);

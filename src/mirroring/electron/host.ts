@@ -146,8 +146,8 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         const wc = win.webContents;
         wc.setWindowOpenHandler(() => ({ action: "deny" }));
         wc.on("will-navigate", (ev) => ev.preventDefault());
-        wc.session.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "media"));
-        wc.session.setPermissionCheckHandler((_wc, permission) => permission === "media");
+        wc.session.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "media" || permission === "display-capture"));
+        wc.session.setPermissionCheckHandler((_wc, permission) => permission === "media" || permission === "display-capture");
 
         let capture: CaptureSource;
         let mintTabSource: (() => CaptureSource) | undefined;

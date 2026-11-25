@@ -21,7 +21,12 @@ const LOOPBACK_TV = {
   capabilities: 5, isGroup: false, statusText: "", instanceName: "loopback", txt: {},
 };
 
-export async function runMirroringScenario({ pass, fail, engineModulePath }) {
+export async function runMirroringScenario({ pass, fail, engineModulePath, mode = "tab" }) {
+  let screen;
+  if (mode === "desktop") {
+    [screen] = await desktopCapturer.getSources({ types: ["screen"] });
+    if (screen === undefined) { pass("desktop mirroring skipped: this machine has no screen to capture"); return; }
+  }
   const receiver = await FakeReceiver.create({ verifyBody: false });
   const calls = [];
   const client = new (class extends EventEmitter {
@@ -53,7 +58,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath }) {
   await cast.start();
 
   const sinks = [];
-  const stopObserving = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => sinks.push(s) }, { castMode: "tab_mirror" });
+  const stopObserving = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => sinks.push(s) }, { castMode: mode === "desktop" ? "desktop_mirror" : "tab_mirror", withAudio: mode === "desktop" });
   assert.equal(sinks[0]?.length, 1, "the loopback TV is not listed for tab mirroring");
   stopObserving();
 
@@ -63,10 +68,15 @@ export async function runMirroringScenario({ pass, fail, engineModulePath }) {
 
   const routesSeen = [];
   cast.registerMediaRoutesObserver({ onRoutesUpdated: (r) => routesSeen.push(r) });
-  const route = await cast.startCasting(LOOPBACK_TV.id, { castMode: "tab_mirror", webContentsId: page.webContents.id });
-  assert.equal(route.description, "Casting tab");
+  const route = await cast.startCasting(
+    LOOPBACK_TV.id,
+    mode === "desktop"
+      ? { castMode: "desktop_mirror", desktopSourceId: screen.id, withAudio: true }
+      : { castMode: "tab_mirror", webContentsId: page.webContents.id },
+  );
+  assert.equal(route.description, mode === "desktop" ? "Casting screen" : "Casting tab");
   assert.ok(calls.includes("launch 0F5096E8"), `launch calls: ${calls}`);
-  pass("tab mirroring route started (Casting tab, app 0F5096E8)");
+  pass(`${mode} mirroring route started (${route.description}, app 0F5096E8)`);
 
   const deadline = Date.now() + 15_000;
   const s = receiver.stats;
@@ -78,7 +88,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath }) {
   assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
   assert.equal(s.invalidFrames, 0);
   assert.ok(s.videoKeyFrames >= 1);
-  pass("fake receiver decrypted and validated VP8 and Opus frames from the captured tab");
+  pass(`fake receiver decrypted and validated VP8 and Opus frames from the captured ${mode}`);
 
   await cast.terminateRoute(route.id);
   await new Promise((r) => setTimeout(r, 200));

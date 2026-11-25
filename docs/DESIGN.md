@@ -373,8 +373,7 @@ One mirroring route is three contexts:
   state, and Chrome makes that call synchronously on one thread.
 - **Capture agent, a hidden `BrowserWindow`** (`electron/agent-source.ts`) on a private in-memory partition, sandboxed,
   with navigation and window creation denied. It captures (`getUserMedia` with `chromeMediaSource: 'tab'` and the id
-  from `webContents.getMediaSourceId`; or `getDisplayMedia`, answered by `setDisplayMediaRequestHandler` with
-  `audio: 'loopback'` where the OS has it), reads tracks with `MediaStreamTrackProcessor`, and encodes with WebCodecs
+  from `webContents.getMediaSourceId`; or `getUserMedia` with `chromeMediaSource: 'desktop'` and the `desktopCapturer` id the app chose, plus loopback audio where the OS has it; `getDisplayMedia` would need a user gesture the hidden page never has, and Chrome's `CastMirroringServiceHost` asks for none), reads tracks with `MediaStreamTrackProcessor`, and encodes with WebCodecs
   `VideoEncoder` and `AudioEncoder`. A `MessagePort` goes straight between the agent and the engine, so frame bytes
   never pass through main. A hidden window was chosen over the source page's isolated world because the page cannot
   disturb it (navigation, CSP, `beforeunload`) and the library needs no foothold in the app's page.

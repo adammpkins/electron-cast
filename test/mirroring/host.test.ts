@@ -8,6 +8,8 @@ import { sleep } from "./session-harness.ts";
 function fakeElectron() {
   const state = {
     windows: [] as { destroyed: boolean }[],
+    request: undefined as ((wc: unknown, permission: string, cb: (granted: boolean) => void) => void) | undefined,
+    check: undefined as ((wc: unknown, permission: string) => boolean) | undefined,
     procs: [] as { handlers: { message: ((m: FromEngine) => void)[]; exit: ((code: number) => void)[] }; posted: unknown[]; killed: boolean }[],
   };
   const page = {
@@ -18,7 +20,11 @@ function fakeElectron() {
     postMessage() {},
     setWindowOpenHandler() {},
     on() {},
-    session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, setDisplayMediaRequestHandler() {} },
+    session: {
+      setPermissionRequestHandler(h: typeof state.request) { state.request = h; },
+      setPermissionCheckHandler(h: typeof state.check) { state.check = h; },
+      setDisplayMediaRequestHandler() {},
+    },
   };
   const electron = {
     BrowserWindow: class {
@@ -88,5 +94,20 @@ test("host: stopping on purpose is not an error", async () => {
   state.procs[0]!.handlers.exit.forEach((h) => h(0));
   assert.deepEqual(errors, []);
   assert.equal(state.windows[0]!.destroyed, true);
+  host.dispose();
+});
+
+test("host: the capture window's own session grants media and display capture, and nothing else", async () => {
+  const { state, host } = await start();
+  const asked = (permission: string): boolean => {
+    let granted = false;
+    state.request!(null, permission, (g) => { granted = g; });
+    return granted && state.check!(null, permission);
+  };
+  // Desktop capture is refused as "Permission denied" (NotAllowedError) unless display-capture is granted.
+  assert.equal(asked("media"), true);
+  assert.equal(asked("display-capture"), true);
+  assert.equal(asked("geolocation"), false);
+  assert.equal(asked("notifications"), false);
   host.dispose();
 });

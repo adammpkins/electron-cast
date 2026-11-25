@@ -58,7 +58,8 @@ export const AGENT_SOURCE = String.raw`
   const abandonInFlight = () => {
     for (const e of inFlight.splice(0)) { if (e.key) keyNext = true; dropVideo(e.rtp); }
   };
-  const fail = (where, error) => send({ t: "error", where, message: String((error && error.message) || error) });
+  const describe = (error) => (error && error.name ? error.name + ": " : "") + String((error && error.message) || error);
+  const fail = (where, error) => send({ t: "error", where, message: describe(error) });
 
   window.addEventListener("message", (event) => {
     if (event.data !== "electron-cast-mirroring:port" || event.ports.length === 0 || port !== null) return;
@@ -101,22 +102,29 @@ export const AGENT_SOURCE = String.raw`
   }
 
   async function start(m) {
+    // getDisplayMedia would need transient user activation, which this hidden page never has (NotAllowedError, shown
+    // as "Permission denied"). Chrome's own mirroring service does not ask either: CastMirroringServiceHost hands the
+    // desktop media id straight to the capture host and opens the system loopback device for audio
+    // (CreateAudioStreamForDesktop). The legacy constraints are the renderer-side equivalent: the source id the app
+    // chose, and chromeMediaSource "desktop" (no id) for loopback audio.
+    const tab = m.source.kind === "tab";
+    const sourceKind = tab ? "tab" : "desktop";
+    const idConstraint = tab ? { chromeMediaSourceId: m.source.mediaSourceId } : { chromeMediaSourceId: m.source.sourceId };
+    const limits = m.video ? { maxWidth: m.video.width, maxHeight: m.video.height, maxFrameRate: m.video.frameRate } : {};
+    const videoWanted = !!m.video || !tab;
+    const acquire = (withAudio, withVideo) => navigator.mediaDevices.getUserMedia({
+      audio: withAudio ? { mandatory: tab ? { chromeMediaSource: "tab", ...idConstraint } : { chromeMediaSource: "desktop" } } : false,
+      video: withVideo ? { mandatory: { chromeMediaSource: sourceKind, ...idConstraint, ...limits } } : false,
+    });
     try {
-      if (m.source.kind === "tab") {
-        const mandatory = { chromeMediaSource: "tab", chromeMediaSourceId: m.source.mediaSourceId };
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: m.audio ? { mandatory } : false,
-          video: m.video ? { mandatory: { ...mandatory, maxWidth: m.video.width, maxHeight: m.video.height, maxFrameRate: m.video.frameRate } } : false,
-        });
-      } else {
-        // The main process answers this call with the chosen source (setDisplayMediaRequestHandler), and loopback audio.
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          audio: !!m.audio,
-          video: { width: { max: m.video ? m.video.width : 1920 }, height: { max: m.video ? m.video.height : 1080 }, frameRate: { max: m.video ? m.video.frameRate : 30 } },
-        });
-      }
+      stream = await acquire(!!m.audio, videoWanted);
     } catch (err) {
-      fail(m.video ? "video" : "audio", err);
+      // One call serves both tracks, so say which one the browser refused: try the video alone.
+      let which = m.video ? "video" : "audio";
+      if (m.audio && videoWanted) {
+        try { (await acquire(false, true)).getTracks().forEach((t) => t.stop()); which = "audio"; } catch { which = "video"; }
+      }
+      fail(which, err);
       return;
     }
     const video = stream.getVideoTracks()[0];
