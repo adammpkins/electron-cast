@@ -167,7 +167,7 @@ test("cache-flush does not evict records received within the last second", () =>
   const host = "fuchsia-3769-c26f-b9bb.local";
   cache.ingest([{ name: host, type: "A", rclass: 1, cacheFlush: true, ttl: 120, data: "10.0.0.31" }], 500);
   const hub = cache.devices().find((d) => d.name === "Hallway display");
-  assert.deepEqual(hub?.addresses.filter((a) => a.startsWith("10.")), ["10.0.0.30", "10.0.0.31"]);
+  assert.deepEqual(hub?.addresses.filter((a) => a.startsWith("10.")), ["10.0.0.31", "10.0.0.30"]);
 });
 
 test("ignores PTR records for other services", () => {
@@ -237,4 +237,43 @@ test("returned devices are snapshots the caller cannot use to corrupt the cache"
   d.txt.fn = "hacked";
   assert.deepEqual(cache.devices()[0]?.addresses, ["10.0.0.10"]);
   assert.equal(cache.devices()[0]?.txt.fn, "Lounge Cast TV");
+});
+
+function host(name: string, type: "A" | "AAAA", data: string, ttl = 120, cacheFlush = true): DnsRecord {
+  return { name, type, ttl, cacheFlush, data } as DnsRecord;
+}
+
+test("dropSource removes records only that source heard, keeps those another source also heard", () => {
+  const cache = new CastDeviceCache();
+  const all = records("chromecast");
+  cache.ingest(all, 0, "eth");
+  cache.ingest(all.filter((r) => r.type === "PTR" || r.type === "TXT"), 1000, "wifi");
+  // Everything came from eth; the PTR and TXT also from wifi. Losing wifi changes nothing.
+  assert.deepEqual(cache.dropSource("wifi"), { added: [], updated: [], removed: [] });
+  assert.equal(cache.devices().length, 1);
+  // Losing eth removes the SRV and A records, so the device cannot be joined any more.
+  const change = cache.dropSource("eth");
+  assert.equal(change.removed.length, 1);
+  assert.deepEqual(cache.devices(), []);
+});
+
+test("records ingested without a source are never dropped by dropSource", () => {
+  const cache = new CastDeviceCache();
+  cache.ingest(records("chromecast"), 0);
+  assert.deepEqual(cache.dropSource("eth"), { added: [], updated: [], removed: [] });
+  assert.equal(cache.devices().length, 1);
+});
+
+test("addresses: IPv4 first, then global IPv6, then link-local; newest first within a kind", () => {
+  const cache = new CastDeviceCache();
+  const base = records("chromecast");
+  const target = base.find((r) => r.type === "A")?.name ?? "";
+  cache.ingest(base.filter((r) => r.type !== "A"), 0);
+  cache.ingest([host(target, "AAAA", "fe80::1%12")], 0);
+  cache.ingest([host(target, "AAAA", "2001:db8::1")], 0);
+  cache.ingest([host(target, "A", "10.0.0.10", 120, false)], 1000);
+  cache.ingest([host(target, "A", "10.0.0.77", 120, false)], 2000);
+  const [d] = cache.devices();
+  assert.deepEqual(d?.addresses, ["10.0.0.77", "10.0.0.10", "2001:db8::1", "fe80::1%12"]);
+  assert.equal(d?.host, "10.0.0.77");
 });

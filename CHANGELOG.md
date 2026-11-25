@@ -19,6 +19,7 @@
   can in Chrome: `reconnect("cast-session_<id>")` (Google's SDK `requestSessionById`) now finds sessions this run did
   not start, by asking the known devices what they run. Auto-join still does not join them, as in Chrome, and nothing
   is persisted. The service gains a `joinRunningSession` call for this; `mode: "chromecast"` is unchanged.
+- Discovery now also runs mDNS over IPv6 (link-local, per adapter) so IPv6-only devices are found, with `fe80::` addresses carrying their scope so they can be connected to. IPv4 is still preferred. A network adapter that goes away takes its devices with it at once, and sockets are replaced after the machine wakes from sleep.
 
 ## 0.3.1
 

@@ -26,6 +26,8 @@ interface StoredRecord {
   record: DnsRecord;
   receivedAt: number;
   expiresAt: number;
+  /** Interfaces this record was heard on (see {@link CastDeviceCache.dropSource}). */
+  sources: Set<string>;
 }
 
 /** Data-identity component of a storage key ("" for TXT, which is keyed by name alone). */
@@ -79,6 +81,17 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return true;
 }
 
+interface Seen { address: string; receivedAt: number }
+
+/** Addresses, most recently heard first: after a DHCP change the new one leads even before the old one expires. */
+function newestFirst(list: Seen[]): string[] {
+  return [...list].sort((a, b) => b.receivedAt - a.receivedAt).map((a) => a.address);
+}
+
+function isLinkLocal(address: string): boolean {
+  return /^fe[89ab][0-9a-f]:/i.test(address);
+}
+
 /** Parses the TXT `ca` value: a non-negative base-10 integer, or 0 otherwise. */
 function parseCapabilities(raw: string | undefined): number {
   if (typeof raw !== "string" || !/^\d+$/.test(raw)) return 0;
@@ -108,9 +121,20 @@ export class CastDeviceCache {
   }
 
   /** Ingests a batch of records (in arrival order) and reports device changes. */
-  ingest(records: DnsRecord[], now: number): CacheChange {
+  ingest(records: DnsRecord[], now: number, source?: string): CacheChange {
     const before = this.devices();
-    for (const record of records) this.store(record, now);
+    for (const record of records) this.store(record, now, source);
+    return this.diff(before);
+  }
+
+  /**
+   * Forgets that `source` (an interface) heard anything, and removes the records that nothing else heard. Used when
+   * an interface goes away: its devices are not reachable any more, so they should not wait out their TTL.
+   */
+  dropSource(source: string): CacheChange {
+    const before = this.devices();
+    const kept = this.stored.filter((r) => !r.sources.delete(source) || r.sources.size > 0);
+    this.stored.splice(0, this.stored.length, ...kept);
     return this.diff(before);
   }
 
@@ -126,7 +150,7 @@ export class CastDeviceCache {
     return this.snapshot().map(copyDevice);
   }
 
-  private store(record: DnsRecord, now: number): void {
+  private store(record: DnsRecord, now: number, source?: string): void {
     const key = keyOf(record);
     if (record.ttl === 0) {
       // Goodbye: drop the matching stored record, do not store it.
@@ -145,8 +169,10 @@ export class CastDeviceCache {
         ),
       );
     }
-    const entry = { record, receivedAt: now, expiresAt: now + record.ttl * 1000 };
     const idx = this.stored.findIndex((r) => keyOf(r.record) === key);
+    const sources = new Set(idx !== -1 ? this.stored[idx]?.sources : undefined);
+    if (source !== undefined) sources.add(source);
+    const entry = { record, receivedAt: now, expiresAt: now + record.ttl * 1000, sources };
     if (idx !== -1) this.stored[idx] = entry;
     else this.stored.push(entry);
   }
@@ -156,7 +182,7 @@ export class CastDeviceCache {
     const service = this.serviceName.toLowerCase();
     const srvByInstance = new Map<string, { record: Extract<DnsRecord, { type: "SRV" }>; receivedAt: number }>();
     const txtByInstance = new Map<string, { record: Extract<DnsRecord, { type: "TXT" }>; receivedAt: number }>();
-    const addrsByHost = new Map<string, { v4: string[]; v6: string[] }>();
+    const addrsByHost = new Map<string, { v4: Seen[]; v6: Seen[] }>();
     for (const s of this.stored) {
       const rec = s.record;
       const name = rec.name.toLowerCase();
@@ -172,7 +198,7 @@ export class CastDeviceCache {
           list = { v4: [], v6: [] };
           addrsByHost.set(name, list);
         }
-        (rec.type === "A" ? list.v4 : list.v6).push(rec.data);
+        (rec.type === "A" ? list.v4 : list.v6).push({ address: rec.data, receivedAt: s.receivedAt });
       }
     }
     const byId = new Map<string, { device: CastDevice; recency: number }>();
@@ -188,6 +214,10 @@ export class CastDeviceCache {
       if (!id) continue;
       const addrs = addrsByHost.get(srv.record.data.target.toLowerCase());
       if (!addrs || (addrs.v4.length + addrs.v6.length) === 0) continue;
+      const v4 = newestFirst(addrs.v4);
+      const v6 = newestFirst(addrs.v6);
+      // IPv4 first (Chromium's Cast discovery only resolves A records), then global IPv6, then link-local.
+      const ordered = [...v4, ...v6.filter((a) => !isLinkLocal(a)), ...v6.filter(isLinkLocal)];
       const txtData = txt.record.data;
       const fn = txtData["fn"];
       const dot = instance.indexOf(".");
@@ -197,8 +227,8 @@ export class CastDeviceCache {
         id,
         name: fn && fn !== "" ? fn : label,
         model: txtData["md"] ?? "",
-        host: addrs.v4[0] ?? addrs.v6[0] ?? "",
-        addresses: [...addrs.v4, ...addrs.v6],
+        host: ordered[0] ?? "",
+        addresses: ordered,
         port: srv.record.data.port,
         capabilities,
         isGroup: (capabilities & 32) !== 0,
