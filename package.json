@@ -1,7 +1,7 @@
 {
   "name": "electron-cast",
   "version": "0.4.0",
-  "description": "Chromecast for Electron: lets pages run Google's own Cast SDK by supplying the Media Router Electron lacks, with device discovery and the Cast v2 protocol in the main process.",
+  "description": "The Cast support Electron never shipped: pages cast to Chromecasts and Google Cast devices as they do in Chrome, with Google's SDK unchanged. No dependencies.",
   "keywords": [
     "electron",
     "chromecast",
@@ -9,7 +9,10 @@
     "google-cast",
     "chrome.cast",
     "castv2",
-    "presentation-api"
+    "presentation-api",
+    "mirroring",
+    "screen-mirroring",
+    "dial"
   ],
   "license": "MIT",
   "homepage": "https://adammpkins.github.io/electron-cast/",
