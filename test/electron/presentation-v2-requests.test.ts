@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { CastSessionService } from "../../src/electron/session-service.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "../../src/electron/presentation-handler.ts";
 import { MEDIA_NAMESPACE, isMediaRequest, receiverMediaType } from "../../src/electron/presentation-envelope.ts";
-import { FakeDevices, FakeClient, TV, tick } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, waitForSinks } from "./fakes.ts";
 
 const URL_O = "https://google.com/cast#__castAppId__=233637DE/__castClientId__=c1/__castAutoJoinPolicy__=origin_scoped";
 const PAGE = { id: 1, origin: "https://music.youtube.com" };
@@ -13,7 +13,8 @@ const PAGE = { id: 1, origin: "https://music.youtube.com" };
 async function started() {
   const clients: FakeClient[] = [];
   let handler: CastPresentationHandler | undefined;
-  const service = new CastSessionService({
+  const service = waitForSinks(new CastSessionService({
+    sinks: FAST_SINKS,
     devices: new FakeDevices(),
     createClient: (d) => {
       const c = new FakeClient(d);
@@ -28,7 +29,7 @@ async function started() {
     },
     selectDevice: async (list) => list.find((d) => d.id === TV.id) ?? null,
     emit: (id, ev) => handler?.onServiceEvent(id, ev),
-  });
+  }));
   handler = new CastPresentationHandler({ service, token: "tok" });
   const conn: PresentationConnectionHandle = await handler.startPresentation({ urls: [URL_O], origin: PAGE.origin, senderId: PAGE.id });
   const got: any[] = [];

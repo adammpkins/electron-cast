@@ -119,6 +119,8 @@ async function main() {
   const requests = [];
   const cast = createCastManager({
     ipcMain,
+    // no random delay or report debounce: the fake device is a sink as soon as its channel opens
+    sinks: { openDelayMaxMs: 0, reportDelayMs: 0 },
     discovery: new FakeDiscovery(),
     createClient: (device) => {
       const client = new FakeClient(device);
@@ -133,6 +135,7 @@ async function main() {
     },
   });
   await cast.start();
+  await cast.settled();
 
   const preloadReports = new Map();
   ipcMain.on("smoke:preload", (event, report) => preloadReports.set(event.sender.id, report));
@@ -202,8 +205,8 @@ async function main() {
     assert.equal(out.appId, APP_ID);
     assert.equal(out.receiver, TV.name);
     assert.equal(requests.length, 2, "requestSession() did not reach selectDevice");
-    assert.equal(clients.length, 2, "requestSession() did not create a client");
-    assert.ok(clients[1].calls.includes(`launch ${APP_ID}`));
+    assert.equal(clients.length, 1, "the device's one channel is kept open and reused, as Chrome does");
+    assert.equal(clients[0].calls.filter((c) => c === `launch ${APP_ID}`).length, 2, "requestSession() did not launch on the open channel");
     pass("requestSession() with a user gesture resolved a session from the fake client");
     win.destroy();
   }

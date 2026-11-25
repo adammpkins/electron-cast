@@ -262,7 +262,7 @@ No Electron import: both modules take the Electron objects they need as paramete
 interfaces, so the library has no Electron dependency and runs in plain Node.
 
 - `main.ts`: `createCastManager({ ipcMain, selectDevice, allowOrigin?, discovery?, createClient?, channel?,
-  presentation? })` returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events
+  presentation? })` returns `{ start, devices, dispose, ... }` (see MAIN-API.md). It registers one invoke handler on `<channel>:call`; events
   go back to the page on `<channel>:event`. Unless `presentation: false`, it also serves presentation mode:
   `<channel>:presentation` (invoke), `<channel>:presentation:send` (page to main) and `<channel>:presentation:event`
   (main to page). Each connection and availability watch belongs to one frame, and the others can't touch it. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
@@ -302,3 +302,68 @@ import { installCastBridge } from "electron-cast/preload"; // not the root: it l
 installCastBridge({ contextBridge, ipcRenderer });
 // the page now has chrome.cast; the bridge key defaults to "__electronCastBridge"
 ```
+
+### Sinks and sessions (`sink-service.ts`, `session-tracker.ts`)
+
+Chrome's Media Router does not look a device up when a page asks. It opens a channel to every device mDNS finds, lists
+a device as a sink only when that channel is open and authenticated, keeps the channel open, and learns what each
+device runs from the receiver status that comes over it. electron-cast does the same, with Chromium `main` (November
+2026) as the reference. Paths are relative to the Chromium source root.
+
+| Rule | Where here | Chromium |
+|---|---|---|
+| A channel is opened to each discovered device, after a random delay of up to 5 s so that many senders do not hit one receiver together | `CastSinkService.openChannelsWithRandomizedDelay` (`openDelayMaxMs`) | `chrome/browser/media/router/discovery/mdns/cast_media_sink_service_impl.cc`: `OpenChannelsWithRandomizedDelay`; `cast_media_sink_service.cc`: `OnDnsSdEvent` |
+| The channel is a `CastSocket` that has passed device authentication (our `CastClient.connect()`); only then is the device a sink | `onOpened` | `cast_media_sink_service_impl.cc`: `OnChannelOpened`, which runs after `CastSocketImpl` finished the auth handshake (`components/media_router/common/providers/cast/channel/cast_socket.cc`) |
+| A device that fails to open (a connect error or a failed authentication) is retried with `net::BackoffEntry`: 15 s initial, factor 1, 50% jitter, 30 s cap, 3 attempts, then it is dropped and never listed | `onOpenError`, `onOpenGaveUp` (`retry`) | `cast_media_sink_service_impl.h`: `RetryParams`; `.cc`: `OnChannelErrorMayRetry`, `OnChannelOpenFailed`; `net/base/backoff_entry.cc`: `CalculateReleaseTime` |
+| Public and loopback addresses are skipped, unless the `kMediaRouterCastAllowAllIPs` policy is on | `openChannel` (`allowAllIps`) | `cast_media_sink_service_impl.cc`: `OpenChannel`; `cast_media_sink_service.cc`; `net/base/ip_address.cc`: `IsPubliclyRoutable`, `IsLoopback` |
+| The sinks are reported to observers once discovery has been quiet for 3 s, and only when the list changed | `markChanged`, `report` (`reportDelayMs`) | `chrome/browser/media/router/discovery/media_sink_service_base.cc`: `kDiscoveryTimeout`, `StartTimer`, `OnDiscoveryComplete` |
+| mDNS forgetting a device does not close its channel or remove its sink. A sink is removed when its channel fails and cannot be reopened | `onClientClosed`, `removeSink` | `cast_media_sink_service_impl.cc`: `OnError` (reopens through `OpenChannel`), `OnChannelOpenFailed` |
+| One channel per IP endpoint, shared by sink discovery and sessions. A sink whose address changed gets a channel to the new one; two ids at one address are one sink | `sinkMap`, `pending`, `onOpened` | `components/media_router/common/providers/cast/channel/cast_socket_service.cc`: `AddSocket`, `GetSocket`; `cast_media_sink_service_impl.cc`: `OnChannelOpened`, `UpdateCastSink` |
+| The channel is kept alive: a PING every 5 s and a 10 s liveness timeout. A failure closes it, and the sink service reopens it | `CastClient` heartbeat, then `onClientClosed` | `cast_media_sink_service_impl.h`: `ping_interval_in_seconds` 5, `liveness_timeout_in_seconds` 10; `cast_socket.cc`: `KeepAliveDelegate`; `cast_media_sink_service_impl.cc`: `OnError` |
+| When a sink is added or its channel opens, the device is asked for its receiver status | `CastSessionTracker.attach` | `chrome/browser/media/router/providers/cast/cast_session_tracker.cc`: `OnSinkAddedOrUpdated` -> `RequestReceiverStatus` |
+| A status describes a session only if it has exactly one application with a session id, app id, transport id and display name, whose transport is not `receiver-0`, which is not the backdrop app and has namespaces (a multizone leader may have none). Cast's reserved namespaces are dropped except the media one | `sessionFromStatus` | `chrome/browser/media/router/providers/cast/cast_internal_message_util.cc`: `CastSession::From`; `cast_message_util.cc`: `IsCastReservedNamespace` |
+| `MEDIA_STATUS` entries on the device's channel are merged by `mediaSessionId` into the session, and fields an update lacks are kept | `CastSessionTracker.applyMedia` | `cast_session_tracker.cc`: `HandleMediaStatusMessage`, `CopySavedMediaFieldsToMediaList`; `cast_internal_message_util.cc`: `CastSession::UpdateMedia` |
+| A session no page of this app holds is a route anyway, with no page and not local; its description is the status text, else the display name. It stays while the device runs it | `CastSessionService.mediaRoutes`, `nonLocalRouteOf` | `chrome/browser/media/router/providers/cast/cast_activity_manager.cc`: `AddNonLocalActivity`, `OnSessionAddedOrUpdated`; `cast_internal_message_util.cc`: `GetRouteDescription` |
+| `joinRunningSession` joins a session the tracker already knows, by id and app, with no origin check and no scan. An unknown id, or another app's session, finds nothing | `handleJoinRunningSession` | `cast_activity_manager.cc`: `FindActivityForSessionJoin`; `app_activity.cc`: `CanJoinSession` |
+| A non-local route can be terminated (the receiver's `STOP`) and have its volume set, over the device's own channel | `terminateSession`, `setSessionVolume` | `cast_activity_manager.cc`: `TerminateSession` |
+
+Resources: a device costs one TLS connection and one 5 s ping, as in Chrome, however many pages there are. Everything
+is released when a sink is removed, on `dispose()` (every channel is closed, timers are cleared) and after sleep: the
+first missed ping closes the channel and the reopen runs the retry policy, so a device that is back is listed again and
+one that is not is dropped after three attempts. Chrome has no setting that disables this or caps the number of
+channels, so there is none here either; `allowAllIps`, `sinks.retry`, `sinks.openDelayMaxMs` and `sinks.reportDelayMs`
+mirror what Chrome tunes.
+
+Where electron-cast differs from Chrome here:
+
+- Chrome's connect and liveness timeouts can grow with each failed attempt on a sink (`failure_count_map_`, at most 100,
+  times `OpenParams::dynamic_timeout_delta_in_seconds`, capped at `kMaxConnectTimeoutInSeconds` 30 and
+  `kMaxLivenessTimeoutInSeconds` 60 in `CreateCastSocketOpenParams`), but that delta is 0 and nothing in the fetched
+  sources sets it, so Chrome's timeouts stay 10 s. The same mechanism is here (`sinks.dynamicTimeoutDeltaMs`, default 0;
+  each run of attempts keeps the parameters it began with, as the `open_params` carried through
+  `OnChannelErrorMayRetry`) and the timeouts reach `createClient` as its second argument.
+- When a sink's endpoint changes, Chrome's `OnChannelOpenSucceeded` just adds the sink with the new channel and leaves the
+  old socket alone, so a session on it goes on. Here the replaced channel stays open while a session uses it and closes
+  when the last one ends (`CastSinkService.releaseUnused`, `channelRetired`), or on `dispose()`.
+- mDNS lists a device's addresses in no fixed order, and a Chrome sink has one address, so there is no Chrome counterpart
+  to a reorder. A sink keeps its endpoint while the device still offers it (same port, host among its addresses): only the
+  other details are updated, as `OpenChannel` does for an unchanged endpoint, and a reopen uses that endpoint too.
+- A retry waiting out its backoff is dropped when the device has meanwhile been reached at another endpoint or discovery
+  names another one; Chrome's `OnChannelOpenFailed` ignores a failure whose endpoint is no longer the sink's for the same
+  reason, but still re-runs the stale `OpenChannel`.
+- A channel is opened to IP addresses only, as Chrome's `IPEndPoint` is. A device whose host is a name (a custom
+  discovery) is skipped with a `skipped` event and one `console.warn` per device; `isPubliclyRoutable` answers for IP
+  literals only. Chrome logs the same kind of skip in `OpenChannel` (`LoggerList`).
+- A route whose channel is down (the sink stays listed while it is reopened, as in Chrome) stays listed. Terminating it
+  fails with `session_error` and Chrome's message: `CastMessageHandler::StopSession` finds no socket and reports a
+  failure, and `CastActivityManager::HandleStopSessionResponse` turns that into "StopSession response is not OK. Failed
+  to terminate route." and keeps the activity.
+- A page's own launch is not listed as a non-local route while it is in flight: the status the launch causes reaches the
+  tracker before the page's session record exists. Chrome has the activity before the launch (`DoLaunchSession` adds it
+  first), so the route is never non-local there.
+- `CastSession::UpdateSession` keeps the old session id and app when another session shows up on a device, which would
+  leave the tracker naming a session the device no longer runs; a different session replaces the old one here.
+- A status with several applications is never a session, so such a session cannot be joined (as in Chrome).
+- The tracker asks for status when a channel opens and then follows what the device pushes; Chrome asks again whenever
+  a sink is added or updated (`OnSinkAddedOrUpdated`), including when only its name changed.
+- The snapshot of a session this app started still passes the app's namespaces unfiltered, as before.

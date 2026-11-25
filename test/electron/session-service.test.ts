@@ -4,7 +4,7 @@ import { CastSessionService, capabilityNames, type CastRequestInfo, type DeviceC
 import { CastTimeoutError } from "../../src/client/index.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, EventLog, TV, SPEAKER, GROUP, device, launchError, tick } from "./fakes.ts";
+import { FakeDevices, FakeClient, EventLog, TV, SPEAKER, GROUP, device, launchError, tick, FAST_SINKS, waitForSinks } from "./fakes.ts";
 
 const YT = "233637DE";
 const MDX = "urn:x-cast:com.google.youtube.mdx";
@@ -17,12 +17,14 @@ function setup(opts: {
   devices?: FakeDevices;
   allowOrigin?: (o: string) => boolean;
   tweak?: (c: FakeClient) => void;
+  sinks?: Record<string, unknown>;
 } = {}) {
   const devices = opts.devices ?? new FakeDevices();
   const log = new EventLog();
   const clients: FakeClient[] = [];
   const picks: { devices: CastDevice[]; req: CastRequestInfo }[] = [];
-  const service = new CastSessionService({
+  const service = waitForSinks(new CastSessionService({
+    sinks: { ...FAST_SINKS, ...opts.sinks },
     devices,
     createClient: (d) => {
       const c = new FakeClient(d);
@@ -36,7 +38,7 @@ function setup(opts: {
     },
     allowOrigin: opts.allowOrigin,
     emit: log.emit,
-  });
+  }));
   return { service, devices, log, clients, picks };
 }
 
@@ -94,7 +96,7 @@ test("requestSession offers only capable devices, connects, launches and returns
   assert.equal(picks.length, 1);
   assert.deepEqual(picks[0]?.devices.map((d) => d.id), [TV.id], "the speaker and group have no video");
   assert.deepEqual(picks[0]?.req, { appId: YT, capabilities: ["video_out", "audio_out"], origin: PAGE.origin, senderId: PAGE.id });
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3, "a channel is open to every device, as Chrome keeps one per sink");
   assert.deepEqual(clients[0]?.calls, ["connect", `launch ${YT}`, `connectTransport ${TV.id}-transport-1`]);
   assert.deepEqual(r, {
     ok: true,
@@ -140,17 +142,19 @@ test("requestSession error mapping", async () => {
   const r3 = await pickerBroke.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
   assert.equal(!r3.ok && r3.code, "session_error");
 
+  // A device whose channel cannot be opened is not a sink, so there is nothing to pick (it is retried in the background)
   const unreachable = setup({ tweak: (c) => { c.connectError = new Error("ECONNREFUSED"); } });
   await init(unreachable.service);
   const r4 = await unreachable.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
   assert.equal(!r4.ok && r4.code, "receiver_unavailable");
   assert.match(!r4.ok ? (r4.description ?? "") : "", /ECONNREFUSED/);
+  assert.equal(unreachable.picks.length, 0);
 
   const launchFails = setup({ tweak: (c) => { c.launchError = launchError("NOT_FOUND"); } });
   await init(launchFails.service);
   const r5 = await launchFails.service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
   assert.equal(!r5.ok && r5.code, "session_error");
-  assert.ok(launchFails.clients[0]?.closed, "an unused client is closed after a failed launch");
+  assert.equal(launchFails.clients[0]?.closed, false, "the channel stays open after a failed launch");
 
   const launchTimesOut = setup({ tweak: (c) => { c.launchError = new CastTimeoutError("launch timed out"); } });
   await init(launchTimesOut.service);
@@ -179,11 +183,11 @@ test("a second requestSession from the same sender while one is open is invalid_
   assert.equal((await first).ok, true);
 });
 
-test("one client per device is reused across sessions", async () => {
+test("one channel per device is reused across sessions", async () => {
   const { service, clients } = setup();
   await session(service, PAGE);
   await session(service, PAGE2);
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3);
   assert.deepEqual(clients[0]?.calls.filter((c) => c === "connect"), ["connect"]);
 });
 
@@ -249,8 +253,9 @@ test("a dropped device connection disconnects its sessions", async () => {
   const s = await session(service);
   clients[0]?.fail();
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [{ type: "sessionEnded", sessionId: s.sessionId, status: "disconnected" }]);
+  await tick(5);
   await session(service);
-  assert.equal(clients.length, 2, "a new client replaces the dead one");
+  assert.equal(clients.length, 4, "the channel is reopened with a new client");
 });
 
 test("a transport closed by the receiver disconnects that session", async () => {
@@ -260,7 +265,7 @@ test("a transport closed by the receiver disconnects that session", async () => 
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [{ type: "sessionEnded", sessionId: s.sessionId, status: "disconnected" }]);
 });
 
-test("stopSession stops the app, tells other senders, and closes the idle client", async () => {
+test("stopSession stops the app, tells other senders, and keeps the device's channel open", async () => {
   const { service, clients, log } = setup();
   const s = await session(service, PAGE);
   await init(service, PAGE2); // origin_scoped: auto-joins
@@ -269,7 +274,7 @@ test("stopSession stops the app, tells other senders, and closes the idle client
   assert.ok(clients[0]?.calls.includes(`stop ${s.sessionId}`));
   assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [{ type: "sessionEnded", sessionId: s.sessionId, status: "stopped" }]);
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [], "the caller learns from its own callback");
-  assert.ok(clients[0]?.closed);
+  assert.equal(clients[0]?.closed, false);
 });
 
 test("leaveSession detaches the sender but leaves the app running", async () => {
@@ -279,7 +284,7 @@ test("leaveSession detaches the sender but leaves the app running", async () => 
   assert.deepEqual(r, { ok: true, value: undefined });
   assert.ok(!clients[0]?.calls.some((c) => c.startsWith("stop ")));
   assert.ok(clients[0]?.calls.includes(`closeTransport ${s.transportId}`));
-  assert.ok(clients[0]?.closed, "no sessions left on the device");
+  assert.equal(clients[0]?.closed, false, "the channel stays open with no session on the device");
   const again = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
   assert.equal(!again.ok && again.code, "session_error");
 });
@@ -330,13 +335,17 @@ test("receiver availability events follow device changes, per sender and only on
   await init(service, PAGE2, { capabilities: ["audio_out"] });
   log.clear();
   devices.up(TV);
+  await service.settled();
   assert.deepEqual(log.of(PAGE.id, "receiverAvailability"), [{ type: "receiverAvailability", available: true }]);
   assert.deepEqual(log.of(PAGE2.id, "receiverAvailability"), [], "PAGE2 already had the speaker");
   devices.up(device({ id: "dev-tv2", name: "Second TV" }));
+  await service.settled();
   assert.equal(log.of(PAGE.id, "receiverAvailability").length, 1, "no repeat while still available");
+  // Like Chrome, a device mDNS no longer lists stays a sink while its channel is up; the channel's keep-alive ends it
   devices.down(TV);
   devices.down({ ...TV, id: "dev-tv2" });
-  assert.deepEqual(log.of(PAGE.id, "receiverAvailability").at(-1), { type: "receiverAvailability", available: false });
+  await service.settled();
+  assert.equal(log.of(PAGE.id, "receiverAvailability").length, 1);
 });
 
 test("senderGone detaches the sender everywhere", async () => {
@@ -344,7 +353,6 @@ test("senderGone detaches the sender everywhere", async () => {
   const s = await session(service);
   service.senderGone(PAGE.id);
   assert.ok(clients[0]?.calls.includes(`closeTransport ${s.transportId}`));
-  assert.ok(clients[0]?.closed);
   log.clear();
   clients[0]?.pushMessage(s.transportId, MDX, "late");
   assert.deepEqual(log.events, []);
@@ -397,14 +405,14 @@ test("a parked session is left for good when the page goes away, and ends when t
   gone.service.senderNavigated(PAGE.id);
   gone.service.senderGone(PAGE.id);
   assert.ok(gone.clients[0]?.calls.includes(`closeTransport ${s.transportId}`));
-  assert.equal(gone.clients[0]?.closed, true);
+  assert.equal(gone.clients[0]?.closed, false);
 
   const stopped = setup();
   await session(stopped.service);
   stopped.service.senderNavigated(PAGE.id);
   stopped.clients[0]!.apps = [];
   stopped.clients[0]?.pushStatus();
-  assert.equal(stopped.clients[0]?.closed, true, "the idle client is closed");
+  assert.equal(stopped.clients[0]?.closed, false, "the channel stays open");
   const again = await init(stopped.service, PAGE);
   assert.deepEqual(again.ok && (again.value as { sessions: unknown[] }).sessions, []);
 });
@@ -457,14 +465,14 @@ test("echoing client: requestSession succeeds and the client stays open", async 
   const { service, clients } = setup({ tweak: echo });
   const s = await session(service);
   assert.equal(s.sessionId, `${TV.id}-session-1`);
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3);
   assert.equal(clients[0]?.closed, false);
   assert.ok(!clients[0]?.calls.includes("close"));
   const r = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "{}" });
   assert.deepEqual(r, { ok: true, value: undefined });
 });
 
-test("echoing client: stopSession ends the session once, never for the caller, and closes the client once", async () => {
+test("echoing client: stopSession ends the session once, never for the caller, and leaves the channel open", async () => {
   const { service, clients, log } = setup({ tweak: echo });
   const s = await session(service, PAGE);
   await init(service, PAGE2); // origin_scoped: auto-joins
@@ -473,7 +481,7 @@ test("echoing client: stopSession ends the session once, never for the caller, a
   assert.deepEqual(r, { ok: true, value: undefined });
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
   assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [{ type: "sessionEnded", sessionId: s.sessionId, status: "stopped" }]);
-  assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 1);
+  assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 0);
 });
 
 test("echoing client: a volume change is pushed as sessionUpdated", async () => {
@@ -486,7 +494,7 @@ test("echoing client: a volume change is pushed as sessionUpdated", async () => 
   assert.equal(updates[0]?.session.receiver.volume.level, 0.25);
 });
 
-test("two requests for the same device share one client and one connect", async () => {
+test("two requests for the same device share its one channel", async () => {
   const { service, clients } = setup({ tweak: (c) => ((c.connectDelayMs = 20), echo(c)) });
   await init(service, PAGE, { autoJoinPolicy: "page_scoped" });
   await init(service, PAGE2, { autoJoinPolicy: "page_scoped" });
@@ -494,29 +502,30 @@ test("two requests for the same device share one client and one connect", async 
   const [a, b] = await Promise.all([service.handle(PAGE, "requestSession", req), service.handle(PAGE2, "requestSession", req)]);
   assert.equal(a.ok, true, JSON.stringify(a));
   assert.equal(b.ok, true, JSON.stringify(b));
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3);
   assert.equal(clients[0]?.calls.filter((c) => c === "connect").length, 1);
   assert.equal(clients[0]?.closed, false);
 });
 
-test("a connect failure fails every request waiting on it, and the next request makes a new client", async () => {
+test("a device whose channel failed to open is not offered until an attempt succeeds", async () => {
   let made = 0;
-  const { service, clients } = setup({
+  const { service, clients, picks } = setup({
+    sinks: { retry: { initialDelayMs: 600_000, jitter: 0 } }, // the backoff itself is tested in sink-service.test.ts
     tweak: (c) => {
-      c.connectDelayMs = 20;
       if (made++ === 0) c.connectError = new Error("ECONNREFUSED");
     },
   });
   await init(service, PAGE);
-  await init(service, PAGE2);
   const req = { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 };
-  const [a, b] = await Promise.all([service.handle(PAGE, "requestSession", req), service.handle(PAGE2, "requestSession", req)]);
-  assert.equal(!a.ok && a.code, "receiver_unavailable");
-  assert.equal(!b.ok && b.code, "receiver_unavailable");
-  assert.equal(clients.length, 1);
+  const a = await service.handle(PAGE, "requestSession", req);
+  assert.equal(!a.ok && a.code, "cancel", "the picker (which wants the TV) was offered only the other two");
+  assert.deepEqual(picks[0]?.devices.map((d) => d.id).sort(), [GROUP.id, SPEAKER.id].sort());
+  assert.equal(clients.length, 3);
+  service.discoverSinksNow(); // Chrome: DiscoverSinksNow opens channels at once, without waiting out a backoff
+  await service.settled();
   const c = await service.handle(PAGE, "requestSession", req);
   assert.equal(c.ok, true, JSON.stringify(c));
-  assert.equal(clients.length, 2);
+  assert.equal(clients.length, 4, "the TV was tried again");
 });
 
 test("senderGone while its request is launching: the late session is torn down", async () => {
@@ -528,7 +537,7 @@ test("senderGone while its request is launching: the late session is torn down",
   const r = await pending;
   assert.equal(!r.ok && r.code, "cancel");
   assert.ok(clients[0]?.calls.includes(`closeTransport ${TV.id}-transport-1`));
-  assert.equal(clients[0]?.closed, true);
+  assert.equal(clients[0]?.closed, false);
   await init(service, PAGE2);
   const join = await service.handle(PAGE2, "joinSession", { sessionId: `${TV.id}-session-1` });
   assert.equal(!join.ok && join.code, "session_error");
@@ -563,7 +572,7 @@ test("picking the current session's device returns that session without launchin
   const r = await service.handle(PAGE, "requestSession", REQ);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.ok && (r.value as SessionSnapshot).sessionId, s.sessionId);
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3);
   assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("launch")), [`launch ${YT}`]);
   assert.equal(clients[0]?.closed, false);
 });
@@ -585,17 +594,17 @@ for (const echo of [false, true]) {
     const ended = { type: "sessionEnded", sessionId: s.sessionId, status: "stopped" };
     assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [ended], "the caller did not call stop itself, so it is told");
     assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [ended]);
-    assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 1, "the idle client is closed once");
+    assert.equal(clients[0]?.calls.filter((c) => c === "close").length, 0, "the channel stays open");
     const again = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
     assert.equal(again.ok, false, "the session is gone");
   });
 }
 
-test('"stop" with no current session just cancels, with no client', async () => {
+test('"stop" with no current session just cancels, touching no device', async () => {
   const { service, clients } = setup({ pick: () => "stop" });
   await init(service);
   assert.deepEqual(await service.handle(PAGE, "requestSession", REQ), { ok: false, code: "cancel" });
-  assert.equal(clients.length, 0);
+  assert.ok(clients.every((c) => !c.calls.some((call) => call.startsWith("launch") || call.startsWith("stop"))));
 });
 
 test('a failed "stop" from the picker is session_error and the session stays', async () => {
@@ -612,4 +621,64 @@ test('a failed "stop" from the picker is session_error and the session stays', a
   assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
   const msg = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
   assert.equal(msg.ok, true, "the session still works");
+});
+
+// ---------- a device's channel is shared by its sessions (Chrome: one socket per sink, left alone when the sink moves) ----------
+
+test("a live session survives its device being found at another address, and the old channel closes when the session ends", async () => {
+  const { service, devices, clients, log } = setup();
+  const s = await session(service);
+  const tv = clients.find((c) => c.device.id === TV.id)!;
+  const moved = { ...TV, host: "10.0.0.99", addresses: ["10.0.0.99"] };
+  devices.list = devices.list.map((d) => (d.id === TV.id ? moved : d));
+  devices.emit("deviceChanged", moved);
+  await service.settled();
+  assert.equal(clients.length, 4, "a channel was opened to the new address");
+  assert.equal(tv.closed, false, "the old channel is left to its session");
+  assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+  // the session still works over the old channel
+  const sent = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "{}" });
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  assert.ok(tv.sent.some((m) => m.namespace === MDX));
+  assert.equal((await service.handle(PAGE, "stopSession", { sessionId: s.sessionId })).ok, true);
+  assert.equal(tv.closed, true, "closed once its last session ended");
+  assert.equal(service.devices().find((d) => d.id === TV.id)?.host, "10.0.0.99");
+});
+
+test("a device's addresses reordered while a session runs leave the channel and the session alone", async () => {
+  const two = { ...TV, host: "10.0.0.10", addresses: ["10.0.0.10", "10.0.0.11"] };
+  const { service, devices, clients, log } = setup({ devices: new FakeDevices([two, SPEAKER, GROUP]) });
+  await session(service);
+  const reordered = { ...two, host: "10.0.0.11", addresses: ["10.0.0.11", "10.0.0.10"] };
+  devices.list = devices.list.map((d) => (d.id === TV.id ? reordered : d));
+  devices.emit("deviceChanged", reordered);
+  await service.settled();
+  assert.equal(clients.length, 3, "no channel was opened");
+  assert.ok(clients.every((c) => !c.closed));
+  assert.deepEqual(log.of(PAGE.id, "sessionEnded"), []);
+});
+
+test("the session a page launches is never listed as a non-local route, not even for a moment", async () => {
+  const { service } = setup({ tweak: echo });
+  const seen: [string, boolean][][] = [];
+  service.observeSessions(() => seen.push(service.mediaRoutes().map((r) => [r.id, r.isLocal])));
+  const s = await session(service);
+  assert.ok(seen.length > 0);
+  for (const routes of seen) {
+    for (const [id, isLocal] of routes) assert.ok(isLocal, `${id} was listed as non-local`);
+  }
+  assert.deepEqual(service.mediaRoutes().map((r) => [r.id, r.isLocal]), [[s.sessionId, true]]);
+});
+
+test("a launch that fails leaves what the device was running listed", async () => {
+  const { service, clients } = setup({ tweak: (c) => { c.launchError = launchError("NOT_FOUND"); } });
+  await service.settled();
+  const tv = clients.find((c) => c.device.id === TV.id)!;
+  tv.apps = [{ appId: "CC1AD845", displayName: "Media", sessionId: "other", transportId: "t", statusText: "", namespaces: [{ name: "urn:x-cast:x" }] }];
+  tv.pushStatus();
+  assert.deepEqual(service.mediaRoutes().map((r) => r.id), ["other"]);
+  await init(service);
+  const r = await service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  assert.equal(r.ok, false);
+  assert.deepEqual(service.mediaRoutes().map((r2) => r2.id), ["other"]);
 });

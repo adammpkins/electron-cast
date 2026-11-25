@@ -7,7 +7,7 @@ import { installCastBridge, type ContextBridgeLike, type IpcRendererLike } from 
 import { installChromeCast } from "../../src/polyfill/install.ts";
 import { installPresentationStandIn } from "../../src/polyfill/presentation-standin.ts";
 import { MEDIA_NAMESPACE } from "../../src/electron/presentation-envelope.ts";
-import { FakeDevices, FakeClient, TV, tick } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, onlyChannels } from "./fakes.ts";
 
 const ORIGIN = "https://music.youtube.com";
 const MDX = "urn:x-cast:com.google.youtube.mdx";
@@ -103,11 +103,16 @@ test("manager default serves presentation mode", () => {
 type Listener = (event: IpcMainEventLike, ...args: any[]) => void;
 
 class FakeIpcMain implements IpcMainLike {
+  /** Set by the test once the manager exists: calls wait for the channels to the fake devices to open first. */
+  ready: () => Promise<void> = () => Promise.resolve();
   handlers = new Map<string, (event: any, ...args: any[]) => unknown>();
   listeners = new Map<string, Listener[]>();
   handle(channel: string, listener: (event: any, ...args: any[]) => unknown): void {
     if (this.handlers.has(channel)) throw new Error(`second handler for '${channel}'`);
-    this.handlers.set(channel, listener);
+    this.handlers.set(channel, async (...args) => {
+      await this.ready();
+      return listener(args[0], ...args.slice(1));
+    });
   }
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
@@ -156,10 +161,12 @@ function setup(over: Partial<CastManagerOptions> = {}) {
   const ipcMain = new FakeIpcMain();
   const clients: FakeClient[] = [];
   const manager = createCastManager({
+    sinks: FAST_SINKS,
     ipcMain,
     discovery: new FakeDiscovery(),
     createClient: (d) => {
       const c = new FakeClient(d);
+      if ((over.discovery as FakeDevices | undefined)?.unreachable.has(d.id)) c.connectError = new Error("unreachable");
       const launch = c.launch.bind(c);
       c.launch = async (id: string) => {
         const app = await launch(id);
@@ -173,6 +180,7 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     presentation: true,
     ...over,
   });
+  ipcMain.ready = () => manager.settled();
   const pcall = (wc: FakeWebContents, method: string, params: any, frame: unknown = { url: `${ORIGIN}/`, origin: ORIGIN }) => {
     const h = ipcMain.handlers.get("electron-cast:presentation");
     assert.ok(h, "presentation handler registered");
@@ -191,6 +199,7 @@ test("without presentation: no presentation handler or listener", async () => {
   assert.deepEqual([...ipcMain.handlers.keys()], ["electron-cast:call"]);
   assert.equal(ipcMain.listeners.size, 0);
   assert.throws(() => createCastManager({
+    sinks: FAST_SINKS,
     ipcMain: { handle() {}, removeHandler() {} },
     discovery: new FakeDiscovery(),
     selectDevice: async () => null,
@@ -238,17 +247,21 @@ test("start opens a connection whose envelope messages reach the page, and page 
 
 test("availability changes reach the page until stopWatching", async () => {
   const devices = new FakeDiscovery([]);
-  const { pcall } = setup({ discovery: devices });
+  const { pcall, manager, clients } = setup({ discovery: devices, sinks: { ...FAST_SINKS, retry: { maxAttempts: 1 } } });
   const wc = new FakeWebContents(5);
   assert.deepEqual(await pcall(wc, "getAvailability", { watchId: "w1", urls: [URL1] }), { ok: true, value: { available: false } });
+  // the positive control: a watch that is not stopped
+  await pcall(wc, "getAvailability", { watchId: "w2", urls: [URL1] });
   devices.up(TV);
-  await tick();
-  assert.deepEqual(wc.events().at(-1), { type: "availability", watchId: "w1", value: true });
+  await manager.settled();
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w1").at(-1), { type: "availability", watchId: "w1", value: true });
   await pcall(wc, "stopWatching", { watchId: "w1" });
-  const n = wc.events().length;
-  devices.down(TV);
-  await tick();
-  assert.equal(wc.events().length, n);
+  // the TV genuinely leaves: its channel fails and cannot be reopened
+  devices.unreachable.add(TV.id);
+  clients.find((c) => c.device.id === TV.id)!.fail();
+  await manager.settled();
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w2").map((e) => e.value), [true, false], "an unstopped watch hears the loss");
+  assert.deepEqual(wc.events().filter((e) => e.watchId === "w1").map((e) => e.value), [true], "a stopped watch hears nothing more");
 });
 
 test("a destroyed webContents loses its connections and gets nothing more", async () => {
@@ -291,6 +304,7 @@ test("errors: picker cancel, bad params, unknown method, no frame", async () => 
 test("presentation without ipcMain.on throws before registering anything", () => {
   const handlers: string[] = [];
   assert.throws(() => createCastManager({
+    sinks: FAST_SINKS,
     ipcMain: { handle: (c: string) => { handlers.push(c); }, removeHandler() {} },
     discovery: new FakeDiscovery(),
     selectDevice: async () => null,
@@ -314,11 +328,11 @@ test("a connection id is reserved while the picker is open", async () => {
 
 test("availability watches are capped per page, oldest dropped", async () => {
   const devices = new FakeDiscovery([]);
-  const { pcall } = setup({ discovery: devices });
+  const { pcall, manager } = setup({ discovery: devices });
   const wc = new FakeWebContents(5);
   for (let i = 0; i < 40; i++) await pcall(wc, "getAvailability", { watchId: `w${i}`, urls: [URL1] });
   devices.up(TV);
-  await tick();
+  await manager.settled();
   const ids = wc.events().filter((e) => e.type === "availability").map((e) => e.watchId);
   assert.equal(ids.length, 32);
   assert.ok(!ids.includes("w0") && ids.includes("w39"));
@@ -390,7 +404,7 @@ test("after a restart nothing is rejoined for another app, an unknown id, a sess
   const refused = await restarted();
   const denied = setup({ allowOrigin: () => false });
   assert.equal((await denied.pcall(wc, "reconnect", { connectionId: "d", urls: [URL1], presentationId: `cast-session_${refused.sessionId}` })).ok, false);
-  assert.equal(denied.clients.length, 0, "no device is contacted for a refused origin");
+  assert.ok(onlyChannels(denied.clients), "no device is asked anything for a refused origin");
 });
 
 test("main refuses start() without transient activation, as PresentationServiceImpl::StartPresentation does", async () => {
@@ -403,7 +417,7 @@ test("main refuses start() without transient activation, as PresentationServiceI
     const r = (await h({ sender: wc, senderFrame: frame }, "start", { ...params, hasGesture })) as any;
     assert.deepEqual(r, { ok: false, code: "AbortError", description: "PresentationRequest::start() requires user gesture." });
   }
-  assert.equal(clients.length, 0);
+  assert.ok(onlyChannels(clients));
   assert.equal(((await h({ sender: wc, senderFrame: frame }, "start", { ...params, hasGesture: true })) as any).ok, true);
 });
 

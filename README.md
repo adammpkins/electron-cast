@@ -88,7 +88,7 @@ that, and auto-join does not find it (Chrome's auto-join only joins sessions sta
 persists the session id and the page reconnects with it: Google's SDK exposes the id as `session.sessionId`, so the page
 keeps it (in `localStorage`, say) and calls `chrome.cast.requestSessionById(id)` (or `cast.framework`'s equivalent) at
 startup. The SDK turns that into `PresentationRequest.reconnect("cast-session_<id>")`, which reaches electron-cast's
-`joinRunningSession`: it asks the known devices which one runs that session and joins it if the app matches, with no
+`joinRunningSession`: it looks the session up among what the devices run (electron-cast follows every device's receiver status, as Chrome does) and joins it if the app matches, with no
 origin check (Chrome's `AppActivity::CanJoinSession` checks only the app id and that the client is not already
 connected), also when this run already holds the session; `allowOrigin` still applies first. If the device no longer
 runs the session, the call fails like in Chrome. Discovery has to have found the device by then, so the page may need
@@ -131,9 +131,9 @@ The main process serves both modes. `createCastManager({ ..., presentation: fals
 ## Device authentication
 
 Like Chrome, electron-cast checks that a device is a genuine Google-certified Cast device before using it (the
-`deviceauth` challenge, with Google's Cast root certificates built in and no dependencies). This happens when the
-connection opens, not at discovery, so a device that fails still shows in the picker but casting to it fails like an
-unreachable device.
+`deviceauth` challenge, with Google's Cast root certificates built in and no dependencies). Like Chrome,
+electron-cast opens a channel to every device it finds, and a device is listed (in the picker, `devices()` and the
+sinks observers) only once that channel is open and the check has passed, so a device that fails is never shown.
 
 On by default; receivers that are not Google-certified (open-source ones, for example) need it off:
 

@@ -39,12 +39,20 @@ export interface MediaRoute {
   /** `cast:<appId>`, the Cast source URN's scheme and app id (Chrome: `media_source`). */
   mediaSource: string;
   sinkId: string;
+  /** The device's name (Chrome: `media_sink_name`, set with `set_media_sink_name`). */
+  sinkName: string;
   /** The app's status text, else its name (Chrome: `description`). */
   description: string;
+  /**
+   * False for a session this service does not hold: one started elsewhere (a phone, say) or one every page here let go
+   * of while the app kept running. Chrome: `is_local`, false for the routes `AddNonLocalActivity` makes. Joining one by
+   * its id makes it local.
+   */
+  isLocal: boolean;
   // Fields below are electron-cast's: Chrome's route knows its page through the extension or the Presentation API.
   appId: string;
   displayName: string;
-  /** Origin of the page that started the session. */
+  /** Origin of the page that started the session; empty on a route that is not local. */
   origin: string;
   /** Receiver volume as last reported; `null` until the device reports one. */
   volume: { level: number | null; muted: boolean | null };
@@ -52,7 +60,7 @@ export interface MediaRoute {
   members: number[];
   /** `webContents.id` of pages that navigated away and may rejoin; they get no events meanwhile. */
   parkedSenders: number[];
-  /** True when no page is attached: the route lives on in the device only. */
+  /** True when no page is attached to a local route: the route lives on in the device only. Always false when `isLocal` is false. */
   parked: boolean;
 }
 

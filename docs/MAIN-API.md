@@ -1,6 +1,6 @@
 # Main-process API
 
-`createCastManager` returns a `CastManager`: `start()`, `devices()`, `dispose()` and the API below, which lets the
+`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()` and the API below, which lets the
 app observe and control casting from the main process. It follows Chrome's Media Router, so the same concepts and
 method names apply: devices are **sinks**, running sessions are **routes**, and you watch both with **observers**.
 
@@ -23,6 +23,7 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `detachRoute(id)` | `MediaRouter::DetachRoute` exists, but the Cast provider does not implement it (`CastMediaRouteProvider::DetachRoute` is `NOTIMPLEMENTED`): a page lets go through its Presentation connection closing (`CastSessionClientImpl::DidClose`). No counterpart for "every page lets go" | `media_router.h`, `chrome/browser/media/router/providers/cast/cast_media_route_provider.cc`, `cast_session_client_impl.cc` |
 | `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController` binds a `mojom::MediaController` (`SetVolume`, `SetMute`); on a Cast route `CastMediaController` sends a receiver `SET_VOLUME` request. Used by the global media controls (`CastMediaNotificationItem::SetVolume / SetMute`, controller bound in `cast_media_notification_producer.cc`), not by the Cast dialog. There is no class named `MediaRouteController` in current Chromium | `components/media_router/common/mojom/media_controller.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `chrome/browser/ui/global_media_controls/` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
+| Sinks listed only once a channel is open and authenticated, with retry and removal; the session tracker; non-local routes | `CastMediaSinkServiceImpl`, `MediaSinkServiceBase`, `CastSessionTracker`, `CastActivityManager::AddNonLocalActivity` | see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts) for each rule and its source |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
 Where electron-cast differs from Chrome:
@@ -39,7 +40,7 @@ Where electron-cast differs from Chrome:
   throw `MediaRouteError` `route_not_found` for an unknown route. Chrome's are fire-and-forget.
 - A route's id is the Cast session id. Chrome's `media_route_id` is `urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source id>`
   (`MediaRoute::GetMediaRouteId`).
-- `MediaRoute` also carries `appId`, `displayName`, `origin`, `volume`, `members` (`webContents.id`s, once each however
+- `MediaRoute` also carries `appId`, `displayName`, `sinkName`, `isLocal`, `origin`, `volume`, `members` (`webContents.id`s, once each however
   many of a window's frames hold the route), `parkedSenders` and `parked`, because in an Electron app main wants to
   know which windows hold a route. A route is `parked` when its pages navigated away (a reload, say) and none is
   attached; it stays on the device so the next page can rejoin (see CHANGELOG 0.3.1).
@@ -69,6 +70,15 @@ const stop = manager.registerMediaSinksObserver({
 A `MediaSink` is `{ id, name, description (the model), iconType: "cast" | "cast_audio" | "cast_audio_group", device }`
 where `device` is the discovered `CastDevice`.
 
+A device is a sink only once electron-cast has opened a channel to it and it has passed device authentication, as in
+Chrome. Channels open after discovery with a random delay of up to 5 s, so right after `start()` the list is empty for
+a moment; a failed attempt is retried (15 s, 3 attempts), and a device that never opens is never listed. The list is
+reported once it has been quiet for 3 s. A device that mDNS stops reporting stays listed while its channel is up; it
+goes when the channel fails and cannot be reopened (a ping every 5 s notices within 10 s). `manager.devices()` and
+`selectDevice`'s list are these sinks. `manager.discoverSinksNow()` skips the delay, and `createCastManager({ sinks })`
+tunes the numbers (see [API.md](API.md#castmanageroptions)); `sinks.allowAllIps` lets it reach public and loopback
+addresses, which Chrome refuses by default.
+
 ## Routes
 
 ```ts
@@ -78,13 +88,19 @@ manager.registerMediaRoutesObserver({
   },
 });
 
-manager.getRoutes();                          // the current list, parked routes included
+manager.getRoutes();                          // the current list: local, parked and non-local routes
 await manager.terminateRoute(routeId);        // stop the app on the device
 manager.detachRoute(routeId);                 // let go, leave the app running
 const controller = manager.getRouteController(routeId);
 await controller.setVolume(0.4);              // 0 to 1
 await controller.setMute(true);
 ```
+
+A device that runs a session no page of this app holds (started by another sender, or by this app before it restarted)
+has a route too, as in Chrome (`AddNonLocalActivity`): `isLocal` is `false`, `members` and `origin` are empty, and
+`sinkName` names the device. It follows the device's receiver status, goes when the app stops, and can be
+terminated and have its volume set (while its channel is down, because the device is being reopened, terminating fails with `session_error` "StopSession response is not OK. Failed to terminate route." and the route stays, as in Chrome); `detachRoute` on it does nothing. A route a page held, once every page has let go
+of it without stopping the app, becomes a non-local route. `isLocal` is `true` for the routes of this app's pages.
 
 Control goes through the same `CastSessionService` code the page's calls use, so the page sees what it would see if
 the change came from the device:
