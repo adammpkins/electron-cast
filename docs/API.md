@@ -1,8 +1,14 @@
 # API reference
 
-This reference reflects **v0.3.1**.
+This reference reflects **v0.4.0**.
 
-electron-cast is an ES module package (`"type": "module"`, no CommonJS build) with four entry points:
+electron-cast ships an ES module build and a CommonJS build (`dist/cjs`, no extra dependencies). Every entry point has an
+`import` and a `require` condition in `exports`, so `import` and `require("electron-cast/preload")` both work, and a
+non-sandboxed CommonJS preload or main process can load the package without a bundler. Electron is an optional peer
+dependency (`electron >=35`): the library never imports it (Electron objects are passed in), and the version matters
+only because the preload needs `contextBridge.executeInMainWorld`, added in Electron 35. Node 20 or later.
+
+There are four entry points:
 
 | Entry point | Import it from | Contains |
 |---|---|---|
@@ -17,6 +23,10 @@ cannot load. Use `electron-cast/preload`. A sandboxed preload can load no packag
 
 Electron objects (`ipcMain`, `contextBridge`, `ipcRenderer`) are passed in, never imported by the library. The
 `...Like` interfaces below describe the part of each object the library uses.
+
+How the library behaves: on the default Presentation API path it does what Chrome does, and the code cites
+the Chromium source for each rule it copies. `mode: "chromecast"` (electron-cast's own `chrome.cast`) is a frozen
+fallback that gets no new features, and nothing in the library is specific to one app.
 
 Contents: [`electron-cast/main`](#electron-castmain) · [`electron-cast/preload`](#electron-castpreload) ·
 [`electron-cast/polyfill`](#electron-castpolyfill) · [`electron-cast` (root)](#electron-cast-root):
@@ -37,29 +47,40 @@ network until `start()`. Throws `TypeError` if `presentation` is not `false` and
 `removeListener`.
 
 It registers `ipcMain.handle` on `<channel>:call` and `<channel>:presentation`, and `ipcMain.on` on
-`<channel>:presentation:send`. It sends `<channel>:event` and `<channel>:presentation:event` to the webContents that
-are using it. A webContents is tracked from its first call. When it is destroyed, or navigates, its connections end;
-a navigation keeps its sessions open on the device so the next page can rejoin them.
+`<channel>:presentation:send`. It sends `<channel>:event` and `<channel>:presentation:event` to the one frame that
+owns the sender. A frame is tracked from its first call. When its webContents is destroyed, or the page navigates,
+its connections end; a navigation keeps its sessions open on the device so the next page can rejoin them.
+
+**Frames and iframes.** In presentation mode every frame is its own sender: its availability watches, connections and
+sessions belong to it, its events go only to it, and the `origin` checked by `allowOrigin` and shown to
+`selectDevice` is that frame's own. The preload only runs in iframes when the window sets
+`nodeIntegrationInSubFrames: true` in its `webPreferences`; without it nothing changes and an iframe has no cast. An
+iframe that navigates parks its sessions as a reloading page does; a removed iframe (found by a 5 s sweep of the
+frame tree, since Electron does not announce it) or a navigating page ends them. `mode: "chromecast"` is main-frame
+only: a call from an iframe is refused with `extension_missing`. `CastRequestInfo.senderId` is the webContents id for a
+main frame and a synthetic id (2^30 and up) for an iframe.
 
 #### `CastManagerOptions`
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `ipcMain` | `IpcMainLike` | required | Electron's `ipcMain`. |
-| `selectDevice` | `(devices: CastDevice[], request: CastRequestInfo) => Promise<DeviceChoice>` | required | Called when a page asks to start a session. Show your picker and resolve a device, `null` to cancel, or `"stop"` to stop `request.session`. A rejection fails the request with `session_error`. See [`selectDevice`](#selectdevice). |
+| `selectDevice` | `(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext) => Promise<DeviceChoice>` | required | Called when a page asks to start a session. Show your picker and resolve a device, `null` to cancel, or `"stop"` to stop `request.session`. A rejection fails the request with `session_error`. A function that declares only the first two parameters works. See [`selectDevice`](#selectdevice). |
 | `allowOrigin` | `(origin: string) => boolean` | none (every origin allowed) | Called on every page call with the origin of the calling frame. Return `false` to refuse. A throw refuses too. See [SECURITY.md](../SECURITY.md#alloworigin). |
 | `discovery` | `DeviceSource & { start(): Promise<void>; stop(): void }` | `new CastDiscovery()` | Replaces device discovery. Mainly for tests. |
-| `createClient` | `(device: CastDevice) => CastClientLike` | `new CastClient({ host: device.host, port: device.port })` | Creates the connection to a device. Use it to pass `CastClient` options such as `tls`. |
+| `createClient` | `(device: CastDevice) => CastClientLike` | `new CastClient({ host: device.host, port: device.port, verifyDevice: verifyDevices !== false })` | Creates the connection to a device. Use it to pass `CastClient` options such as `tls`. When you give it, `verifyDevices` is ignored: pass `verifyDevice` to your own `CastClient`. |
 | `channel` | `string` | `"electron-cast"` | Prefix of the IPC channel names. Must match the preload's `channel`. |
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
+| `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is still listed by discovery and the picker; casting to it fails as for an unreachable device. |
 
 #### `CastManager`
 
 | Member | Description |
 |---|---|
-| `start(): Promise<void>` | Starts discovery: opens an mDNS socket on every external IPv4 interface and queries. Safe to call more than once. Rejects only if the manager was disposed. |
+| `start(): Promise<void>` | Starts discovery: opens an mDNS socket on every external IPv4 interface and on each adapter's IPv6 link-local address, and queries (see [Discovery](#discovery)). Safe to call more than once. Rejects only if the manager was disposed. |
 | `devices(): CastDevice[]` | The devices known right now. Fresh copies, sorted. |
 | `dispose(): Promise<void>` | Removes the IPC handlers, stops discovery, closes every device connection and ends all sessions. Idempotent. A disposed manager cannot be restarted; create a new one. |
+| `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
 
 #### `selectDevice`
 
@@ -86,27 +107,63 @@ The result is a `DeviceChoice` (`CastDevice | null | "stop"`):
 
 The time the picker is open does not count against the page's launch timeout.
 
+The third argument, a `DevicePickerContext` (`{ signal: AbortSignal; registerMediaSinksObserver(observer): () => void }`),
+streams devices that appear while the picker is open (mDNS often needs seconds). `signal` aborts when the request no
+longer waits for a choice. See [MAIN-API.md](MAIN-API.md#a-live-device-picker).
+
 #### Errors the page sees
 
 In `mode: "chromecast"`, `chrome.cast.ErrorCode` values: `cancel`, `timeout`, `receiver_unavailable`,
-`session_error`, `channel_error`, `invalid_parameter`, `extension_missing` (origin not allowed, or no sender frame).
-In default mode they are mapped onto `DOMException` names: a cancelled request is `AbortError`, no receiver is
-`NotFoundError`, a rejected parameter is `InvalidAccessError`, an unusable presentation URL is `NotSupportedError`,
-and anything else is `OperationError`.
+`session_error`, `channel_error`, `invalid_parameter`, `extension_missing` (origin not allowed, no sender frame, or a
+call from an iframe).
+In default mode they are mapped onto `DOMException` names: a cancelled request is `AbortError`, no receiver (or a
+session that is gone, or one that does not match) is `NotFoundError`, a rejected parameter is `InvalidAccessError`, an
+unusable presentation URL is `NotSupportedError`, and anything else is `OperationError`. An origin refused by
+`allowOrigin` reads as no receivers and `start` fails; a call with no sender frame gets `NotAllowedError`.
+
+`start` needs transient user activation, as in Chrome: the preload reads `navigator.userActivation.isActive` in its
+own (isolated) world when the page calls the bridge's `start` and sends the result, replacing anything the page
+passed; the main process refuses a start without it with `AbortError` ("PresentationRequest::start() requires user
+gesture.", what Chromium's `PresentationServiceImpl::StartPresentation` reports as `PRESENTATION_REQUEST_CANCELLED`).
+The page-side stand-in rejects with `InvalidAccessError` first, as Blink's `PresentationRequest::start()` does.
+`mode: "chromecast"` has no gesture check. See [SECURITY.md](../SECURITY.md#user-gesture) for what this does and does
+not protect against.
+
+#### Rejoining after a reload or restart
+
+- **Page reload or navigation.** The sessions stay open on the device (parked) and the next page of the same sender
+  rejoins them by auto-join, as in Chrome.
+- **App restart.** The library persists nothing. A session may still be playing on the device; Chrome's auto-join does
+  not find sessions started by an earlier run, and neither does electron-cast. The app keeps the session id (Google's
+  SDK exposes it as `session.sessionId`) and the page calls `chrome.cast.requestSessionById(id)` at startup. The SDK
+  turns that into `PresentationRequest.reconnect("cast-session_<id>")`, which reaches
+  [`joinRunningSession`](#joinrunningsession): electron-cast asks the known devices what they run and
+  joins the session if the app matches. This checks no origin (Chrome's `AppActivity::CanJoinSession` checks only the
+  app and that the client is not already connected), but `allowOrigin` still applies first. If the device no longer
+  runs the session, the call fails with `NotFoundError`. `mode: "chromecast"` does not do this.
 
 #### Structural types
 
 ```ts
-interface FrameLike { url: string; origin?: string }
+interface FrameLike {
+  url: string;
+  origin?: string;
+  frameTreeNodeId?: number;   // identifies a subframe across navigations
+  parent?: unknown;           // null or absent on a main frame
+  processId?: number;
+  routingId?: number;
+  send?(channel: string, ...args: any[]): void;   // reaches only this frame
+}
 interface WebContentsLike {
   readonly id: number;
   send(channel: string, ...args: any[]): void;
   isDestroyed(): boolean;
+  readonly mainFrame?: { readonly framesInSubtree: readonly FrameLike[] };
   once(event: "destroyed", listener: () => void): unknown;
-  on(event: "did-navigate", listener: (...args: any[]) => void): unknown;
+  on(event: "did-navigate" | "did-frame-navigate", listener: (...args: any[]) => void): unknown;
 }
 interface IpcMainInvokeEventLike { sender: WebContentsLike; senderFrame: FrameLike | null }
-interface IpcMainEventLike { sender: WebContentsLike }
+interface IpcMainEventLike { sender: WebContentsLike; senderFrame?: FrameLike | null }
 interface IpcMainLike {
   handle(channel: string, listener: (event: IpcMainInvokeEventLike, ...args: any[]) => unknown): void;
   removeHandler(channel: string): void;
@@ -115,7 +172,8 @@ interface IpcMainLike {
 }
 ```
 
-The main entry also re-exports the types `CastRequestInfo`, `DeviceChoice` and `CastDevice`.
+Electron's `ipcMain`, `WebContents` and `WebFrameMain` satisfy these. The main entry also exports the types
+`CastRequestInfo`, `DeviceChoice` and `CastDevice`, and the manager API types listed above.
 
 #### `CastDevice`
 
@@ -124,8 +182,8 @@ The main entry also re-exports the types `CastRequestInfo`, `DeviceChoice` and `
 | `id` | `string` | The device's stable id (mDNS TXT `id`). Devices are de-duplicated by it. |
 | `name` | `string` | Friendly name (TXT `fn`), or the first label of the instance name. |
 | `model` | `string` | Model name (TXT `md`), or `""`. |
-| `host` | `string` | Address to connect to: the first IPv4 address, else the first IPv6. |
-| `addresses` | `string[]` | All addresses, IPv4 first. |
+| `host` | `string` | Address to connect to: the first of `addresses`. |
+| `addresses` | `string[]` | All addresses: IPv4 first, then global IPv6, then link-local IPv6 (`fe80::1%12`, with its zone so it can be connected to); newest first within each group. |
 | `port` | `number` | The Cast port, usually 8009. |
 | `capabilities` | `number` | Capability bit mask (TXT `ca`): 1 `video_out`, 2 `video_in`, 4 `audio_out`, 8 `audio_in`, 32 `multizone_group`. |
 | `isGroup` | `boolean` | True when the `multizone_group` bit is set. |
@@ -149,7 +207,7 @@ Call it once from a preload script. It exposes a bridge object to the page's mai
 
 - `mode: "presentation"` (default): installs a stand-in for the Presentation API (`PresentationRequest`,
   `PresentationConnection`, `PresentationAvailability`, `navigator.presentation`). Google's own Cast SDK then loads
-  and runs unmodified.
+  and runs unmodified. It runs in every frame the preload runs in (iframes need `nodeIntegrationInSubFrames: true`).
 - `mode: "chromecast"`: installs electron-cast's own `chrome.cast` and `chrome.cast.media` (and `cast.framework`)
   and blocks Google's loader scripts from replacing them. Nothing is installed if `chrome.cast` already exists.
 
@@ -165,6 +223,7 @@ Throws `TypeError` for an unknown `mode`, and in default mode if `ipcRenderer.se
 | `mode` | `"presentation" \| "chromecast"` | `"presentation"` | See above. |
 | `bridgeKey` | `string` | `"__electronCastBridge"` | Name of the global the bridge is exposed as. `"chromecast"` mode only. |
 | `presentationBridgeKey` | `string` | `"__electronCastPresentationBridge"` | Name of the global the bridge is exposed as. `"presentation"` mode only. |
+| `isUserActive` | `() => boolean` | reads `navigator.userActivation.isActive` in the preload's isolated world (`false` if missing) | Whether the frame has transient user activation right now, asked when the page calls `start`. `"presentation"` mode only. Mainly for tests. |
 
 The page can read the bridge global and call it. See [SECURITY.md](../SECURITY.md).
 
@@ -276,12 +335,25 @@ pages hold, and pushes events through `options.emit`.
 |---|---|---|
 | `initialize` | `{ appId: string, capabilities: string[], autoJoinPolicy: string }` | `InitializeResult`: availability, and the sessions auto-joined (`origin_scoped`, or `tab_and_origin_scoped` for this sender's own sessions) |
 | `requestSession` | `{ appId: string, capabilities: string[], timeoutMs?: number }` (default 60000) | `SessionSnapshot` |
-| `joinSession` | `{ sessionId: string }` (same origin only) | `SessionSnapshot` |
+| `joinSession` | `{ sessionId: string }` (the session must have been started from the same origin) | `SessionSnapshot` |
+| `joinRunningSession` | `{ sessionId: string, appId?: string }` | `SessionSnapshot` |
 | `sendMessage` | `{ sessionId: string, namespace: string, message: string }` | `undefined` |
 | `stopSession` | `{ sessionId: string }` | `undefined` |
 | `leaveSession` | `{ sessionId: string }` | `undefined` |
 | `setReceiverVolume` | `{ sessionId: string, level: number }` (0 to 1) | `undefined` |
 | `setReceiverMuted` | `{ sessionId: string, muted: boolean }` | `undefined` |
+
+##### `joinRunningSession`
+
+Joins a session by id the way Chrome's Media Router does for `reconnect("cast-session_<id>")`. A session this service
+already holds is joined at once. Otherwise every known device is asked for its receiver status, and the first one
+running `sessionId` is connected to (the other connections are released); the session then belongs to the caller's
+origin. `appId`, when given, must be the session's app. No origin is compared with the session's (unlike
+`joinSession`); `allowOrigin` still applies. Fails with `session_error` when no known device runs the session, the
+app differs, or the service was disposed; with `invalid_parameter` for a bad `sessionId`. The lookup runs when asked
+instead of tracking every device all the time (Chrome tracks). The presentation handler calls it for `reconnect`;
+`mode: "chromecast"` does not (its `requestSessionById` uses `joinSession`). `BridgeMethod` does not list it
+because it is not a method of the chromecast-mode bridge; `handle` takes any string.
 
 Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `receiver_unavailable`, `cancel`, `timeout`,
 `session_error`, `channel_error`.
@@ -292,7 +364,7 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 |---|---|---|
 | `devices` | `DeviceSource` | Source of devices and change events. |
 | `createClient` | `(device: CastDevice) => CastClientLike` | Creates a connection for a device. |
-| `selectDevice` | `(devices, request) => Promise<DeviceChoice>` | As in [`selectDevice`](#selectdevice). |
+| `selectDevice` | `(devices, request, picker) => Promise<DeviceChoice>` | As in [`selectDevice`](#selectdevice). |
 | `allowOrigin` | `(origin: string) => boolean` (optional) | As for the manager. |
 | `emit` | `(senderId: number, event: BridgeEvent) => void` | Receives every event for a sender. |
 
@@ -304,8 +376,11 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 | `DeviceSource` | `devices(): CastDevice[]` and `on`/`off` for `"deviceUp"`, `"deviceDown"`, `"deviceChanged"` (listener gets a `CastDevice`). `CastDiscovery` fits it. |
 | `CastClientLike` | The part of `CastClient` the service uses: `connected`, `connect`, `close`, `send`, `launch`, `stop`, `setVolume`, `getStatus`, `connectTransport`, `closeTransport`, and `on` for `message`, `receiverStatus`, `transportClosed`, `close`. |
 | `ClientMessage` | `{ namespace, sourceId, destinationId, data: string \| Buffer }`. |
-| `SenderInfo` | `{ id: number, origin: string }`: a page (webContents id and frame origin). |
+| `SenderInfo` | `{ id: number, origin: string }`: a frame (the webContents id for a main frame; the manager gives each iframe its own id) and its origin. |
 | `CastRequestInfo`, `DeviceChoice` | As above. |
+
+The service also has `mediaRoutes()`, `observeSessions(listener)`, `terminateSession(id)`, `setSessionVolume(id, volume)`
+and `detachSession(id)`, the hooks the manager's [main-process API](MAIN-API.md) is built on.
 
 ### `CastClient`
 
@@ -314,6 +389,7 @@ class CastClient extends EventEmitter<CastClientEvents> {
   constructor(options: CastClientOptions)
   readonly senderId: string
   get connected(): boolean
+  get deviceAuth(): DeviceAuthResult | undefined
   connect(): Promise<void>
   close(): void
   send(namespace: string, destinationId: string, payload: string | Uint8Array | object): void
@@ -330,8 +406,9 @@ class CastClient extends EventEmitter<CastClientEvents> {
 ```
 
 A single-use Cast v2 client: one TLS connection to one receiver. After `close()` or a failure it cannot be
-reconnected; make a new one. The TLS socket is opened with `rejectUnauthorized: false` (see
-[SECURITY.md](../SECURITY.md#tls-and-device-authentication)).
+reconnected; make a new one. The TLS socket is opened with `rejectUnauthorized: false`, as Cast devices present
+self-signed certificates; the device is authenticated instead by the [device authentication](#device-authentication)
+challenge that `connect()` runs by default (see [SECURITY.md](../SECURITY.md#tls-and-device-authentication)).
 
 #### `CastClientOptions`
 
@@ -341,6 +418,9 @@ reconnected; make a new one. The TLS socket is opened with `rejectUnauthorized: 
 | `port` | `number` | `8009` | Receiver port. |
 | `senderId` | `string` | `"sender-"` plus 8 random hex digits | The `sourceId` of the client's messages. |
 | `connectTimeoutMs` | `number` | `10000` | Limit for the TLS handshake. |
+| `verifyDevice` | `boolean` | `true` | Verify the device is a genuine Google-certified Cast device before use. `false` skips the challenge, for uncertified receivers. |
+| `authTimeoutMs` | `number` | `10000` | Limit for the device's reply to the authentication challenge, counted from the end of the TLS handshake. |
+| `deviceAuth` | `DeviceAuthOptions` | none | Trust roots and clock overrides for the check, for tests and private Cast deployments (see [below](#deviceauthoptions)). |
 | `requestTimeoutMs` | `number` | `10000` | Default limit for `request` and the calls built on it. |
 | `launchTimeoutMs` | `number` | `30000` | Limit for `launch`. |
 | `heartbeatIntervalMs` | `number` | `5000` | How often a PING is sent. |
@@ -352,7 +432,8 @@ reconnected; make a new one. The TLS socket is opened with `rejectUnauthorized: 
 
 | Method | Description |
 |---|---|
-| `connect()` | Opens the TLS connection and sends CONNECT to the platform receiver (`receiver-0`). Rejects with `CastConnectionError` or `CastTimeoutError`. Only valid once, from the idle state. |
+| `connect()` | Opens the TLS connection, runs device authentication (unless `verifyDevice` is `false`) and sends CONNECT to the platform receiver (`receiver-0`). Rejects with `CastConnectionError`, `CastTimeoutError` (TLS handshake) or `CastAuthError` (the device failed or did not answer the challenge; the socket is closed). Only valid once, from the idle state. |
+| `deviceAuth` (getter) | What authentication established: a `DeviceAuthResult` once `connect()` has verified the device, `undefined` before that or with `verifyDevice: false`. |
 | `close()` | Sends CLOSE for every open transport and the receiver, ends the socket, rejects pending work with `CastConnectionError`, and emits `close`. Idempotent. |
 | `send(namespace, destinationId, payload)` | Sends a message. A string is sent as is, an object as JSON, a `Uint8Array` as a binary payload. Throws `CastConnectionError` when not connected. |
 | `request(namespace, destinationId, payload, options?)` | Adds a `requestId`, sends, and resolves with the matching reply. Rejects with `CastRequestError` for an error reply, `CastTimeoutError` on timeout, `CastConnectionError` if the connection ends. |
@@ -371,18 +452,58 @@ reconnected; make a new one. The TLS socket is opened with `rejectUnauthorized: 
 | `message` | `{ namespace, sourceId, destinationId, data: string \| Buffer }` | A message arrives on any namespace except heartbeat and connection control. |
 | `receiverStatus` | `ReceiverStatus` | A `RECEIVER_STATUS` arrives. |
 | `transportClosed` | `transportId: string` | The receiver closed a transport. |
-| `close` | `error?: CastConnectionError` | The client closed. The error is absent after a deliberate `close()`. |
+| `close` | `error?: Error` | The client closed. The error is absent after a deliberate `close()`. |
 
 #### Constants and types
 
 | Export | Description |
 |---|---|
-| `NS` | Namespace urns: `CONNECTION` (`urn:x-cast:com.google.cast.tp.connection`), `HEARTBEAT` (`...tp.heartbeat`), `RECEIVER` (`urn:x-cast:com.google.cast.receiver`) and `DEVICE_AUTH` (`...tp.deviceauth`). `DEVICE_AUTH` is defined but not used in v0.3.1. |
+| `NS` | Namespace urns: `CONNECTION` (`urn:x-cast:com.google.cast.tp.connection`), `HEARTBEAT` (`...tp.heartbeat`), `RECEIVER` (`urn:x-cast:com.google.cast.receiver`) and `DEVICE_AUTH` (`...tp.deviceauth`). `DEVICE_AUTH` is used by the authentication challenge. |
 | `PLATFORM_RECEIVER_ID` | `"receiver-0"`, the destination id of the device itself. |
 | `ReceiverApplication` | `{ appId, displayName, sessionId, transportId, namespaces: { name }[], statusText?, isIdleScreen?, iconUrl?, ... }` |
 | `ReceiverVolume` | `{ level?, muted?, controlType?, stepInterval? }` |
 | `ReceiverStatus` | `{ applications: ReceiverApplication[], volume: ReceiverVolume, ... }` |
 | `CastClientOptions`, `CastClientEvents` | The option and event types above. |
+
+#### Device authentication
+
+Like Chrome, `connect()` proves the device is a genuine, Google-certified Cast device before CONNECT, as a port of
+Chromium's sender side (`cast_auth_util.cc` and the certificate code beside it): it sends a challenge (16-byte nonce,
+SHA-256) on the `deviceauth` namespace, then checks the TLS certificate's validity window, the device's certificate
+chain against Google's built-in Cast root certificates, revocation, and a signature over the nonce and this
+connection's TLS certificate. There are no dependencies and no network access. How it works and where it differs from
+Chromium: [DESIGN.md](DESIGN.md#device-authentication-srcclientauth).
+
+**Revocation and the stale fallback CRL.** Revocation uses the CRL the device sends, or else a fallback CRL built into
+the package, which counts for 20 weeks from the package's build time (stamped by `npm run build`; Chromium uses the
+binary's build time). When that window has lapsed and the device sent no valid CRL, the revocation check is skipped and
+`deviceAuth.revocationChecked` is `false`, where Chromium would refuse the device (Chrome updates itself; an app may
+not). Everything else is still checked, and revocation by a device CRL or a still-valid fallback is always enforced.
+Update the package to get a fresh fallback CRL.
+
+##### `DeviceAuthResult`
+
+Returned by the `deviceAuth` getter. The type is not exported by name; use `CastClient["deviceAuth"]`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `policy` | `"unrestricted" \| "audio_only"` | Chromium's certificate policy result. `audio_only` is reported; nothing in electron-cast acts on it. |
+| `hashAlgorithm` | `"sha1" \| "sha256"` | The digest the device signed with. |
+| `nonceEchoed` | `boolean` | `false` when the reply did not echo our nonce. Chromium records this and carries on, and so does electron-cast. |
+| `usedFallbackCrl` | `boolean` | The device sent no usable CRL and the built-in fallback CRL was used. |
+| `revocationChecked` | `boolean` | `false` only in the stale-fallback case above. |
+
+##### `DeviceAuthOptions`
+
+The `deviceAuth` client option (also not exported by name). All fields are optional.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `now` | `number` | Verification time, epoch milliseconds. Default: now. |
+| `roots` | `Uint8Array[]` | DER trust anchors replacing the Cast Root CA and Eureka Root CA. |
+| `crlRoots` | `Uint8Array[]` | DER CRL trust anchors replacing the Cast CRL Root CA. |
+| `fallbackCrl` | `Uint8Array \| null` | Replacement fallback CRL (a serialized CrlBundle), or `null` for none. |
+| `fallbackCrlBuildTime` | `number` | The build time the fallback's 20-week window starts at, epoch milliseconds. |
 
 #### Errors
 
@@ -392,7 +513,26 @@ All are `Error` subclasses with `name` set to the class name.
 |---|---|---|
 | `CastConnectionError` | The connection could not be made, was closed, failed, or timed out on heartbeat; `send` while disconnected. | `cause` (the underlying error, if any) |
 | `CastTimeoutError` | The TLS handshake, a request, or a launch did not finish in time. | none |
+| `CastAuthError` | The device did not prove it is a genuine Cast device (reasons below). The message names the device address when known. | `reason: CastAuthReason`, `host: string \| undefined` |
 | `CastRequestError` | The receiver replied with an error: type `INVALID_REQUEST`, `LOAD_FAILED`, `LOAD_CANCELLED`, `INVALID_PLAYER_STATE`, or ending in `_ERROR`. | `type: string`, `reason: string \| undefined`, `response: Record<string, unknown>` |
+
+`CastAuthReason` (an exported type) is one of:
+
+| `reason` | Meaning |
+|---|---|
+| `timeout` | No authentication reply within `authTimeoutMs`. |
+| `no_tls_certificate` | The device presented no TLS certificate. |
+| `tls_certificate_invalid` | The TLS certificate does not parse, is not yet valid, has expired, or is valid for more than 4 days (it bounds the proof's lifetime). |
+| `device_error` | The device answered with an authentication error. |
+| `malformed_reply` | The reply was not a binary, parseable `DeviceAuthMessage` with a response, or the framing broke during authentication. |
+| `unsupported_algorithm` | The reply's hash algorithm is neither SHA-1 nor SHA-256. |
+| `invalid_certificate` | No device certificate, one that does not parse, is outside its validity dates, or breaks a certificate restriction. |
+| `untrusted_chain` | The chain does not lead to a Cast root. |
+| `revoked` | The device certificate (or a CA) is revoked by the device's CRL or the fallback CRL. |
+| `crl_invalid` | The device sent no valid CRL and the built-in fallback CRL is itself invalid (broken or not yet valid; a merely lapsed one skips revocation instead). |
+| `bad_signature` | The signature over the nonce and TLS certificate is empty or does not verify. |
+
+Through the manager, any `connect()` failure, `CastAuthError` included, reaches the page as an unreachable device.
 
 ### Discovery
 
@@ -409,8 +549,18 @@ class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
 }
 ```
 
-Finds Cast devices by sending mDNS PTR queries on every external IPv4 interface and joining the answers into
-`CastDevice`s. Interfaces that appear or disappear are picked up (checked every `interfaceCheckMs`).
+Finds Cast devices by sending mDNS PTR queries on every external IPv4 interface and on one IPv6 link-local address
+per adapter (group `ff02::fb`), and joining the answers into `CastDevice`s, so IPv6-only devices are found too. What
+users see:
+
+- A device's `host` is its IPv4 address when it has one (Chromium's Cast discovery resolves only A records), else a
+  global IPv6, else link-local. Link-local addresses carry the interface's zone (`fe80::1%12`) so they can be
+  connected to; one heard on an interface with no known zone is dropped.
+- Interfaces that appear or disappear are picked up (checked every `interfaceCheckMs`). Devices that only a vanished
+  interface heard are removed at once (`deviceDown`) instead of after their TTL.
+- After the machine wakes from sleep (an interface check that runs more than `resumeGapMs` late) all sockets are
+  replaced and queried again, since they can come back deaf.
+- If the socket for an interface fails (IPv6 included), `socketError` is emitted once and the other interfaces carry on.
 
 | Member | Description |
 |---|---|
@@ -425,12 +575,13 @@ Finds Cast devices by sending mDNS PTR queries on every external IPv4 interface 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `serviceName` | `string` | `"_googlecast._tcp.local"` | The mDNS service to query. |
-| `interfaces` | `() => NetworkInterfaceInfo[]` | `listIPv4Interfaces()` | Which interfaces to use. |
+| `interfaces` | `() => NetworkInterfaceInfo[]` | `listMdnsInterfaces()` | Which interfaces to use: external IPv4 addresses plus one IPv6 link-local address per adapter. |
 | `openSocket` | `OpenMdnsSocket` | `openUdpMdnsSocket` | How to open a socket (for tests). |
 | `followUpQueriesMs` | `number[]` | `[1000, 3000]` | Extra queries, in ms after `start()`. |
 | `refreshMs` | `number` | `60000` | Query interval after the follow-ups. |
 | `expireCheckMs` | `number` | `1000` | How often expired records are dropped (and `deviceDown` emitted). |
 | `interfaceCheckMs` | `number` | `10000` | How often the interface list is re-read. |
+| `resumeGapMs` | `number` | `3 * interfaceCheckMs` | A check this much later than due means the machine slept; sockets are then replaced. |
 
 ##### `CastDiscoveryEvents`
 
@@ -446,11 +597,12 @@ Finds Cast devices by sending mDNS PTR queries on every external IPv4 interface 
 | Export | Description |
 |---|---|
 | `listIPv4Interfaces(nets?)` | External IPv4 interfaces: not internal, not link-local (`169.254.`), one entry per address. `nets` defaults to `os.networkInterfaces()`. |
-| `NetworkInterfaceInfo` | `{ name: string, address: string }` |
+| `listMdnsInterfaces(nets?)` | `listIPv4Interfaces` plus one IPv6 link-local entry per adapter (`family: "IPv6"`, with its `scopeId`); an IPv4 entry gets the `scopeId` of the same adapter's link-local address. |
+| `NetworkInterfaceInfo` | `{ name: string, address: string, family?: "IPv4" \| "IPv6", scopeId?: number }` (IPv4 when `family` is absent) |
 | `MdnsSocket`, `MdnsSocketHandlers`, `OpenMdnsSocket` | The socket abstraction: `send(packet)` and `close()`; handlers `message(packet, from)` and `error(error)`. |
-| `openUdpMdnsSocket(iface, handlers, options?)` | The default `OpenMdnsSocket`: multicast on port 5353 if it can bind, else a unicast socket on an ephemeral port. |
-| `MDNS_GROUP`, `MDNS_PORT` | `"224.0.0.251"` and `5353`. |
-| `CastDeviceCache` | A pure, time-explicit cache that joins records into devices. `new CastDeviceCache(serviceName?)`, `ingest(records, now): CacheChange`, `expire(now): CacheChange`, `devices(): CastDevice[]`. |
+| `openUdpMdnsSocket(iface, handlers, options?)` | The default `OpenMdnsSocket`: multicast on port 5353 if it can bind, else a unicast socket on an ephemeral port; an IPv6 interface uses `ff02::fb` on its scope. |
+| `MDNS_GROUP`, `MDNS_GROUP_V6`, `MDNS_PORT` | `"224.0.0.251"`, `"ff02::fb"` and `5353`. |
+| `CastDeviceCache` | A pure, time-explicit cache that joins records into devices. `new CastDeviceCache(serviceName?)`, `ingest(records, now, source?): CacheChange`, `expire(now): CacheChange`, `dropSource(source): CacheChange` (forget what one interface heard), `devices(): CastDevice[]`. |
 | `CacheChange` | `{ added, updated, removed }`, each a `CastDevice[]`. |
 | `CastDevice` | See [`CastDevice`](#castdevice). |
 | `decodeDnsPacket(buf)` | Parses a DNS packet into a `DnsPacket`. Throws `DnsFormatError` if it is malformed or truncated. |
@@ -472,4 +624,7 @@ The Cast v2 wire format.
 | `frame(body)` | Adds the 4-byte big-endian length prefix. Throws `RangeError` over `MAX_MESSAGE_SIZE`. |
 | `FrameDecoder` | `push(chunk): Buffer[]` returns every complete body from a chunked stream; `bufferedBytes` is the incomplete amount. Throws `CastProtocolError` on an oversized length and is unusable afterwards. |
 | `MAX_MESSAGE_SIZE` | `65536` bytes. |
+| `DeviceAuthMessage`, `AuthResponse` | A decoded device-authentication message (`response` or `error`) and its response parts (`signature`, `clientAuthCertificate`, `intermediateCertificates`, `signatureAlgorithm`, `senderNonce`, `hashAlgorithm`, `crl`). |
+| `encodeAuthChallenge(challenge)`, `encodeAuthResponse(response)`, `encodeAuthError(errorType)`, `decodeDeviceAuthMessage(bytes)` | Encode and decode the `deviceauth` payloads (`encodeAuthResponse` and `encodeAuthError` are for tests and fake receivers). `decodeDeviceAuthMessage` throws `CastProtocolError` if invalid. |
+| `SignatureAlgorithm`, `HashAlgorithm`, `AuthErrorType` | The enums of `cast_channel.proto` (`HashAlgorithm`: `SHA1` 0, `SHA256` 1), also types. |
 | `CastProtocolError` | A message or frame broke the protocol. |

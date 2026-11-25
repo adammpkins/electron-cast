@@ -33,8 +33,10 @@ Where electron-cast differs from Chrome:
   `MediaSink` has no description; `description` here is the device model (Chrome keeps it in
   `CastSinkExtraData::model_name`, not on the sink).
 - Registration returns the unregister function; Chrome unregisters when the observer object is destroyed.
-- Control methods return promises and reject with `MediaRouteError` (`code`: `route_not_found` or a bridge code such
-  as `session_error`); Chrome's are fire-and-forget.
+- `terminateRoute`, `setVolume` and `setMute` return promises and reject with `MediaRouteError` (`code`:
+  `route_not_found` or a bridge code such as `session_error`); `setVolume` rejects with `RangeError` for a level outside
+  0 to 1 and `setMute` with `TypeError` for a non-boolean. `detachRoute` and `getRouteController` are synchronous and
+  throw `MediaRouteError` `route_not_found` for an unknown route. Chrome's are fire-and-forget.
 - A route's id is the Cast session id. Chrome's `media_route_id` is `urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source id>`
   (`MediaRoute::GetMediaRouteId`).
 - `MediaRoute` also carries `appId`, `displayName`, `origin`, `volume`, `members` (`webContents.id`s, once each however
@@ -92,7 +94,8 @@ the change came from the device:
 - `detachRoute`: every page gets `sessionEnded` (`disconnected`); the device keeps running the app.
 - `setVolume` / `setMute`: the device reports its new volume, and the pages get `sessionUpdated`.
 
-Routes are not ended on `dispose()`; the manager just stops reporting.
+`dispose()` stops the observers (they are not called again) and closes the device connections; it does not stop the
+apps running on the devices.
 
 ## A live device picker
 

@@ -1,7 +1,7 @@
 # Security
 
 This document describes what electron-cast trusts, what it checks, and what it leaves to the app. It reflects
-v0.3.1. To report a vulnerability, see [Reporting a vulnerability](#reporting-a-vulnerability).
+v0.4.0. To report a vulnerability, see [Reporting a vulnerability](#reporting-a-vulnerability).
 
 ## Threat model
 
@@ -20,11 +20,15 @@ What the library tries to guarantee:
   handle. It works with `sandbox: true` and `contextIsolation: true`.
 - A page cannot choose which device, host or port to connect to. Only a device the app's `selectDevice` returned can
   be connected to.
-- A page cannot see or touch another origin's sessions.
+- A page cannot see or touch another origin's sessions, except that, as in Chrome, a page that already knows a session
+  id can rejoin that session (see [Scoping of sessions and messages](#scoping-of-sessions-and-messages)).
+- A device is used only after it proves it is a genuine Google-certified Cast device (on by default; see
+  [TLS and device authentication](#tls-and-device-authentication)).
 - Malformed input from the page, a device, or the network is rejected without crashing the main process.
 
-What it does not defend against: a compromised main process or preload, an app that auto-approves every request in
-`selectDevice`, and an attacker on the local network who can impersonate a device (see
+What it does not defend against: a compromised main process or preload, a compromised renderer process (see
+[User gesture](#user-gesture)), an app that auto-approves every request in `selectDevice`, and, when device
+verification is turned off, an attacker on the local network who can impersonate a device (see
 [TLS and device authentication](#tls-and-device-authentication)).
 
 ## What crosses the IPC boundary
@@ -37,7 +41,7 @@ Channels, with the default channel name `electron-cast`:
 
 | Channel | Direction | Used by |
 |---|---|---|
-| `electron-cast:presentation` (invoke) | page to main | Default mode: `getAvailability`, `stopWatching`, `start`, `reconnect`, `close`, `terminate` |
+| `electron-cast:presentation` (invoke) | page to main | Default mode: `getAvailability`, `stopWatching`, `start`, `reconnect`, `close`, `terminate`. `reconnect` is how a page rejoins a session by id, after a reload or an app restart. |
 | `electron-cast:presentation:send` (send) | page to main | Default mode: one message on an open connection |
 | `electron-cast:presentation:event` | main to page | Default mode: availability, messages, connection state |
 | `electron-cast:call` (invoke) | page to main | `mode: "chromecast"`: `initialize`, `requestSession`, `joinSession`, `sendMessage`, `stopSession`, `leaveSession`, `setReceiverVolume`, `setReceiverMuted` |
@@ -46,7 +50,7 @@ Channels, with the default channel name `electron-cast`:
 How the main process validates what arrives:
 
 - **Who is asking.** The origin comes from `event.senderFrame` in the main process, never from anything the page
-  says. A call with no sender frame is refused. If the frame's URL cannot be parsed, the origin is `""` and
+  says. In an iframe it is the iframe's own origin. A call with no sender frame is refused. If the frame's URL cannot be parsed, the origin is `""` and
   `allowOrigin` decides.
 - **Method names.** Only the methods above are accepted. Anything else gets an error reply.
 - **Parameter types.** Every method has a parser that checks types: ids and session ids are strings, `level` is a
@@ -83,7 +87,7 @@ Chrome only lets a page start a cast from a user gesture, and electron-cast foll
   reports as `PRESENTATION_REQUEST_CANCELLED`). A page script cannot forge this: it cannot reach the IPC channel, and
   overriding `navigator.userActivation` in the main world does not change the isolated world's view (smoke-tested).
 
-Known gap: Electron has no main-process API for a frame's transient user activation (`WebFrameMain` and
+Known gap, and the trust boundary: Electron has no main-process API for a frame's transient user activation (`WebFrameMain` and
 `IpcMainInvokeEvent` have none; only `webContents.executeJavaScript(code, userGesture)` and the media-access
 handler's `userGesture` touch the concept), so the check is made in the renderer process, by the preload, instead of
 in the browser process as Chrome does. It holds against a page's scripts. It does not hold against a compromised
@@ -121,20 +125,31 @@ A session records the origin that created it and the set of webContents that are
 - **Who can act on a session.** `sendMessage`, `stopSession`, `leaveSession` and the volume calls need the caller's
   webContents to be a member of the session. Other pages, including pages of the same origin in another window,
   cannot message or stop it unless they have joined.
-- **Who can join.** `joinSession` and auto-join need the caller's origin to equal the session's origin and, for
-  auto-join, the same app id. `origin_scoped` joins any window of that origin; `tab_and_origin_scoped` (the default
-  policy in Google's SDK) joins only the webContents that already had the session, including after a reload.
-  Joining by session id from another window of the same origin is allowed, because session ids are not secret from
-  that origin. A different origin cannot join, whatever it guesses.
-- **Who receives events.** Events and receiver messages are sent only to the member webContents, to its main
-  frame. Messages from the device are routed by the receiver app's transport id, so a session sees only its own
-  app's traffic.
+- **Who can join.** Auto-join needs the caller's origin to equal the session's origin and the same app id.
+  `origin_scoped` joins any window of that origin; `tab_and_origin_scoped` (the default policy in Google's SDK) joins
+  only the sender that already had the session, including after a reload. Auto-join only finds sessions this run
+  started.
+- **Joining by id (default mode).** `reconnect("cast-session_<id>")`, which Google's SDK issues for
+  `requestSessionById`, joins by session id and checks no origin, as Chrome does (`AppActivity::CanJoinSession` checks
+  only the app id and that the client is not already connected). So the session id acts as the capability: a page
+  that knows the id and the session's app id can join it from any origin that `allowOrigin` admits.
+  The lookup also finds a session this run did not start, on any known
+  device (one still playing from before an app restart, or started from a phone), by asking each device what it runs.
+  electron-cast persists no ids; the app decides whether to store one. In `mode: "chromecast"`, `joinSession` still
+  needs the caller's origin to equal the session's.
+- **Who receives events.** Events and receiver messages are sent only to the member's own frame (`frame.send`), and
+  messages from the device are routed by the receiver app's transport id, so a session sees only its own app's
+  traffic.
 - **Lifetime.** A navigation of the page leaves its sessions open on the device, parked, so the next page of the
-  same webContents can rejoin them (as in Chrome). A destroyed webContents leaves its sessions for good. When a
+  same sender can rejoin them (as in Chrome). A destroyed webContents leaves its sessions for good. When a
   session has no members left, electron-cast releases its connection to the app; the app keeps running on the
   device until it is stopped.
-- **Per-webContents, not per-frame.** Membership is by webContents. If a window shows several frames that are all
-  allowed by `allowOrigin`, they share the sessions of that webContents.
+- **Per frame in default mode.** Every frame, iframes included, is its own sender with its own watches, connections
+  and sessions, and cannot read, close or message another frame's. Iframes only get a preload with
+  `nodeIntegrationInSubFrames: true`, which runs the cast bridge in every iframe of every origin, so keep
+  `allowOrigin` strict. A removed iframe or a navigating page ends the iframe's sessions. In `mode: "chromecast"`
+  membership is by webContents (main frame only; a call from an iframe is refused), so windows that are all allowed
+  by `allowOrigin` share one webContents' sessions.
 
 ### What a page can do inside its own session
 
@@ -161,18 +176,30 @@ that certificate and instead authenticates the device with a separate challenge 
 `urn:x-cast:com.google.cast.tp.deviceauth` namespace, which checks the device's certificate chain against Google's
 Cast root certificates.
 
-In v0.3.1 electron-cast does not do that challenge. (Later releases do; see below.) The connection is encrypted but the device is not
-authenticated. Anyone on the local network who can answer mDNS queries, or who can intercept traffic between your
-computer and the device, can pose as a Cast device. If the user picks that device, the attacker receives whatever the
-page sends it, such as media URLs and app-specific messages and tokens (YouTube's lounge tokens, for example). It
-does not get cookies or anything else from the page.
+From 0.4.0 electron-cast does the same challenge, on by default: after the TLS handshake and before CONNECT,
+`CastClient.connect()` sends a nonce and checks the device's reply (a port of Chromium's
+`cast_auth_util.cc` and certificate code, with Google's Cast root certificates built in). It requires that the TLS
+certificate's validity window is current and short, that the device's certificate chain leads to a Cast root, that
+the chain is not revoked, and that the device's signature over the nonce and this connection's TLS certificate
+verifies, which ties the proof to this connection. A device that fails makes `connect()` reject with `CastAuthError`
+(with a `reason`), the socket is closed, and the page sees an unreachable device. Verification happens at connect, not
+at discovery, so a failing device still appears in the picker, which is another reason to show names as plain text.
+Details and the differences from Chromium: [docs/DESIGN.md](docs/DESIGN.md).
+
+With `verifyDevices: false` (manager) or `verifyDevice: false` (client), none of this runs: the connection is
+encrypted but the device is not authenticated, so anyone on the local network who can answer mDNS queries, or
+intercept traffic between your computer and the device, can pose as a Cast device. If the user picks that device, the
+attacker receives whatever the page sends it, such as media URLs and app-specific messages and tokens (YouTube's lounge
+tokens, for example). It does not get cookies or anything else from the page. Turn it off only for receivers that are
+not Google-certified.
 
 `CastClientOptions.tls` is spread after the defaults, so an app that wants to pin a certificate can pass its own
 `tls` options through a custom `createClient`.
 
-**Upcoming (not in v0.3.1).** The client verifies the device's Cast certificate chain, on by default.
+The `deviceAuth` client option replaces the trust anchors and the clock. It exists for tests and private Cast
+deployments; an app that sets it decides what counts as genuine.
 
-**Old releases and devices that send no CRL.** Revocation uses the CRL the device sends, or else a fallback CRL built
+**Old releases and devices that send no CRL (the stale fallback CRL).** Revocation uses the CRL the device sends, or else a fallback CRL built
 into the package that counts for 20 weeks from the package's build time. When a release is older than that and the
 device sent no valid CRL, the revocation check is skipped (`CastClient.deviceAuth.revocationChecked` is `false`),
 where Chromium would refuse the device; Chrome updates itself, an Electron app may not, and Chrome likewise stops
@@ -187,11 +214,15 @@ electron-cast regularly, and treat `revocationChecked: false` as a prompt to do 
 Discovery sends multicast DNS queries for `_googlecast._tcp.local` to `224.0.0.251:5353`:
 
 - on every non-internal, non-link-local IPv4 interface the OS reports, including VPN and virtual adapters;
+- over IPv6 as well: queries to `ff02::fb` from one link-local address per adapter. A device found that way is
+  connected to over its `fe80::` address with the adapter's zone; IPv4 is preferred when a device has both;
 - right at start, again after 1 s and 3 s, then about every 60 s;
-- with the interface list re-checked every 10 s, so a new network is joined as soon as it appears.
+- with the interface list re-checked every 10 s, so a new network is joined as soon as it appears. A network that goes
+  away takes its devices with it at once, and after the machine wakes from sleep the sockets are replaced and queried
+  again.
 
 It binds UDP port 5353 with address reuse so it can coexist with the system's mDNS responder, and falls back to an
-ephemeral port if that fails. It does not advertise anything and does not answer queries; it only asks. The queries
+ephemeral port if that fails. If the IPv6 socket for an adapter cannot be opened, IPv4 carries on. It does not advertise anything and does not answer queries; it only asks. The queries
 reveal to everyone on those networks that this machine looks for Cast devices.
 
 Answers are accepted from any host on those networks, parsed with a defensive decoder (malformed packets are dropped),
@@ -209,8 +240,10 @@ With `presentation: false` only `mode: "chromecast"` pages are served.
 
 ## Dependencies and supply chain
 
-electron-cast has no runtime dependencies. It uses Node's `tls`, `dgram` and `crypto`. The preload entry has no
-imports of its own, so a bundler can inline it.
+electron-cast has no runtime dependencies. It uses Node's `tls`, `dgram` and `crypto`; device authentication,
+including the X.509, CRL and DER parsing, is part of the package rather than a dependency. Electron is an optional
+peer dependency (`electron >=35`) and is never imported: you pass Electron's objects in. The preload entry has no
+imports of its own, so a bundler can inline it. The package ships an ES module build and a CommonJS build.
 
 ## Reporting a vulnerability
 
