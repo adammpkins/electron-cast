@@ -3,7 +3,12 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
-import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
+import { randomUUID } from "node:crypto";
+import {
+  MediaRouteError, createManagerApi, createSinksObservers, presentationUrlForDevice,
+  type CastManagerApi, type DevicePickerContext, type MediaRoute,
+} from "./manager-api.ts";
+import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 
 /**
@@ -19,8 +24,8 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type {
-  CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
-  MediaSinksQuery, SinkIconType,
+  CastManagerApi, DevicePickerContext, MediaCastMode, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
+  MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
 } from "./manager-api.ts";
 
 /** The subset of an Electron `WebFrameMain` the manager needs. */
@@ -130,6 +135,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   let nextSubframeId = SUBFRAME_ID_BASE;
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   let handler: CastPresentationHandler | undefined;
+  /** Each window's default presentation request (Chrome keeps it per WebContents, from its outermost frame only). */
+  const defaults = new DefaultPresentationRequests();
 
   const findFrame = (wc: WebContentsLike, frameTreeNodeId: number): FrameLike | undefined => {
     try {
@@ -283,13 +290,19 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     const sendTo = (sid: number, payload: unknown): void => {
       deliver(sid, `${channel}:presentation:event`, payload);
     };
-    const invalid = (description: string) => ({ ok: false, code: "InvalidAccessError", description });
+    const invalid = (description: string) => ({ ok: false as const, code: "InvalidAccessError", description });
     const isId = (v: unknown): v is string => typeof v === "string" && v !== "" && v.length <= 256;
     const isUrls = (v: unknown): v is string[] =>
       Array.isArray(v) && v.length > 0 && v.length <= 16 && v.every((u) => typeof u === "string");
 
     /** Finish a start/reconnect: register the connection and route its traffic to the page. */
-    const open = async (sid: number, connectionId: string, opening: () => Promise<PresentationConnectionHandle>) => {
+    const open = async (
+      sid: number,
+      connectionId: string,
+      opening: () => Promise<PresentationConnectionHandle>,
+      /** Runs once the connection exists and before any of its messages reach the page. */
+      opened?: (conn: PresentationConnectionHandle) => void,
+    ): Promise<{ ok: false; code: string; description: string } | { ok: true; value: { id: string; url: string } }> => {
       if (connections.has(connectionId)) return invalid("connectionId in use");
       const slot: { conn: PresentationConnectionHandle | null; sid: number } = { conn: null, sid };
       connections.set(connectionId, slot);  // reserved while the picker or join is pending
@@ -311,6 +324,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
         sendTo(sid, { type: "statechange", connectionId, state });
       };
+      opened?.(conn);
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
       conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
       return { ok: true, value: { id: conn.id, url: conn.url } };
@@ -346,6 +360,15 @@ export function createCastManager(options: CastManagerOptions): CastManager {
               onchange: (value) => sendTo(sid, { type: "availability", watchId, value }),
             });
             return { ok: true, value: { available } };
+          }
+          case "setDefaultRequest": {
+            // Blink's Presentation::setDefaultRequest sends the URLs on every set (none when it is cleared)
+            if (!Array.isArray(p.urls) || p.urls.length > 16 || !p.urls.every((u) => typeof u === "string" && u.length <= 4096)) {
+              return invalid("setDefaultRequest expects { urls }");
+            }
+            // PresentationServiceImpl::SetDefaultPresentationUrls ignores a frame that is not the outermost document
+            if (isMainFrame(event.senderFrame)) defaults.set(event.sender.id, p.urls as string[], origin);
+            return { ok: true, value: undefined };
           }
           case "stopWatching": {
             const w = isId(p.watchId) ? watches.get(p.watchId) : undefined;
@@ -403,6 +426,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     return {
       /** Close the page's connections and watches before the service drops it. */
       senderGone(sid: number): void {
+        // PresentationServiceImpl::Reset (navigation, frame gone): the frame's default request goes with it
+        defaults.clear(sid);
         h.senderGone(sid);
         for (const [id, c] of connections) if (c.sid === sid) connections.delete(id);
         for (const [id, w] of watches) {
@@ -410,6 +435,57 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           w.ac.abort();
           watches.delete(id);
         }
+      },
+      /**
+       * MediaRouterUI::StartCasting(sink, PRESENTATION) on the window's default request: MediaRouteStarter's
+       * CreateRouteParameters, MediaRouter::CreateRoute, then WebContentsPresentationManager::OnPresentationResponse.
+       */
+      async startDefaultPresentation(webContentsId: number, sinkId: string): Promise<MediaRoute> {
+        const request = defaults.get(webContentsId);
+        // No source for the sink (no default request, or its URLs do not suit the sink): CreateRouteParameters is null
+        const unable = (why: string) => new MediaRouteError("unable_to_cast", why);
+        if (request === null) throw unable("the window has no default presentation request");
+        const device = discovery.devices().find((d) => d.id === sinkId);
+        if (device === undefined) throw unable(`no sink ${sinkId}`);
+        const url = presentationUrlForDevice(device, request.presentationUrls);
+        if (url === null) throw unable("the sink cannot run the default presentation request's URLs");
+        if (!senders.has(webContentsId)) throw unable("the window is gone");
+        const connectionId = randomUUID();
+        let failure: unknown;
+        const result = await open(
+          webContentsId,
+          connectionId,
+          () => h.startPresentation({
+            urls: [url, ...request.presentationUrls.filter((u) => u !== url)],
+            origin: request.frameOrigin,
+            senderId: webContentsId,
+            deviceId: device.id,
+          }).catch((err: unknown) => {
+            failure = err;
+            throw err;
+          }),
+          (conn) => {
+            // OnPresentationResponse hands the connection to the page only while the request it answers is still the default one
+            const current = defaults.get(webContentsId);
+            if (current === null || !samePresentationRequest(current, request)) return;
+            sendTo(webContentsId, { type: "connectionavailable", connectionId, id: conn.id, url: conn.url });
+          },
+        );
+        if (!result.ok) {
+          // RouteRequestResultCode, from the cause the handler saw
+          const bridge = (failure as { bridgeCode?: unknown } | undefined)?.bridgeCode;
+          const code = bridge === "timeout" ? "timed_out"
+            : bridge === "cancel" || (failure === undefined && result.code === "AbortError") ? "cancelled"
+            : bridge === "receiver_unavailable" ? "sink_not_found"
+            : bridge === "extension_missing" ? "invalid_origin"
+            : bridge === "invalid_parameter" ? "redundant_request"
+            : "unknown_error";
+          throw new MediaRouteError(code, result.description);
+        }
+        const sessionId = result.value.id.slice("cast-session_".length);
+        const route = routes().find((r) => r.id === sessionId);
+        if (route === undefined) throw new MediaRouteError("route_not_found", `no route ${sessionId}`);
+        return route;
       },
       dispose(): void {
         ipc.removeHandler(`${channel}:presentation`);
@@ -425,13 +501,20 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The service knows frames by sender id (an iframe has a synthetic one); the API speaks of windows, so a route's
   // pages are reported as `webContents.id`s, once each however many of its frames hold the route.
   const windowIds = (ids: number[]): number[] => [...new Set(ids.map((id) => senders.get(id)?.wc.id ?? id))];
+  const routes = (): MediaRoute[] =>
+    service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) }));
   const api = createManagerApi(createSinksObservers(discovery), {
-    mediaRoutes: () =>
-      service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
+    mediaRoutes: routes,
     observeSessions: (l) => service.observeSessions(l),
     terminateSession: (id) => service.terminateSession(id),
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
+  }, {
+    requests: defaults,
+    start: (webContentsId, sinkId) => {
+      if (presentation === undefined) return Promise.reject(new MediaRouteError("unable_to_cast", "presentation mode is off"));
+      return presentation.startDefaultPresentation(webContentsId, sinkId);
+    },
   });
   let disposed = false;
   return {
@@ -442,6 +525,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (disposed) return;
       disposed = true;
       api.dispose();
+      defaults.dispose();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
       discovery.stop();

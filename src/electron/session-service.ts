@@ -274,6 +274,9 @@ export class CastSessionService {
           return this.handleInitialize(sender, params);
         case "requestSession":
           return await this.handleRequestSession(sender, params);
+        case "requestSessionOnDevice":
+          // main only: the app's own UI chose the device (see the manager's startCasting)
+          return await this.handleRequestSession(sender, params, isRecord(params) && typeof params.deviceId === "string" ? params.deviceId : "");
         case "joinSession":
           return this.handleJoinSession(sender, params, true);
         case "joinRunningSession":
@@ -368,7 +371,8 @@ export class CastSessionService {
     return good({ available, sessions: joined });
   }
 
-  private async handleRequestSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
+  /** With `presetDeviceId` the picker is skipped: that device is the choice (and must still be eligible). */
+  private async handleRequestSession(sender: SenderInfo, params: unknown, presetDeviceId?: string): Promise<BridgeResult> {
     const p = parseRequestSession(params);
     if (p === null) return bad("invalid_parameter");
     if (this.pendingRequests.has(sender.id)) return bad("invalid_parameter");
@@ -390,15 +394,20 @@ export class CastSessionService {
         request.session = { sessionId: current.app.sessionId, deviceId: current.device.id };
       }
       let choice: DeviceChoice;
-      // The picker gets live device updates until it answers; closing aborts its signal.
-      const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
-      pending.picker = pick;
-      try {
-        choice = await this.options.selectDevice(eligible, request, pick.context);
-      } catch (err) {
-        return bad("session_error", describe(err));
-      } finally {
-        pick.close();
+      if (presetDeviceId !== undefined) {
+        choice = eligible.find((d) => d.id === presetDeviceId) ?? null;
+        if (choice === null) return bad("receiver_unavailable");
+      } else {
+        // The picker gets live device updates until it answers; closing aborts its signal.
+        const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
+        pending.picker = pick;
+        try {
+          choice = await this.options.selectDevice(eligible, request, pick.context);
+        } catch (err) {
+          return bad("session_error", describe(err));
+        } finally {
+          pick.close();
+        }
       }
       if (choice === null) return bad("cancel");
       if (choice === "stop") {

@@ -5,6 +5,10 @@
 import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import type { DeviceSource } from "./session-service.ts";
+import { parsePresentationUrl } from "./presentation-envelope.ts";
+import type { DefaultPresentationRequests, PresentationObserver, PresentationRequest } from "./default-presentation.ts";
+
+export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast devices. */
 export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group";
@@ -24,7 +28,15 @@ export interface MediaSink {
 export interface MediaSinksQuery {
   /** Only sinks with all of these capabilities (`video_out`, `audio_out`, ...), like `requestSession`'s. */
   capabilities?: string[];
+  /**
+   * Only sinks that can run one of these presentation URLs (Chrome: the observer's `MediaSource`, as the Cast dialog
+   * sets it from the page's default request). A URL that is not a Cast URL matches no sink. Combines with `capabilities`.
+   */
+  presentationUrls?: string[];
 }
+
+/** Chrome: `MediaCastMode`; the Cast dialog's `PRESENTATION` mode is the one electron-cast has (no tab or desktop mirroring). */
+export type MediaCastMode = "presentation";
 
 /** Chrome: `MediaSinksObserver`. */
 export interface MediaSinksObserver {
@@ -91,7 +103,33 @@ export interface CastManagerApi {
   terminateRoute(routeId: string): Promise<void>;
   /** electron-cast's own (Chrome's Cast provider leaves `DetachRoute` unimplemented): every page lets go of the route and its transport closes; the app keeps running. */
   detachRoute(routeId: string): void;
-  /** `MediaRouter::GetMediaController` / `mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
+  /**
+   * `WebContentsPresentationManager::HasDefaultPresentationRequest` for the window with this `webContents.id`: has its
+   * page set `navigator.presentation.defaultRequest`?
+   */
+  hasDefaultPresentationRequest(webContentsId: number): boolean;
+  /**
+   * `WebContentsPresentationManager::GetDefaultPresentationRequest`: the request, or `null` where Chrome has it an error
+   * to ask without one. Only the window's main frame can have one.
+   */
+  getDefaultPresentationRequest(webContentsId: number): PresentationRequest | null;
+  /**
+   * `WebContentsPresentationManager::AddObserver`: told when the window's default request is set, replaced or cleared
+   * (as `null`: the page set `defaultRequest` to null or no URLs, navigated, or the window was destroyed). Like Chrome's,
+   * it is not called on registration; read the current request first. Returns the unregister function.
+   */
+  addPresentationObserver(webContentsId: number, observer: PresentationObserver): () => void;
+  /**
+   * `MediaRouterUI::StartCasting(sink_id, MediaCastMode::PRESENTATION)` on the window's default request:
+   * `MediaRouter::CreateRoute`, then `WebContentsPresentationManager::OnPresentationResponse`, which hands the page a
+   * `PresentationConnection` through `connectionavailable` on its default request. No user gesture: the app's own UI is
+   * the gesture, as with Chrome's Cast dialog. Resolves with the new route; rejects with `MediaRouteError` carrying
+   * Chrome's `RouteRequestResultCode` in lower case (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`,
+   * `redundant_request`, `unknown_error`), or `unable_to_cast` where Chrome's `CreateRouteParameters` finds no
+   * source for the sink (no default request, or the sink cannot run its URLs).
+   */
+  startCasting(sinkId: string, options: { webContentsId: number; castMode?: MediaCastMode }): Promise<MediaRoute>;
+  /** `MediaRouter::GetMediaController` /`mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
   getRouteController(routeId: string): MediaRouteController;
 }
 
@@ -137,6 +175,15 @@ export class ObservedMap<K, V> extends Map<K, V> {
     if (had) this.notify("ended", value as V);
     return had;
   }
+}
+
+/** The first of the presentation URLs this device can run (Chrome: `GetSourceForCastModeAndSink`), or null. */
+export function presentationUrlForDevice(device: CastDevice, urls: readonly string[]): string | null {
+  for (const url of urls) {
+    const parsed = parsePresentationUrl(url);
+    if (parsed !== null && capsMatch(device, parsed.capabilities)) return url;
+  }
+  return null;
 }
 
 /** The sink for a discovered device. */
@@ -199,7 +246,9 @@ export function createSinksObservers(source: DeviceSource): {
   return {
     register(observer, query, signal, eligible) {
       const caps = query?.capabilities;
-      const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps));
+      const urls = query?.presentationUrls;
+      const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
+        && (urls === undefined || presentationUrlForDevice(d, urls) !== null);
       const current = (): MediaSink[] => source.devices().filter(matches).map(toMediaSink);
       let last = "";
       const check = (): void => {
@@ -264,6 +313,10 @@ function must(result: BridgeResult): void {
 export function createManagerApi(
   sinks: ReturnType<typeof createSinksObservers>,
   host: SessionHost,
+  presentation: {
+    requests: DefaultPresentationRequests;
+    start(webContentsId: number, sinkId: string): Promise<MediaRoute>;
+  },
 ): CastManagerApi & { dispose(): void } {
   const routeObservers = new ObserverSet<MediaRoute>(() => host.mediaRoutes());
   const unobserve = host.observeSessions(() => routeObservers.notify());
@@ -285,6 +338,17 @@ export function createManagerApi(
     detachRoute(routeId) {
       need(routeId);
       must(host.detachSession(routeId));
+    },
+    hasDefaultPresentationRequest: (id) => presentation.requests.has(id),
+    getDefaultPresentationRequest: (id) => presentation.requests.get(id),
+    addPresentationObserver: (id, observer) => presentation.requests.observe(id, observer),
+    startCasting(sinkId, options) {
+      if (typeof sinkId !== "string") return Promise.reject(new TypeError("sinkId must be a string"));
+      if (typeof options?.webContentsId !== "number") return Promise.reject(new TypeError("options.webContentsId must be a number"));
+      if (options.castMode !== undefined && options.castMode !== "presentation") {
+        return Promise.reject(new RangeError(`unsupported cast mode: ${String(options.castMode)}`));
+      }
+      return presentation.start(options.webContentsId, sinkId);
     },
     getRouteController(routeId) {
       need(routeId);
