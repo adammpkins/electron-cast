@@ -18,7 +18,6 @@
     "type": "git",
     "url": "git+https://github.com/adammpkins/electron-cast.git"
   },
-  "homepage": "https://github.com/adammpkins/electron-cast#readme",
   "bugs": {
     "url": "https://github.com/adammpkins/electron-cast/issues"
   },
