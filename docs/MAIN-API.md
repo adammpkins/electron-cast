@@ -140,6 +140,7 @@ manager.registerMediaSinksObserver({ onSinksUpdated: showDevices }, { castMode: 
 
 const route = await manager.startCasting(sink.id, { castMode: "tab_mirror", webContentsId: win.webContents.id });
 // route.description is "Casting tab"; route.id is Chrome's urn:x-org.chromium:media:route:... form.
+// The mirrored page is muted locally while the route runs, as in Chrome, and unmuted when it ends.
 await manager.terminateRoute(route.id); // stops the receiver app, as Chrome does
 ```
 
@@ -154,7 +155,7 @@ It rejects with a `MediaRouteError` (`code`: `sink_not_found`, `unable_to_cast`,
 route on a device ends the one already running there, as in Chrome. Mirroring routes show up in
 `registerMediaRoutesObserver` and end on `terminateRoute`, when the receiver's app closes, or on a stream error.
 
-`mirroring` options: `electron` (the Electron objects to use), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
+`mirroring` options: `electron` (the Electron objects to use), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8), `desktopAudio` (`"loopback"` keeps local playback, `"loopbackWithMute"` mutes it; Chrome's default: loopback on Windows, mute elsewhere),
 `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
 Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
 route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)

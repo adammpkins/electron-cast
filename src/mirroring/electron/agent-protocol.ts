@@ -10,7 +10,17 @@
 /** What to capture. */
 export type CaptureSource =
   | { kind: "tab"; /** `webContents.getMediaSourceId(agent)` of the mirrored page. */ mediaSourceId: string }
-  | { kind: "desktop"; /** The `desktopCapturer` source id the agent's display-media handler hands out. */ sourceId: string };
+  | {
+      kind: "desktop";
+      /** The `desktopCapturer` source id the app chose. */
+      sourceId: string;
+      /**
+       * `loopback` captures system audio and leaves local playback alone (Windows, `kLoopbackInputDeviceId`); it goes
+       * through `getUserMedia`. `loopbackWithMute` also mutes local playback while mirroring
+       * (`kLoopbackWithMuteDeviceId`, every other platform) and needs `getDisplayMedia`, answered by the host's handler.
+       */
+      audio: "loopback" | "loopbackWithMute";
+    };
 
 export interface AgentStartMessage {
   t: "start";

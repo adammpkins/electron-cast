@@ -53,7 +53,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   const discovery = Object.assign(new EventEmitter(), { devices: () => [{ ...LOOPBACK_TV }], async start() {}, stop() {} });
   const cast = createCastManager({
     ipcMain, discovery, createClient: () => client, selectDevice: async () => null, presentation: false, channel: "electron-cast-mirroring-smoke",
-    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, log: (l, m) => console.log(`smoke: mirroring ${l}: ${m}`) },
+    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, desktopAudio: process.env.SMOKE_DESKTOP_AUDIO || undefined, log: (l, m) => console.log(`smoke: mirroring ${l}: ${m}`) },
   });
   await cast.start();
 
@@ -83,7 +83,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   while (Date.now() < deadline && !(s.validVideoFrames >= 30 && s.validAudioFrames >= 60)) await new Promise((r) => setTimeout(r, 100));
   await new Promise((r) => setTimeout(r, 3000));
   const seconds = ((s.lastFrameAt ?? 0) - (s.firstFrameAt ?? 0)) / 1000;
-  console.log(`smoke: mirroring video ${s.videoFrames} frames (${s.validVideoFrames} valid VP8, ${s.videoKeyFrames} key, ${(s.videoFrames / seconds).toFixed(1)} fps, ${Math.round((s.videoBytes * 8) / seconds / 1000)} kbps), audio ${s.audioFrames} frames (${s.validAudioFrames} valid Opus), invalid ${s.invalidFrames}`);
+  console.log(`smoke: mirroring video ${s.videoFrames} frames (${s.validVideoFrames} valid VP8, ${s.videoKeyFrames} key, ${(s.videoFrames / seconds).toFixed(1)} fps, ${Math.round((s.videoBytes * 8) / seconds / 1000)} kbps), audio ${s.audioFrames} frames (${s.validAudioFrames} valid Opus, ${Math.round(s.audioBytes / Math.max(1, s.audioFrames))} B avg), invalid ${s.invalidFrames}`);
   assert.ok(s.validVideoFrames >= 30, `only ${s.validVideoFrames} valid VP8 frames reached the receiver`);
   assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
   assert.equal(s.invalidFrames, 0);

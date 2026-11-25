@@ -9,11 +9,16 @@ function fakeElectron() {
   const state = {
     windows: [] as { destroyed: boolean }[],
     request: undefined as ((wc: unknown, permission: string, cb: (granted: boolean) => void) => void) | undefined,
+    display: undefined as ((request: unknown, cb: (streams: { video?: unknown; audio?: string }) => void) => void) | undefined,
     check: undefined as ((wc: unknown, permission: string) => boolean) | undefined,
     procs: [] as { handlers: { message: ((m: FromEngine) => void)[]; exit: ((code: number) => void)[] }; posted: unknown[]; killed: boolean }[],
   };
   const page = {
     id: 7,
+    muted: false,
+    muteCalls: [] as boolean[],
+    isAudioMuted() { return this.muted; },
+    setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); },
     isDestroyed: () => false,
     getMediaSourceId: () => "id",
     executeJavaScript: async (code: string) => (code.includes("isConfigSupported") ? ["vp8"] : undefined),
@@ -23,7 +28,7 @@ function fakeElectron() {
     session: {
       setPermissionRequestHandler(h: typeof state.request) { state.request = h; },
       setPermissionCheckHandler(h: typeof state.check) { state.check = h; },
-      setDisplayMediaRequestHandler() {},
+      setDisplayMediaRequestHandler(h: typeof state.display) { state.display = h; },
     },
   };
   const electron = {
@@ -49,14 +54,15 @@ function fakeElectron() {
       },
     },
     MessageChannelMain: class { port1 = { postMessage() {}, start() {}, close() {} }; port2 = { postMessage() {}, start() {}, close() {} }; },
-    desktopCapturer: { getSources: async () => [] },
+    desktopCapturer: { getSources: async () => [{ id: "screen:1:0", name: "Screen 1" }] },
     webContents: { fromId: () => page },
   } as unknown as ElectronMirroringApi;
-  return { electron, state };
+  return { electron, state, page };
 }
 
-async function start() {
-  const { electron, state } = fakeElectron();
+async function start(alreadyMuted = false) {
+  const { electron, state, page } = fakeElectron();
+  page.muted = alreadyMuted;
   const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
   const errors: string[] = [];
   const service = host.factory(
@@ -67,7 +73,7 @@ async function start() {
   );
   for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
   assert.equal(state.procs.length, 1, "the engine was started");
-  return { state, errors, service, host };
+  return { state, errors, service, host, page };
 }
 
 test("host: an engine that exits unexpectedly reports the error and tears down the window and process", async () => {
@@ -110,4 +116,38 @@ test("host: the capture window's own session grants media and display capture, a
   assert.equal(asked("geolocation"), false);
   assert.equal(asked("notifications"), false);
   host.dispose();
+});
+
+test("host: a mirrored tab is silent locally for the session and unmuted after, but only if the host muted it", async () => {
+  const a = await start();
+  assert.equal(a.page.muted, true, "muted for the session (Chrome's Muter, crbug.com/40708932)");
+  a.service.stop();
+  assert.equal(a.page.muted, false);
+  assert.deepEqual(a.page.muteCalls, [true, false]);
+  a.host.dispose();
+
+  const b = await start(true);
+  b.service.stop();
+  assert.equal(b.page.muted, true, "a tab that was already muted stays muted");
+  assert.deepEqual(b.page.muteCalls, []);
+  b.host.dispose();
+});
+
+test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep local audio on Windows, mute elsewhere", async () => {
+  for (const [option, expected] of [[undefined, process.platform === "win32" ? "loopback" : "loopbackWithMute"], ["loopback", "loopback"], ["loopbackWithMute", "loopbackWithMute"]] as const) {
+    const { electron, state } = fakeElectron();
+    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", desktopAudio: option });
+    host.factory(
+      { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
+      {},
+      { send() {} },
+      { type: "desktop", id: "urn:x-org.chromium.media:source:desktop:screen:1:0?with_audio=true" } as never,
+    );
+    for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
+    let streams: { video?: unknown; audio?: string } | undefined;
+    state.display!(null, (r) => { streams = r; });
+    assert.equal(streams?.audio, expected);
+    assert.deepEqual(streams?.video, { id: "screen:1:0", name: "Screen 1" });
+    host.dispose();
+  }
 });

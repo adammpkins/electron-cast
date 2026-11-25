@@ -117,7 +117,10 @@ export const AGENT_SOURCE = String.raw`
       video: withVideo ? { mandatory: { chromeMediaSource: sourceKind, ...idConstraint, ...limits } } : false,
     });
     try {
-      stream = await acquire(!!m.audio, videoWanted);
+      stream = !tab && m.audio && m.source.audio === "loopbackWithMute"
+        // The host's handler on this window's own session answers with the app's source and 'loopbackWithMute'.
+        ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: { frameRate: { max: limits.maxFrameRate || 30 } } })
+        : await acquire(!!m.audio, videoWanted);
     } catch (err) {
       // One call serves both tracks, so say which one the browser refused: try the video alone.
       let which = m.video ? "video" : "audio";

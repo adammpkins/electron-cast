@@ -24,6 +24,8 @@ export interface PortMainLike { postMessage(message: unknown, transfer?: unknown
 export interface WebContentsMirrorLike {
   readonly id: number;
   isDestroyed(): boolean;
+  isAudioMuted?(): boolean;
+  setAudioMuted?(muted: boolean): void;
   /** `webContents.getMediaSourceId(requestWebContents)`: a tab capture id that `requestWebContents` can use once. */
   getMediaSourceId(requestWebContents: unknown): string;
   executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>;
@@ -68,6 +70,8 @@ export interface ElectronMirroringOptions {
    * list is VP8 and VP9 (`encoding_support.cc`); default none, so a stream is VP8 unless you opt in.
    */
   extraVideoCodecs?: ("vp9")[];
+  /** Desktop audio capture: `loopback` keeps local playback, `loopbackWithMute` mutes it. Default as Chrome: the first on Windows, the second elsewhere. */
+  desktopAudio?: "loopback" | "loopbackWithMute";
   /** Absolute path of the engine entry (`engine-process.js` next to this file in the built package). */
   engineModulePath?: string;
   /** Environment for the session host (`CHROME_MIRRORING_PLAYOUT_DELAY`); default none. */
@@ -103,9 +107,11 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
     const queue: ToEngine[] = [];
     let ready = false;
 
+    let unmuteTab: (() => void) | undefined;
     const teardown = (): void => {
       if (ended) return;
       ended = true;
+      unmuteTab?.();
       live.delete(teardown);
       try {
         child?.postMessage({ type: "stop" });
@@ -157,6 +163,15 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
           // The id is bound to the requesting frame, so it can only be minted once the agent page has loaded.
           mintTabSource = () => ({ kind: "tab", mediaSourceId: target.getMediaSourceId(wc) });
+          // CastMirroringServiceHost::CreateAudioStream binds a Muter for the tab's audio group (crbug.com/40708932): the
+          // tab is silent locally for the whole session and unmuted when the host goes away. Another feature may have
+          // muted the tab first, so only a mute made here is undone.
+          if (target.setAudioMuted !== undefined && target.isAudioMuted?.() === false) {
+            target.setAudioMuted(true);
+            unmuteTab = () => {
+              if (!target.isDestroyed()) target.setAudioMuted?.(false);
+            };
+          }
           capture = { kind: "tab", mediaSourceId: "" };
         } else {
           const id = desktopStreamId(source.id) ?? "";
@@ -164,8 +179,12 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           const chosen = sources.find((s) => s.id === id);
           if (chosen === undefined) throw new Error(`no desktop source ${id}`);
           const withAudio = isDesktopSourceWithAudio(source.id);
-          wc.session.setDisplayMediaRequestHandler((_request, callback) => callback(withAudio ? { video: chosen, audio: "loopback" } : { video: chosen }));
-          capture = { kind: "desktop", sourceId: id };
+          // CastMirroringServiceHost::GetDesktopAudioLoopbackDeviceId: Windows keeps local playback
+          // (kLoopbackInputDeviceId, kCastDesktopMirroringKeepLocalAudio is on by default there, as muting the endpoint
+          // silences the loopback on some drivers); every other platform mutes it (kLoopbackWithMuteDeviceId).
+          const audioMode = options.desktopAudio ?? (process.platform === "win32" ? "loopback" : "loopbackWithMute");
+          wc.session.setDisplayMediaRequestHandler((_request, callback) => callback(withAudio ? { video: chosen, audio: audioMode } : { video: chosen }));
+          capture = { kind: "desktop", sourceId: id, audio: audioMode };
         }
 
         await win.loadFile(join(dir, "agent.html"));

@@ -71,6 +71,8 @@ export interface FakeReceiverStats {
   videoKeyFrames: number;
   invalidFrames: number;
   videoBytes: number;
+  /** Opus payload bytes: a silent buffer encodes to a few bytes, a tone to hundreds. */
+  audioBytes: number;
   firstFrameAt?: number;
   lastFrameAt?: number;
 }
@@ -96,6 +98,7 @@ export class FakeReceiver {
     nackedPackets: 0,
     videoFrames: 0,
     audioFrames: 0,
+    audioBytes: 0,
     validVideoFrames: 0,
     validAudioFrames: 0,
     videoKeyFrames: 0,
@@ -286,6 +289,7 @@ export class FakeReceiver {
       if (this.keepFrames) this.decodedVideo.push({ frameId, data });
     } else {
       this.stats.audioFrames++;
+      this.stats.audioBytes += data.length;
       if (validateOpusPacket(data) && this.bodyOk(frame, data, 1)) this.stats.validAudioFrames++;
       else this.stats.invalidFrames++;
     }

@@ -386,6 +386,25 @@ closes the oldest, so a dropped frame costs nothing. Pixels are not copied: a `V
 processor into the encoder. Encoded chunks are copied once, through the port (Electron cannot transfer an
 `ArrayBuffer` over a `MessagePortMain`).
 
+### Local audio while mirroring
+
+Chrome decides whether the sender's own speakers stay on, and we match it (`CastMirroringServiceHost`,
+`chrome/browser/media/cast_mirroring_service_host.cc`):
+
+- **Desktop**: `GetDesktopAudioLoopbackDeviceId` returns `kLoopbackInputDeviceId` on Windows, so local playback keeps
+  going, when `kCastDesktopMirroringKeepLocalAudio` is enabled (on by default there, `media_router_feature.cc`;
+  muting the endpoint silences the loopback on some drivers). Every other platform gets `kLoopbackWithMuteDeviceId`,
+  which mutes local playback while mirroring. Here: Windows captures with `getUserMedia` and `chromeMediaSource:
+  'desktop'` (loopback, no mute); other platforms use `getDisplayMedia` on the capture window's private session, whose
+  `setDisplayMediaRequestHandler` answers with the app's source and `audio: 'loopbackWithMute'`. `desktopAudio`
+  overrides the choice. The mute path was exercised on Windows (valid Opus reached the fake receiver) but not on
+  macOS or Linux, and whether the speakers really went quiet was not listened for.
+- **Tab**: `CreateAudioStream` binds a Muter on the tab's audio group when the first loopback stream is requested, so
+  the tab is silent locally for the whole session and restored when the host is destroyed (crbug.com/40708932). Here
+  `webContents.setAudioMuted(true)` on the captured page, undone at teardown only if we were the one to mute it. Measured
+  in Electron 45: a tab muted this way still delivers its audio to `getUserMedia` tab capture at full level (peak 1.0
+  with and without the mute), so the receiver keeps hearing it.
+
 ### Codecs
 
 Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) and VP8 are always offered. VP9 is offered
