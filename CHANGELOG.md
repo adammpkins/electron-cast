@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Presentation mode (opt-in, `presentation: true` in `createCastManager` and `mode: "presentation"` in
+  `installCastBridge`): the page gets a stand-in Presentation API instead of electron-cast's `chrome.cast`, so Google's
+  own Cast SDK (`cast_sender.js`, `cast.framework`) runs unmodified. The main process answers it with a translator for
+  the message format Chrome's Media Router uses with that SDK. The default mode is unchanged.
+
 ## 0.2.0
 
 - `chrome.cast.media` in the polyfill: `loadMedia`, `queueLoad`, playback commands (play, pause, seek, stop, volume,

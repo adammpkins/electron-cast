@@ -57,6 +57,28 @@ bundler can inline it.
 That's all. The page sees `chrome.cast.isAvailable === true` before its scripts run, and its cast button drives
 sessions through IPC to the main process.
 
+### Presentation mode (opt-in): Google's own Cast SDK
+
+By default the page gets electron-cast's own `chrome.cast`. In presentation mode it gets a stand-in for the
+Presentation API (`PresentationRequest`) instead, and **Google's own `cast_sender.js` and `cast.framework` load and run
+unmodified** on top of it, as they do in Chrome. Electron has `navigator.presentation` but nothing behind it, so this
+fills in the missing piece rather than replacing Google's SDK.
+
+```ts
+// main
+const cast = createCastManager({ ipcMain, selectDevice, allowOrigin, presentation: true });
+// preload
+installCastBridge({ contextBridge, ipcRenderer, mode: "presentation" });
+```
+
+A cast must start from a user gesture (a click on the page's cast button), as in Chrome. Known limits, for now:
+
+- A session doesn't survive a page reload, so auto-join after a reload starts fresh.
+- Google's SDK running inside an iframe gets no events: messages go to the main frame.
+
+Tested end to end with `cast.framework` on a Nest Hub (Electron 45): session, volume, HLS load, play, pause, seek and
+stop.
+
 ## What works
 
 - Device discovery over mDNS on every network interface, with devices coming and going live.
