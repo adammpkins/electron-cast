@@ -447,7 +447,7 @@ test("when the network changes, devices with no route leave and the remembered o
   await access.addSinkByAddress(entry({ id: "cccccccccccccccccccccccccccccccc", name: "In use", ipV4Address: "10.20.30.60" }));
   routes.set([{ id: "r", sinkId: sinkOf("cccccccccccccccccccccccccccccccc"), isLocal: true }]);
   await clock.advance(1);
-  access.networksChanged();
+  access.onNetworksChanged("network-b");
   await clock.advance(450);
   assert.deepEqual(sinks.sinks().map((d) => d.id), [sinkOf("cccccccccccccccccccccccccccccccc")], "a device in use stays");
   assert.equal(access.remembered().length, 2, "and nothing is forgotten");

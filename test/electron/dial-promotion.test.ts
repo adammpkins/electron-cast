@@ -264,7 +264,7 @@ test("a network change resets the count", timed(async (clock) => {
   }
   await clock.advance(1000);
   assert.equal(clients.length, 12);
-  service.networkChanged();
+  service.onNetworksChanged("network-b");
   service.discoverSinksNow();
   await clock.advance(1000);
   assert.equal(clients.length, 15);
@@ -317,7 +317,7 @@ test("disposing stops listening to DIAL, and a service with no DIAL source ignor
   assert.equal(clients.length, 0);
   const plain = new CastSinkService({ source: new FakeDevices([]), createClient: (d) => new FakeClient(d) });
   plain.discoverSinksNow();
-  plain.networkChanged();
+  plain.onNetworksChanged("network-b");
   plain.dispose();
 }));
 

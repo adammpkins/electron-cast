@@ -5,6 +5,7 @@ import { EventEmitter } from "node:events";
 import type { CastDevice } from "../discovery/index.ts";
 import { isLoopback, isPubliclyRoutable, parseIpBytes } from "../discovery/ip-policy.ts";
 import { processDeviceUuid } from "../dial/parse.ts";
+import { isNetworkIdUnknownOrDisconnected } from "./network-monitor.ts";
 import type { CastClientLike, DeviceSource } from "./session-service.ts";
 
 /** How a channel is opened (Chrome: `CastSocketOpenParams`, built by `CreateCastSocketOpenParams`). */
@@ -85,6 +86,8 @@ export interface CastSinkServiceOptions extends CastSinkOptions {
 
 interface SinkRecord {
   device: CastDevice;
+  /** How the sink was first opened (Chrome keeps it as the sink's `discovery_type`); a reopen keeps it. */
+  openedBy: OpenSource;
   /** Undefined while the channel is down and being reopened (Chrome keeps the sink listed meanwhile). */
   client: CastClientLike | undefined;
   endpoint: string;
@@ -112,7 +115,7 @@ const endpointOf = (device: CastDevice): string => `${device.host}:${device.port
 
 const sameDevice = (a: CastDevice, b: CastDevice): boolean => JSON.stringify(a) === JSON.stringify(b);
 
-type OpenSource = "discovery" | "retry-on-error" | "access-code" | "dial";
+type OpenSource = "discovery" | "retry-on-error" | "access-code" | "dial" | "network-cache";
 
 /** The delays between attempts (`BackoffEntry`'s policy); the number of attempts is the service's `retry.maxAttempts`. */
 export type OpenBackoff = Required<Omit<SinkRetryOptions, "maxAttempts">>;
@@ -183,6 +186,10 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
    * only a run of them; reset when the device is opened from any other source, or when the network changes.
    */
   private readonly dialFailureCounts = new Map<string, number>();
+  /** `current_network_id_`; empty until the first network id comes. */
+  private networkId = "";
+  /** `sink_cache_`: the sinks of each network the machine has left, by network id. */
+  private readonly sinkCache = new Map<string, CastDevice[]>();
   /** The DIAL sinks as last seen, to tell the new or changed ones (`AddOrUpdateSink` notifies only those). */
   private dialSeen = new Map<string, string>();
   private readonly dialSource: DeviceSource | undefined;
@@ -311,12 +318,28 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   }
 
   /**
-   * The network the machine is on has changed: devices found by DIAL that were given up on are tried again
-   * (`CastMediaSinkServiceImpl::OnNetworksChanged` clears `dial_sink_failure_count_`). Chrome learns of it from
-   * `DiscoveryNetworkMonitor`; nothing here watches the network, so the app tells the manager.
+   * `CastMediaSinkServiceImpl::OnNetworksChanged`, from the manager's network monitor (and once with the current id, as
+   * `Start` asks `GetNetworkId`). Devices DIAL found that were given up on may be tried again; the sinks of the network
+   * being left are remembered (not those added by access code, which expire on their own), and on coming back to a
+   * network seen before its sinks are opened again after the usual random delay, without waiting for mDNS. The sinks
+   * themselves stay: Chrome neither clears them nor restarts discovery here.
    */
-  networkChanged(): void {
+  onNetworksChanged(networkId: string): void {
+    if (this.disposed || networkId === this.networkId) return;
+    const last = this.networkId;
+    this.networkId = networkId;
     this.dialFailureCounts.clear();
+    if (!isNetworkIdUnknownOrDisconnected(last)) {
+      const sinks = [...this.sinkMap.values()].filter((r) => r.openedBy !== "access-code").map((r) => ({ ...r.device }));
+      this.sinkCache.set(last, sinks);
+    }
+    if (isNetworkIdUnknownOrDisconnected(networkId)) return;
+    const cached = this.sinkCache.get(networkId);
+    if (cached === undefined) return;
+    // `OpenChannelsWithRandomizedDelay(cache_entry->second, SinkSource::kNetworkCache)`
+    this.later(this.random() * this.openDelayMaxMs, () => {
+      for (const device of cached) this.openChannel(device, "network-cache", 0);
+    });
   }
 
   /**
@@ -591,7 +614,8 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     }
     const endpoint = endpointOf(device);
     const previous = this.sinkMap.get(device.id);
-    const record: SinkRecord = { device: { ...device }, client, endpoint };
+    const openedBy = source === "retry-on-error" ? previous?.openedBy ?? source : source;
+    const record: SinkRecord = { device: { ...device }, openedBy, client, endpoint };
     this.failureCounts.delete(device.id);
     this.lastErrors.delete(device.id);
     // Chrome leaves the old socket alone when a sink gets a new one (`OnChannelOpenSucceeded` only adds the sink with

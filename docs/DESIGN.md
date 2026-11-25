@@ -383,8 +383,9 @@ below are relative to the Chromium source root (read from `chromium/chromium` `m
 
 Differences from Chrome, and why:
 
-- **A network change is the app's to report.** Chrome clears the DIAL failure counts when `DiscoveryNetworkMonitor`
-  reports a new network id; nothing here watches the network, so `manager.networkChanged()` does it.
+- **Network changes are polled.** Chrome clears the DIAL failure counts when `DiscoveryNetworkMonitor` reports a new
+  network id; the manager's monitor does the same, by reading the interfaces (see
+  [Network changes](#network-changes-network-monitorts)).
 - **Timeouts.** Chrome sets none on its URL fetches (`DialActivityManager::CreateFetcher` has a TODO for it); Node
   would wait forever, so a `GET` gives up after 10 s and a `POST` or `DELETE` after 30 s.
 - **`setMulticastInterface`.** Each SSDP socket also pins its multicast sends to its interface, which Windows needs to
@@ -527,6 +528,32 @@ Where electron-cast differs from Chrome here:
   a sink is added or updated (`OnSinkAddedOrUpdated`), including when only its name changed.
 - The snapshot of a session this app started still passes the app's namespaces unfiltered, as before.
 
+### Network changes (`network-monitor.ts`)
+
+Chrome's `DiscoveryNetworkMonitor` (`chrome/browser/media/router/discovery/discovery_network_monitor.cc`) keeps one
+network id for the machine and tells its observers when it changes. electron-cast has the same monitor, one per manager:
+`createCastManager` makes it, `start()` starts it and `dispose()` stops it. There is no method for the app to call.
+
+| Rule | Here | Chrome |
+|---|---|---|
+| The network list | `discoveryNetworkInfoList`: each interface that is not loopback and has a MAC address, with an id; sorted by id | `GetDiscoveryNetworkInfoList` (`discovery_network_list_win.cc`, `discovery_network_list_posix.cc`): Ethernet and Wi-Fi interfaces that are up, each with its SSID (Wi-Fi) or MAC address; `StableSortDiscoveryNetworkInfo` sorts by id |
+| The network id | `computeNetworkId`: `__disconnected__` for an empty list, `__unknown__` when no network has an id, else the hex SHA-256 of `"!" + id` for each network in order | `ComputeNetworkId`, `kNetworkIdDisconnected`, `kNetworkIdUnknown` |
+| When observers hear | only when the recomputed id differs from the last; the first id is taken without telling anyone | `UpdateNetworkInfo`, run on every `OnConnectionChanged` from the `NetworkConnectionTracker`; the monitor is one per browser and has its id before a profile's services observe it |
+| The Cast sinks | the DIAL failure counts are cleared; the sinks of the network being left are kept by its id (not those added by access code); on coming back to a known network its sinks are opened again after the usual random delay. The sinks are not cleared and discovery is not restarted | `CastMediaSinkServiceImpl::OnNetworksChanged` (`dial_sink_failure_count_`, `sink_cache_`, `OpenChannelsWithRandomizedDelay` with `SinkSource::kNetworkCache`); its `Start` asks `GetNetworkId` first |
+| Devices added by address | those with no route are removed, and the remembered ones are added again 4.45 s later | `AccessCodeCastSinkService::OnNetworksChanged` (`kExpirationDelay` + `kNetworkChangeBuffer`) |
+
+These are the only two observers of the monitor in Chrome. Differences, and why:
+
+- **A poll, not an event.** Chrome recomputes when `NetworkChangeNotifier` reports a connection change; Node and
+  Electron have no such event, so the monitor reads `os.networkInterfaces()` every 5 s (`NETWORK_POLL_MS`). A change is
+  seen up to 5 s late, and a drop and return within one interval is not seen.
+- **MAC and IPv4 network instead of SSID.** Node reports neither an interface's type nor its Wi-Fi SSID. An interface
+  counts when it is not loopback and has a MAC address (tunnels have none), and its id is the MAC with the IPv4 networks
+  it is on (address and netmask, so a new DHCP address on the same network is no change). Joining another Wi-Fi network
+  is a change when its subnet differs, which Chrome sees by SSID; two networks with the same subnet on one adapter look
+  the same. Virtual adapters with a MAC (Hyper-V, WSL, some VPNs) count, where Chrome counts Ethernet and Wi-Fi only.
+- **Off with a custom `discovery`**, as DIAL is, unless `networkMonitor` is given; `networkMonitor: false` turns it off.
+
 ### Access code casting (`access-code.ts`)
 
 Chrome can cast to a device that mDNS does not reach, by typing the code the device shows on its screen. Chrome calls this
@@ -580,7 +607,7 @@ multicast domain (another VLAN or subnet, as in a school or office); it does not
 | When the time is up, a device a page is casting to (a local route) stays until that route ends; any other is forgotten and its channel removed 450 ms later | `onExpiration`, `expireSink`, `removeAndDisconnectMediaSinkFromRouter` | `access_code_cast_sink_service.cc`: `OnExpiration`, `ExpireSink`, `RemoveAndDisconnectMediaSinkFromRouter`, `kExpirationDelay` |
 | When a route to such a device ends, after 450 ms with no new route its time is checked and, if up, it expires at once | `onRoutesUpdated`, `checkMediaSinkForExpiration` | `access_code_cast_sink_service.cc`: `AccessCodeMediaRoutesObserver::OnRoutesUpdated`, `HandleMediaRouteRemovedByAccessCode`, `OnAccessCodeRouteRemoved`, `DoCheckMediaSinkForExpiration` |
 | Remembered devices are read when the service starts (entries that do not validate are dropped), added again with the sink service's usual open parameters, and their timers set | `AccessCodeSinks.load`, `initAllStoredDevices` | `access_code_cast_sink_service.cc`: `InitAllStoredDevices`, `ValidateStoredDevices`; `access_code_media_sink_util.cc`: `ParseValueDictIntoMediaSinkInternal` |
-| A network change removes the devices that have no route, and after 4.45 s the remembered ones are added again | `networksChanged` | `access_code_cast_sink_service.cc`: `OnNetworksChanged`, `RemoveAndDisconnectExistingSinksOnNetwork`, `kNetworkChangeBuffer` |
+| A network change removes the devices that have no route, and after 4.45 s the remembered ones are added again | `onNetworksChanged`, from the manager's network monitor | `access_code_cast_sink_service.cc`: `OnNetworksChanged`, `RemoveAndDisconnectExistingSinksOnNetwork`, `kNetworkChangeBuffer` |
 | The policies apply while running: disabling removes and forgets every device, a new duration resets every timer | `configureAccessCode` | `access_code_cast_sink_service.cc`: `OnEnabledPrefChange`, `OnDurationPrefChange` |
 
 Where electron-cast differs from Chrome here:
@@ -602,8 +629,8 @@ Where electron-cast differs from Chrome here:
   (`net/base/ip_address.cc`: `IsPubliclyRoutableIPv6`); `IsLoopback` does not look inside it.
 - The prefs become `AccessCodeStore` (`load` once when enabled, `save` the whole list after each change), with the app
   deciding where it lives; one entry holds the data of Chrome's two dictionaries. The default store is memory.
-- Chrome learns of a network change from `DiscoveryNetworkMonitor`; electron-cast does not track networks, so the app calls
-  `networksChanged()`.
+- Chrome learns of a network change from `DiscoveryNetworkMonitor`; the manager's monitor polls for it (see
+  [Network changes](#network-changes-network-monitorts)).
 - The result is reported after the device is remembered and its timer set; Chrome reports first.
 - Chrome's metrics, its `chrome://media-router-internals` log (here the optional `accessCode.log`), its offline check
   (`SERVICE_NOT_PRESENT`) and the dialog that goes on to start a route are not here: the app starts a cast through its own

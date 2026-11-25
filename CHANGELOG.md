@@ -64,8 +64,7 @@ is frozen and behaves as before for pages; it shares the device list.
     authenticates, the device is a Cast sink (id the sink's UUID, its friendly name and model, audio and video, or audio
     only for an audio-only certificate) and the DIAL sink is removed, as above. It is skipped when a Cast sink has that id or that
     address. Every failed attempt is counted per device; at ten (`kMaxDialSinkFailureCount`) the device is taken for a
-    non-Cast device and not tried again, until it is opened from mDNS or the app calls the new `manager.networkChanged()`
-    (Chrome resets on a network change by itself, through `DiscoveryNetworkMonitor`).
+    non-Cast device and not tried again, until it is opened from mDNS or the network changes.
   - DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
     thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see,
     the monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its
@@ -123,13 +122,22 @@ is frozen and behaves as before for pages; it shares the device list.
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
   with Chrome's checks, quick open parameters (2 s connect, 3 attempts 1 s apart) and expiry: it stays for
   `accessCode.deviceDuration` seconds (default 0) plus 20 s, a device a page is casting to stays until the cast ends, and a
-  network change (`manager.networksChanged()`, called by the app) removes it and brings the remembered ones back. It is off
+  network change removes it and brings the remembered ones back. It is off
   unless `createCastManager({ accessCode: { enabled: true } })`, as Chrome's `AccessCodeCastEnabled` policy is. Turning a
   typed code into an address is a private Google service that needs Chrome's sign-in, so it is not part of electron-cast;
   [DESIGN.md](docs/DESIGN.md#access-code-casting-access-codets) says why. The address comes from the app, not from
   Google's server as in Chrome, so validate what users type: Chrome's rules allow any private address and port. New: `addSinkByAddress`, `configureAccessCode`,
-  `rememberedSinks`, `networksChanged`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
+  `rememberedSinks`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
   between runs), and `pingIntervalMs` in `createClient`'s second argument.
+- **The manager follows network changes by itself, as Chrome's `DiscoveryNetworkMonitor` tells its media router.** It
+  computes Chrome's network id from the connected interfaces and, when it changes, does what Chrome's two observers do:
+  DIAL devices given up on as non-Cast are tried again, the sinks of the network being left are remembered and reopened
+  on coming back to it (`CastMediaSinkServiceImpl::OnNetworksChanged`), and devices added by address with no route are
+  removed and the remembered ones added back 4.45 s later (`AccessCodeCastSinkService::OnNetworksChanged`). Node has no
+  network-change event, so it reads `os.networkInterfaces()` every 5 s while started; Node has no Wi-Fi SSID either, so
+  an interface is identified by its MAC and IPv4 network. A custom `discovery` turns it off unless the new
+  `networkMonitor` option is given, and `networkMonitor: false` turns it off; a `NetworkMonitor` of your own drives it in
+  tests. There is no method for the app to call.
 - Presentation mode: `PresentationConnection.send()` takes ArrayBuffer, ArrayBufferView and Blob as well as strings,
   and `binaryType` (`arraybuffer` or `blob`) picks what `message` events carry, as in Chrome. Binary goes to wired
   displays, in both directions. To a Cast device it is dropped without an error, as Chrome's

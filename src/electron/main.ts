@@ -15,6 +15,7 @@ import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
 import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
+import { DiscoveryNetworkMonitor, type NetworkMonitor } from "./network-monitor.ts";
 import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
 import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirroring-activity.ts";
@@ -42,6 +43,7 @@ export {
   type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
 export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type { NetworkMonitor } from "./network-monitor.ts";
 export type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
 export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 export type {
@@ -142,6 +144,14 @@ export interface CastManagerOptions {
    * `webContents`); off by default. `createService` replaces the Electron engine (tests, or a different one).
    */
   mirroring?: ElectronMirroringOptions | { createService: MirroringServiceFactory };
+  /**
+   * Network changes, as Chrome's `DiscoveryNetworkMonitor` tells its media router: the DIAL devices given up on are tried
+   * again, the sinks of a network the machine comes back to are reopened, and devices added by address are removed and
+   * re-added. By default the manager reads `os.networkInterfaces()` every 5 s while started (docs/DESIGN.md, "Network
+   * changes"); a custom `discovery` turns that off unless this is given. `false` turns it off; your own
+   * {@link NetworkMonitor} drives it in tests.
+   */
+  networkMonitor?: NetworkMonitor | false;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -150,12 +160,6 @@ export interface CastManager extends CastManagerApi {
   devices(): CastDevice[];
   /** Try again now to open a channel to each discovered device that has none (Chrome: `CastMediaSinkService::DiscoverSinksNow`). */
   discoverSinksNow(): void;
-  /**
-   * Tell the manager the machine's network changed (Chrome's `DiscoveryNetworkMonitor` does this by itself). A device that
-   * only DIAL found, and that a channel could not be opened to ten times, is tried again after it
-   * (`CastMediaSinkServiceImpl::OnNetworksChanged`).
-   */
-  networkChanged(): void;
   /**
    * Resolves when no channel is being opened and none is waiting to be (a retry waiting out its backoff does not count),
    * so the devices that can be reached are listed. Discovery and Chrome's random delay (up to 5 s) come first, so call it
@@ -175,12 +179,6 @@ export interface CastManager extends CastManagerApi {
   configureAccessCode(settings: { enabled?: boolean; deviceDuration?: number }): Promise<void>;
   /** The devices added by address that are remembered now. */
   rememberedSinks(): AccessCodeRememberedSink[];
-  /**
-   * The machine's network changed. Devices added by address and not in use are removed, and the remembered ones are tried
-   * again 4.45 s later, so those on the new network come back (Chrome: `AccessCodeCastSinkService::OnNetworksChanged`).
-   * electron-cast does not see networks come and go, so call it from the app's own network monitoring.
-   */
-  networksChanged(): void;
   dispose(): Promise<void>;
   /** The wired display sinks and routes; present when the `wiredDisplay` option was given. */
   readonly wiredDisplay?: WiredDisplayApi;
@@ -289,6 +287,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
   const discovery = options.discovery ?? new CastDiscovery();
+  const networkMonitor = options.networkMonitor === false ? undefined
+    : options.networkMonitor ?? (options.discovery === undefined ? new DiscoveryNetworkMonitor() : undefined);
   const createClient = options.createClient ?? ((d: CastDevice, params: ChannelParams) =>
     new CastClient({
       host: d.host,
@@ -448,6 +448,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       },
     } : {}),
     accessCode: options.accessCode,
+    ...(networkMonitor !== undefined ? { networkMonitor } : {}),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -1021,17 +1022,16 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     ...api,
     ...(wired !== undefined ? { wiredDisplay: wired.api } : {}),
     async start() {
+      networkMonitor?.start();
       await discovery.start();
       dial?.start();
     },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
-    networkChanged: () => service.networkChanged(),
     settled: (options) => service.settled(options),
     addSinkByAddress: (device) => service.addSinkByAddress(device),
     configureAccessCode: (settings) => service.configureAccessCode(settings),
     rememberedSinks: () => service.rememberedSinks(),
-    networksChanged: () => service.networksChanged(),
     async dispose() {
       if (disposed) return;
       disposed = true;
@@ -1043,6 +1043,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       presentation?.dispose();
       if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, castChanged);
       dial?.stop();
+      networkMonitor?.stop();
       wired?.dispose();
       discovery.stop();
       await service.dispose();

@@ -1,6 +1,6 @@
 # Main-process API
 
-`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `networkChanged()`, `settled()`, `dispose()`, `addSinkByAddress()` (see [Adding a device by address](#adding-a-device-by-address)) and the API below, which lets the
+`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()`, `addSinkByAddress()` (see [Adding a device by address](#adding-a-device-by-address)) and the API below, which lets the
 app observe and control casting from the main process. It follows Chrome's Media Router, so the same concepts and
 method names apply: devices are **sinks**, running sessions are **routes**, and you watch both with **observers**.
 
@@ -26,7 +26,7 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `startCasting(sinkId, { webContentsId, castMode: "presentation" })` | `MediaRouterUI::StartCasting(sink_id, MediaCastMode::PRESENTATION)`, then `MediaRouteStarter::CreateRouteParameters` (the source for the sink comes from the default request's URLs; none gives an "unable to cast" issue), `StartRoute` (`MediaRouter::CreateRoute`, with `WebContentsPresentationManager::OnPresentationResponse` as the response callback) and `OnPresentationResponse`, which adds the presentation and runs the default-presentation callback; `RouteRequestResultCode` is the error set | `chrome/browser/ui/media_router/media_router_ui.cc`, `media_route_starter.cc`, `components/media_router/common/mojom/route_request_result_code.mojom` |
 | `getMediaController(id, observer?)` | `MediaRouter::GetMediaController`: binds a `mojom::MediaController` (`Play`, `Pause`, `SetMute`, `SetVolume`, `Seek`, `NextTrack`, `PreviousTrack`) and a `mojom::MediaStatusObserver` (`OnMediaStatusUpdated(MediaStatus)`). `CastMediaController` builds the status from the receiver volume (`SetSession`) and MEDIA_STATUS messages (`SetMediaStatus`, `UpdateMediaStatus`), which `CastSessionTracker::HandleMediaStatusMessage` first completes from the media it saved | `components/media_router/common/mojom/media_controller.mojom`, `media_status.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `cast_session_tracker.cc` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
-| `addSinkByAddress`, `configureAccessCode`, `networksChanged` | `AccessCodeCastSinkService` after the discovery server has answered (`OnAccessCodeValidated`, `OnEnabledPrefChange`, `OnNetworksChanged`) | `chrome/browser/media/router/discovery/access_code/access_code_cast_sink_service.cc`; see [DESIGN.md](DESIGN.md#access-code-casting-access-codets) |
+| `addSinkByAddress`, `configureAccessCode`, network changes (the `networkMonitor` option) | `AccessCodeCastSinkService` after the discovery server has answered (`OnAccessCodeValidated`, `OnEnabledPrefChange`, `OnNetworksChanged`) | `chrome/browser/media/router/discovery/access_code/access_code_cast_sink_service.cc`; see [DESIGN.md](DESIGN.md#access-code-casting-access-codets) |
 | Sinks listed only once a channel is open and authenticated, with retry and removal; the session tracker; non-local routes | `CastMediaSinkServiceImpl`, `MediaSinkServiceBase`, `CastSessionTracker`, `CastActivityManager::AddNonLocalActivity` | see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts) for each rule and its source |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
@@ -400,8 +400,9 @@ const result = await manager.addSinkByAddress({
 
 The device is then in `devices()` and the sinks observers, offered to the picker and to pages' availability checks like any
 discovered device. It is removed `deviceDuration` seconds after it was added (plus 20 s), or when the cast to it ends after
-that. A public or loopback address is refused as for any device, unless `sinks.allowAllIps` is set. Call `networksChanged()`
-when the machine's network changes. `configureAccessCode({ enabled, deviceDuration })` changes the settings while running,
+that. A public or loopback address is refused as for any device, unless `sinks.allowAllIps` is set. When the machine's
+network changes the manager removes such devices and adds the remembered ones back, as Chrome does (it watches the
+network itself; see the `networkMonitor` option). `configureAccessCode({ enabled, deviceDuration })` changes the settings while running,
 `rememberedSinks()` lists what is remembered, and `accessCode.store` (`load`, `save`) keeps it between runs.
 
 **Validate the address.** In Chrome it comes from Google's server; here it comes from your app. electron-cast only applies

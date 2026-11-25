@@ -7,6 +7,7 @@ import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
 import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sink-service.ts";
+import type { NetworkMonitor } from "./network-monitor.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 import { CastAppDiscovery, type CastAppSource } from "./app-discovery.ts";
 import { EventEmitter } from "node:events";
@@ -125,6 +126,8 @@ export interface CastSessionServiceOptions {
   };
   /** Adding a device by address, as Chrome's access code casting adds one; off unless `enabled` (see {@link AccessCodeOptions}). */
   accessCode?: AccessCodeOptions;
+  /** Network changes, which the sinks and the devices added by address follow (Chrome: `DiscoveryNetworkMonitor`). */
+  networkMonitor?: NetworkMonitor;
   /**
    * True for a session another local activity of this app holds (a mirroring route, or a device it is launching one on),
    * so it is not reported as a non-local route (Chrome: `CastActivityManager` adds a non-local activity only for a
@@ -360,6 +363,7 @@ export class CastSessionService {
     for (const watcher of [...this.dialWatchers]) watcher();
   };
   private disposed = false;
+  private readonly unobserveNetwork: () => void;
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
@@ -396,6 +400,13 @@ export class CastSessionService {
       },
       options.accessCode,
     );
+    // The two observers of Chrome's DiscoveryNetworkMonitor; the sink service asks for the current id first (`Start`).
+    const monitor = options.networkMonitor;
+    if (monitor !== undefined) this.sinkService.onNetworksChanged(monitor.networkId());
+    this.unobserveNetwork = monitor?.observe((networkId) => {
+      this.sinkService.onNetworksChanged(networkId);
+      this.accessCode.onNetworksChanged(networkId);
+    }) ?? (() => {});
   }
 
   /** The devices that can be cast to: those with an open, authenticated channel (as Chrome lists sinks). */
@@ -406,11 +417,6 @@ export class CastSessionService {
   /** The devices as a {@link DeviceSource}: what `devices()` lists, with the events of that list changing. */
   deviceSource(): DeviceSource {
     return this.sinkService;
-  }
-
-  /** The network changed: DIAL devices given up on as not Cast devices are tried again. */
-  networkChanged(): void {
-    this.sinkService.networkChanged();
   }
 
   /**
@@ -455,11 +461,6 @@ export class CastSessionService {
   /** The devices added by address that are remembered now. */
   rememberedSinks(): AccessCodeRememberedSink[] {
     return this.accessCode.remembered();
-  }
-
-  /** Tell the service the network changed; see {@link AccessCodeSinks.networksChanged}. */
-  networksChanged(): void {
-    this.accessCode.networksChanged();
   }
 
   /** Handle one bridge call; never throws or rejects. */
@@ -543,6 +544,7 @@ export class CastSessionService {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.unobserveNetwork();
     this.sinks.dispose();
     this.accessCode.dispose();
     for (const pending of this.pendingRequests.values()) pending.picker?.close();

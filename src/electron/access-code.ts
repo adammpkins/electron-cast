@@ -383,11 +383,10 @@ export class AccessCodeSinks {
   }
 
   /**
-   * The network the machine is on changed (Chrome: `DiscoveryNetworkMonitor` -> `OnNetworksChanged`; electron-cast cannot
-   * tell, so the app says). Devices without a route leave the list now, and the remembered ones are tried again after
-   * 4.45 s, so those on the new network come back.
+   * `OnNetworksChanged`, from the manager's network monitor (`DiscoveryNetworkMonitor`): devices without a route leave the
+   * list now, and the remembered ones are tried again after 4.45 s, so those on the new network come back.
    */
-  networksChanged(): void {
+  onNetworksChanged(_networkId: string): void {
     if (!this.enabled || this.disposed) return;
     this.removeAndDisconnectExistingSinksOnNetwork();
     this.later(EXPIRATION_DELAY_MS + NETWORK_CHANGE_BUFFER_MS, () => {
