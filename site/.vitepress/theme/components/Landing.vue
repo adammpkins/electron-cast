@@ -180,7 +180,7 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">Tab mirroring</th>
-                <td>Tested on a Chromecast Ultra (1080p) and a Nest Hub Max (720p): VP8 and Opus in software, sound in sync and only on the TV. At 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p is under investigation</td>
+                <td>Tested on a Chromecast Ultra (1080p) and a Nest Hub Max (720p): VP8 and Opus in software, sound in sync and only on the TV. At 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p is under investigation. Tested on a Nest Hub Max: switching the tab (same route, no new OFFER, about 30 fps after; the picture not checked on screen), closing it (the route ends at once, the receiver app is gone within 3 s), H.264 in hardware (about 30 fps, 2.7 Mbps, about 4.4 ms per encode), GET_CAPABILITIES (the Hub answers error 10106, mirroring goes on) and the statistics (AVG_E2E_LATENCY_MS is 0: the Hub sends no playout events). Freezing works and keeps the session, but the Hub stopped acknowledging frames for about 9 s during a 15 s freeze and 8 s after unfreezing (the sender matches Chrome; a Chrome control run is pending)</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
@@ -188,7 +188,7 @@ const tabs = [
                 <th scope="row">Desktop mirroring</th>
                 <td>Tested on a Chromecast Ultra (1080p) and a Nest Hub Max (720p): picture and system sound in sync; the PC keeps playing its sound, as Chrome does on Windows. At 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p is under investigation</td>
                 <td class="no">Not tested</td>
-                <td class="no">Not tested</td>
+                <td class="no">Untested on a real Mac; CI covers it with video only on Electron 40+</td>
               </tr>
               <tr>
                 <th scope="row">Presenting to a second display</th>
@@ -215,7 +215,8 @@ const tabs = [
           <div>
             <h3>Coming</h3>
             <ul>
-              <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing, the capture size following encoder load</li>
+              <li>Mirroring tried on a real device: the new offer after an encoder failure, letterboxing, the capture size following encoder load</li>
+              <li>A Chrome control run for the Nest Hub Max's pause in acknowledgements around a freeze</li>
               <li>Mirroring at 1080p without the video lag on a Chromecast Ultra (under investigation)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>

@@ -13,7 +13,7 @@ is frozen and behaves as before for pages; it shares the device list.
 
 ### Highlights
 
-- **Tab and desktop mirroring, tested on a Chromecast Ultra.** `createCastManager({ mirroring })` enables
+- **Tab and desktop mirroring, tested on a Chromecast Ultra and a Nest Hub Max.** `createCastManager({ mirroring })` enables
   `startCasting(sinkId, { castMode: "tab_mirror", webContentsId })` and
   `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })` in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
   `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
@@ -28,9 +28,10 @@ is frozen and behaves as before for pages; it shares the device list.
   and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra (1080p, tab and desktop) and a
   Nest Hub Max (720p): at 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p
   is under investigation. Tab mirroring sends Opus and VP8 in software, with the audio in sync and only on the TV;
-  desktop mirroring sends the picture and system audio and keeps local audio on Windows. Not tested on Linux or macOS. Not ported: remoting (Electron has no hook
+  desktop mirroring sends the picture and system audio and keeps local audio on Windows. Not tested on Linux or macOS. Desktop mirroring on macOS is untested on a real Mac; CI covers it with video only on Electron 40+. Not ported: remoting (Electron has no hook
   for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)). Like Chrome, a mirroring session sends `GET_CAPABILITIES`
-  once after the first negotiation and keeps the receiver's remoting capabilities.
+  once after the first negotiation and keeps the receiver's remoting capabilities. Tested on a Nest Hub Max: it answers
+  error 10106 "Remoting is not supported" and mirroring goes on.
 - **Wired displays, as Chrome's `WiredDisplayMediaRouteProvider` has them, tested on a second monitor** (Windows, a
   1080x1920 portrait display). New `wiredDisplay` option on `createCastManager` (presentation mode): other screens are presentation sinks (`wired_display_<id>`, "Display N"). A
   `PresentationRequest` whose URL is https (not the legacy Cast URL) or http on localhost can start on a display: the
@@ -154,19 +155,22 @@ senders started. Both are covered by unit tests with fakes.
   capture and the audio stream restart on the new page, encoders and timelines carry on, local muting moves to the new
   page, and a second route on the same page ends). `freezeRoute` / `unfreezeRoute` pause and resume the video on its last
   frame as Chrome's freeze does (audio goes on, 500 ms delay), and mirroring routes report `freezeInfo` (`canFreeze`,
-  `isFrozen`). Tested against the fake receiver and the capture agent's stand-ins; the receiver's behaviour while frozen
-  and a real tab switch are for a live test (`examples/live-mirroring`).
+  `isFrozen`). Tested on a Nest Hub Max: a switch keeps the same route with no new OFFER and runs at about 30 fps after (the
+  picture was not checked on screen); freezing the picture works and keeps the session, but the Hub stopped acknowledging frames for about 9 s during a 15 s freeze and for 8 s after unfreezing (the sender matches Chrome; a Chrome control run is pending).
 - **One route per page, and a closed tab ends its mirroring.** As in Chrome, a page that becomes a mirroring source
   (a launch or a switch) loses the Cast SDK / Presentation API sessions it launched, and a page that launches one
   loses its mirroring routes (`CastActivityManager::routes_by_frame_`). Closing the page being mirrored ends a tab route
-  (`CastMirroringServiceHost::WebContentsDestroyed`); a desktop route is unaffected.
+  (`CastMirroringServiceHost::WebContentsDestroyed`); a desktop route is unaffected. Tested on a Nest Hub Max: closing the
+  mirrored tab ends the route at once, and the receiver app is gone within 3 s.
 - **Mirroring statistics.** A debugging aid with Chrome's names and units, like `chrome://media-router-internals`
   "Mirroring stats": `setMirroringStatsEnabled(true)` before `startCasting`, then `getMirroringStats(routeId)` and
   `registerMirroringStatsObserver` (every 500 ms) give `{ audio, video }` with `ENQUEUE_FPS`, the latency averages and
   histograms, bitrates, packet counts and the sender's own counters. A port of openscreen's statistics collector,
   clock offset estimator and analyzer, with the receiver's RTCP event log parsed. Off by default; nothing is uploaded
-  (Chrome's UMA is not ported). `examples/live-mirroring` takes `--stats`. Tested against the fake
-  receiver; not yet read from a real device.
+  (Chrome's UMA is not ported). `examples/live-mirroring` takes `--stats`. `getMirroringStats` never throws, as
+  Chrome's `MediaRouterDebuggerImpl::GetMirroringStats` has no error path: `{}` while off and for an unknown route, and an
+  ended route keeps its last statistics until another route pushes. Tested on a Nest Hub Max: Chrome's names, internally
+  consistent; `AVG_E2E_LATENCY_MS` is 0 on the Hub, which sends no playout events.
 - **Mirroring uses a hardware encoder when there is one, as Chrome does.** The capture page asks WebCodecs
   (`prefer-hardware`) which of H.264, VP8 and VP9 a hardware encoder takes, and offers those hardware-first (H.264 as
   Annex B); VP8 in software is offered only when no hardware codec is, or when the receiver takes none of the hardware
@@ -174,13 +178,14 @@ senders started. Both are covered by unit tests with fakes.
   app's run and the session negotiates again. Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>` and
   `--disable-cast-letterboxing` switches, and the `CastStreamingVp8` / `Vp9` / `Av1` / `HardwareHevc` / `Win|MacHardwareH264`
   features of `--enable-features` / `--disable-features`, are honoured, read from `app.commandLine` (so switches the app
-  appends count) when the `electron` object passed as `mirroring.electron` includes `app`.
+  appends count) when the `electron` object passed as `mirroring.electron` includes `app`. Tested on a Nest Hub Max: the
+  Hub chose H.264 in hardware, about 30 fps at 2.7 Mbps, with about 4.4 ms per encode.
 - **VP9 is offered by default, as in Chrome.** In hardware when an encoder takes it, in software under the same
   hardware-first rule as VP8; there is no option for it.
 - **Mirroring letterboxes like Chrome.** The capture now asks for the `fixed_aspect_ratio` policy when the receiver
   cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
-  no longer upscaled to 1920x1080. The hardware encoders, the new offer after an encoder failure and the
-  letterboxing are tested against the fake receiver and in the smoke test; not yet on a real device.
+  no longer upscaled to 1920x1080. The new offer after an encoder failure and the letterboxing are tested
+  against the fake receiver and in the smoke test; not yet on a real device (H.264 in hardware is, above).
 - **Mirroring adapts to encoder load as Chrome does.** Each encoded frame now carries Chrome's encoder utilization
   (smoothed, clamped) and lossiness, estimated from the frame's pixels because WebCodecs reports no quantizer (a port of
   `FrameComplexityEstimator`). `VideoSender` feeds the larger of the two back, and for a tab the capture size follows it
