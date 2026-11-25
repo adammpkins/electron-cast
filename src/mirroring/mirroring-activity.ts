@@ -16,6 +16,8 @@ import type { MirroringError, SessionParameters } from "./session-host.ts";
 
 /** The slice of a Cast client the activity uses (a subset of the session service's `CastClientLike`). */
 export interface MirroringClient {
+  /** The id the client puts in the source of every message it sends (`CastMessageHandler::source_id`). */
+  readonly senderId: string;
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
@@ -66,8 +68,6 @@ export interface MirroringActivityOptions {
   onStop(): void;
   /** A change of route state (description, launching to mirroring). */
   onChange(): void;
-  /** The id this sender uses on the virtual connection (`message_handler_->source_id()`). */
-  sourceId: string;
   log?(level: "info" | "error", message: string): void;
 }
 
@@ -95,7 +95,9 @@ export class MirroringActivity {
     this.createService = options.createService;
     this.onStop = options.onStop;
     this.onChange = options.onChange;
-    this.sourceId = options.sourceId;
+    // One id for what is sent and what is accepted, as in Chrome: both are `message_handler_->source_id()`. A receiver
+    // addresses its replies to the source id of the message it answers, so a second id would drop every ANSWER.
+    this.sourceId = options.client.senderId;
     this.log = options.log ?? (() => {});
     this.client.on("message", (msg) => this.onAppMessage(msg));
     this.client.on("receiverStatus", (status) => this.onReceiverStatus(status));

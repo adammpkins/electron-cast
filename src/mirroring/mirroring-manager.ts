@@ -129,7 +129,6 @@ export class MirroringManager {
       source,
       client,
       createService: this.options.createService,
-      sourceId: `sender-${randomUUID().slice(0, 8)}`,
       log,
       onStop: () => {
         if (this.entries.get(routeId) === entry) {

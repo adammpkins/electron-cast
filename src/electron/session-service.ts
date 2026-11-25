@@ -26,6 +26,8 @@ export interface DeviceSource {
 
 /** The subset of {@link CastClient} used by the session service. */
 export interface CastClientLike {
+  /** The id this client puts in the source of its messages. */
+  readonly senderId: string;
   readonly connected: boolean;
   connect(): Promise<void>;
   close(): void;

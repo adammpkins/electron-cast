@@ -25,10 +25,13 @@ export async function runMirroringScenario({ pass, fail, engineModulePath }) {
   const receiver = await FakeReceiver.create({ verifyBody: false });
   const calls = [];
   const client = new (class extends EventEmitter {
+    senderId = "sender-smoke01";
+    lastSource = "";
     async connect() { calls.push("connect"); }
     close() { calls.push("close"); }
     send(namespace, destinationId, payload) {
       calls.push(`send ${destinationId}`);
+      this.lastSource = this.senderId;
       setImmediate(() => receiver.onControlMessage(namespace, payload));
     }
     async launch(appId) {
@@ -40,7 +43,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath }) {
     closeTransport(id) { calls.push(`closeTransport ${id}`); }
   })();
   receiver.sendControl = (json) =>
-    setImmediate(() => client.emit("message", { namespace: "urn:x-cast:com.google.cast.webrtc", sourceId: "mirror-transport", destinationId: "*", data: json }));
+    setImmediate(() => client.emit("message", { namespace: "urn:x-cast:com.google.cast.webrtc", sourceId: "mirror-transport", destinationId: client.lastSource, data: json }));
 
   const discovery = Object.assign(new EventEmitter(), { devices: () => [{ ...LOOPBACK_TV }], async start() {}, stop() {} });
   const cast = createCastManager({

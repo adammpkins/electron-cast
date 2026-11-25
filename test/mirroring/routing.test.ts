@@ -64,7 +64,10 @@ test("route descriptions, namespaces and log scrubbing", () => {
 class FakeClient extends EventEmitter implements MirroringClient {
   readonly launched: string[] = [];
   readonly stopped: string[] = [];
-  readonly sent: { ns: string; dest: string }[] = [];
+  readonly sent: { ns: string; dest: string; source: string }[] = [];
+  readonly senderId = "sender-fake01";
+  /** The source id of the last message the receiver got: a real device replies to that. */
+  lastSource = "";
   closed = false;
   connectedTransport: string | undefined;
   receiver!: FakeReceiver;
@@ -73,7 +76,8 @@ class FakeClient extends EventEmitter implements MirroringClient {
     this.closed = true;
   }
   send(namespace: string, destinationId: string, payload: string): void {
-    this.sent.push({ ns: namespace, dest: destinationId });
+    this.sent.push({ ns: namespace, dest: destinationId, source: this.senderId });
+    this.lastSource = this.senderId;
     setImmediate(() => this.receiver.onControlMessage(namespace, payload));
   }
   async launch(appId: string) {
@@ -107,9 +111,9 @@ async function startManager(capabilities: number) {
       env: {},
     }),
   });
-  // The receiver replies come back as messages from the transport, addressed to anyone ("*").
+  // A receiver addresses its reply to the source id of the message it answers; it does not know any other id.
   receiver.sendControl = (json) =>
-    setImmediate(() => client.emit("message", { namespace: "urn:x-cast:com.google.cast.webrtc", sourceId: "transport-1", destinationId: "*", data: json }));
+    setImmediate(() => client.emit("message", { namespace: "urn:x-cast:com.google.cast.webrtc", sourceId: "transport-1", destinationId: client.lastSource, data: json }));
   const routesSeen: MirroringRoute[][] = [];
   manager.observe(() => routesSeen.push(manager.routes()));
   return { receiver, client, manager, routesSeen };
@@ -126,7 +130,7 @@ test("a tab route launches the AV app, relays OFFER and ANSWER, streams to the r
     assert.ok(route.id.startsWith("urn:x-org.chromium:media:route:mr_") && route.id.endsWith("/dev-1/urn:x-org.chromium.media:source:tab:5"));
     assert.equal(route.isConnecting, false);
     await sleep(1200);
-    assert.ok(h.client.sent.every((m) => m.dest === "transport-1" && m.ns === "urn:x-cast:com.google.cast.webrtc"));
+    assert.ok(h.client.sent.every((m) => m.dest === "transport-1" && m.ns === "urn:x-cast:com.google.cast.webrtc" && m.source === "sender-fake01"));
     assert.ok(h.receiver.stats.validVideoFrames > 10, `video ${h.receiver.stats.validVideoFrames}`);
     assert.ok(h.receiver.stats.validAudioFrames > 30, `audio ${h.receiver.stats.validAudioFrames}`);
     assert.equal(h.receiver.stats.invalidFrames, 0);
