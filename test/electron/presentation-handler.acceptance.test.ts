@@ -141,6 +141,29 @@ test("app messages go to the receiver and are acked; bad ones are refused or dro
   assert.equal(got.length, replies, "no reply");
 });
 
+test("the pending media table holds 1024 requests and then drops its older half, as CastSessionClientImpl does", async () => {
+  const h = setup();
+  const { conn, got, sid, transport, client } = await started(h);
+  const before = client.sent.length;
+  for (let seq = 1; seq <= 1025; seq++) {
+    out(conn, { type: "v2_message", message: { type: "PAUSE", requestId: 0, sessionId: sid, mediaSessionId: 1 }, sequenceNumber: seq });
+  }
+  while (client.sent.length < before + 1025) await tick(5);
+  // request ids are handed out in the order the page sent its requests
+  const ids = client.sent.slice(before).map((m) => JSON.parse(m.payload as string).requestId as number).sort((x, y) => x - y);
+  const reply = async (requestId: number) => {
+    client.pushMessage(transport, MEDIA_NAMESPACE, JSON.stringify({ type: "MEDIA_STATUS", requestId, status: [] }));
+    await tick();
+    return got.at(-1).sequenceNumber as number | undefined;
+  };
+  // the 1025th found 1024 pending, so the oldest 512 went before it was added
+  assert.equal(await reply(ids[0]!), undefined);
+  assert.equal(await reply(ids[511]!), undefined);
+  assert.equal(await reply(ids[512]!), 513);
+  assert.equal(await reply(ids[1023]!), 1024);
+  assert.equal(await reply(ids[1024]!), 1025);
+});
+
 test("receiver app messages reach the page as app_message", async () => {
   const h = setup();
   const { got, sid, transport, client } = await started(h);

@@ -56,8 +56,11 @@ interface SenderState {
   watches: Map<number, Watch>;
 }
 
-/** The pending-media table is bounded as Chromium's is (CastSessionClientImpl::kMaxPendingMediaRequests, 1024 there; this cap is smaller). */
-const MAX_PENDING_MEDIA = 100;
+/**
+ * The pending-media table is bounded as Chromium's is: `CastSessionClientImpl::kMaxPendingMediaRequests` is 1024
+ * (chrome/browser/media/router/providers/cast/cast_session_client_impl.h), and a full table drops its older half.
+ */
+const MAX_PENDING_MEDIA = 1024;
 /** Request ids wrap back to 1 past this value. */
 const REQUEST_ID_MAX = 2 ** 31;
 const CAST_SESSION_PREFIX = "cast-session_";
@@ -489,12 +492,13 @@ export class CastPresentationHandler {
       const requestId = this.freshRequestId();
       const body: Record<string, unknown> = { ...m, type: receiverMediaType(type), requestId };
       if (typeof seq === "number") {
-        conn.pendingMedia.set(requestId, seq);
-        while (conn.pendingMedia.size > MAX_PENDING_MEDIA) {
-          const oldest = conn.pendingMedia.keys().next().value;
-          if (oldest === undefined) break;
-          conn.pendingMedia.delete(oldest);
+        // CastSessionClientImpl::HandleV2ProtocolMessage: a full table loses its oldest half before the new entry,
+        // which keeps the cost of deleting amortized O(1)
+        if (conn.pendingMedia.size >= MAX_PENDING_MEDIA) {
+          const drop = [...conn.pendingMedia.keys()].slice(0, Math.floor(conn.pendingMedia.size / 2));
+          for (const id of drop) conn.pendingMedia.delete(id);
         }
+        conn.pendingMedia.set(requestId, seq);
       }
       const res = await this.service.handle(sender, "sendMessage", {
         sessionId: m.sessionId as string,
