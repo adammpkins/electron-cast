@@ -215,7 +215,7 @@ const tabs = [
           <div>
             <h3>Coming</h3>
             <ul>
-              <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing</li>
+              <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing, the capture size following encoder load</li>
               <li>Mirroring without the lag and the dropped frames on Wi-Fi (a fix is in progress)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>

@@ -67,6 +67,8 @@ export class FakeBackend implements MirroringBackend {
   videoFramesProduced = 0;
   audioFramesProduced = 0;
   feedback: number[] = [];
+  /** The lossiness each encoded video frame reports; none by default, as an encoder without an estimate. */
+  lossiness: number | undefined;
   private cancelVideoTimer: (() => void) | undefined;
   private cancelAudioTimer: (() => void) | undefined;
   private paused = false;
@@ -127,6 +129,7 @@ export class FakeBackend implements MirroringBackend {
             newPlayoutDelayMs: 0,
             data,
             encoderUtilization: 0.2,
+            ...(self.lossiness !== undefined ? { lossiness: self.lossiness } : {}),
           });
         }, 2);
         return true;

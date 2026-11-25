@@ -11,12 +11,34 @@ import type { AgentPort, AgentToEngine, EngineToAgent } from "../../src/mirrorin
  * reordered outputs a real encoder can produce are simulated.
  */
 
-interface FakeFrame { timestamp: number; displayWidth: number; displayHeight: number; closed: boolean; close(): void; clone(): FakeFrame }
-const frame = (timestamp: number): FakeFrame => ({
-  timestamp, displayWidth: 640, displayHeight: 360, closed: false,
-  close() { this.closed = true; },
-  clone() { return frame(this.timestamp); },
-});
+interface FakeFrame {
+  timestamp: number; displayWidth: number; displayHeight: number; closed: boolean; close(): void; clone(): FakeFrame;
+  format?: string; visibleRect?: { width: number; height: number }; duration?: number | null;
+  allocationSize?(): number; copyTo?(destination: Uint8Array): Promise<{ offset: number; stride: number }[]>;
+}
+interface FrameOptions { width?: number; height?: number; format?: string; duration?: number | null; luma?: (x: number, y: number) => number }
+const frame = (timestamp: number, o: FrameOptions = {}): FakeFrame => {
+  const width = o.width ?? 640, height = o.height ?? 360;
+  const f: FakeFrame = {
+    timestamp, displayWidth: width, displayHeight: height, closed: false,
+    close() { this.closed = true; },
+    clone() { return frame(this.timestamp, o); },
+  };
+  if (o.luma !== undefined || o.format !== undefined) {
+    // A planar 4:2:0 frame: the luma plane first, tightly packed, then the chroma planes.
+    f.format = o.format ?? "I420";
+    f.visibleRect = { width, height };
+    f.duration = o.duration;
+    f.allocationSize = () => width * height * 3 / 2;
+    f.copyTo = async (destination) => {
+      for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) destination[y * width + x] = o.luma?.(x, y) ?? 0;
+      return [{ offset: 0, stride: width }, { offset: width * height, stride: width / 2 }, { offset: width * height * 5 / 4, stride: width / 2 }];
+    };
+  } else if (o.duration !== undefined) {
+    f.duration = o.duration;
+  }
+  return f;
+};
 
 function startAgent() {
   const sent: AgentToEngine[] = [];
@@ -76,9 +98,9 @@ function startAgent() {
     sent, encoders, settle, tracks, requests, refuse, supportChecks, userMedia, control,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
-    capture: async (ts: number) => {
+    capture: async (ts: number, options?: FrameOptions) => {
       now += 33;
-      const f = frame(ts);
+      const f = frame(ts, options);
       const track = tracks.at(-1)!;
       const w = track.waiters.shift();
       if (w) w({ value: f, done: false }); else track.queued.push(f);
@@ -462,4 +484,73 @@ test("port backend: the capture's resolution change policy goes to the agent", (
   return Promise.resolve().then(() => {
     assert.deepEqual((port.out.find((m) => m.t === "start") as { video: unknown }).video, { width: 1920, height: 1080, frameRate: 30, resolutionChangePolicy: "fixed_aspect_ratio" });
   });
+});
+
+const chunksOf = (sent: AgentToEngine[]) => sent.filter((m) => m.t === "video-chunk") as { rtp: number; complexity?: number; durationMs?: number }[];
+
+test("agent: the frame complexity estimate is the entropy of luma differences over 10% of the rows, as Chrome's", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  let seed = 12345;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) >> 16) & 255;
+  const ramp = (x: number) => x % 256;
+  // key frame (neighbour differences), then delta frames (differences against the last examined frame)
+  const frames: FrameOptions[] = [
+    { luma: (x) => ramp(x) },            // key: 637 differences of +1 and 2 of -255 per row
+    { luma: (x) => ramp(x + 1) },        // delta: every pixel moved by 1 but the two columns where the ramp wraps
+    { luma: () => 128 },                 // delta: a uniform frame after a ramp
+    { luma: () => noise() },             // delta: noise against uniform, about 8 bits of entropy
+  ];
+  for (let i = 0; i < frames.length; i++) {
+    await a.capture(i * 33_000, frames[i]);
+    await a.command({ t: "encode", rtp: a.rtps()[i]! });
+  }
+  const enc = a.encoders[0]!;
+  for (let i = 0; i < frames.length; i++) enc.emit(i, i === 0);
+  const c = chunksOf(a.sent).map((m) => m.complexity);
+  const p = 2 / 639;
+  const keyEntropy = -((1 - p) * Math.log2(1 - p) + p * Math.log2(p));
+  assert.ok(Math.abs(c[0]! - keyEntropy / 7.5) < 1e-9, `key frame ${c[0]} vs ${keyEntropy / 7.5}`);
+  // The ramp moved by one except where it wraps: two buckets again, 2 of 640 columns in the wrap bucket.
+  assert.ok(c[1]! > 0 && c[1]! < 0.1, `ramp delta ${c[1]}`);
+  assert.ok(c[2]! > 0.2, "a ramp against a uniform frame is spread over many differences");
+  assert.equal(c[3], 1, "noise is capped at the complexity of 7.5 bits");
+});
+
+test("agent: a uniform frame has no complexity, an unexaminable format reports none, and the frame duration follows GetFrameDuration", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  await a.capture(0, { luma: () => 77, duration: 20_000 });        // own duration 20 ms
+  await a.capture(500_000, { format: "BGRA" });                    // RGB frames are not examined; no duration: clamped to 1/24 s
+  await a.capture(510_000, { format: "NV12", luma: () => 5 });     // 10 ms since the last, clamped up to 1/60 s
+  const r = a.rtps();
+  for (const x of r) await a.command({ t: "encode", rtp: x });
+  const enc = a.encoders[0]!;
+  enc.emit(0, true); enc.emit(1); enc.emit(2);
+  const c = chunksOf(a.sent);
+  assert.equal(c[0]!.complexity, 0);
+  assert.ok(!("complexity" in c[1]!), "BGRA is not planar YUV");
+  assert.equal(c[2]!.complexity, 0);
+  assert.equal(c[0]!.durationMs, 20);
+  assert.ok(Math.abs(c[1]!.durationMs! - 1000 / 24) < 1e-9);
+  assert.ok(Math.abs(c[2]!.durationMs! - 1000 / 60) < 1e-9);
+});
+
+test("agent: the engine's capture size sets the size the encoder is configured for, and only while the aspect ratio matches", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 1280, height: 720, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  const sizes = () => a.encoders.flatMap((e) => e.configures.map((c) => `${c.width}x${c.height}`));
+  await a.capture(0, { width: 1280, height: 720 });
+  await a.command({ t: "encode", rtp: a.rtps()[0]! });
+  await a.command({ t: "capture-size", width: 640, height: 360 });
+  await a.capture(33_000, { width: 1280, height: 720 });
+  await a.command({ t: "encode", rtp: a.rtps()[1]! });
+  // The source became portrait before the oracle caught up: its own size wins.
+  await a.capture(66_000, { width: 720, height: 1280 });
+  await a.command({ t: "encode", rtp: a.rtps()[2]! });
+  // A capture size larger than the frame is the frame's size.
+  await a.command({ t: "capture-size", width: 1920, height: 1080 });
+  await a.capture(99_000, { width: 1280, height: 720 });
+  await a.command({ t: "encode", rtp: a.rtps()[3]! });
+  assert.deepEqual(sizes(), ["1280x720", "640x360", "720x1280", "1280x720"]);
 });

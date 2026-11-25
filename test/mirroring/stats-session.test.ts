@@ -65,6 +65,28 @@ test("without RTCP reporting only the senders' own counters are reported", async
   }
 });
 
+test("LOSSINESS is the last encoded frame's lossiness times 100, and -100 while no frame has reported one", async () => {
+  const h = await startHarness({});
+  try {
+    await sleep(300);
+    // OpenscreenSessionHost::GetMirroringStats: GetLossiness() * 100, and GetLossiness is -1 until a frame sets it
+    assert.equal(h.host.getMirroringStats().video!.LOSSINESS, -100);
+    h.backend.lossiness = 0.25;
+    await sleep(300);
+    assert.equal(h.host.getMirroringStats().video!.LOSSINESS, 25);
+    h.backend.lossiness = 1.5;
+    await sleep(300);
+    assert.equal(h.host.getMirroringStats().video!.LOSSINESS, 150);
+    // SenderEncodedFrame::lossiness is optional: a frame without one leaves the sender with none again
+    h.backend.lossiness = undefined;
+    await sleep(300);
+    assert.equal(h.host.getMirroringStats().video!.LOSSINESS, -100);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    h.close();
+  }
+});
+
 class FakeClient extends EventEmitter implements MirroringClient {
   readonly senderId = "sender-fake01";
   lastSource = "";

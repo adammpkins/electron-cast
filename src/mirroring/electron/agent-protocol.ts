@@ -47,6 +47,8 @@ export type EngineToAgent =
   | { t: "freeze" }
   | { t: "unfreeze" }
   | { t: "refresh" }
+  /** The capture size the agent encodes at (`VideoCaptureOracle::capture_size`); frames are scaled to it by the encoder. */
+  | { t: "capture-size"; width: number; height: number }
   | { t: "encode-audio"; seq: number }
   | { t: "drop-audio"; seq: number }
   | { t: "set-audio"; bps: number }
@@ -55,8 +57,13 @@ export type EngineToAgent =
 export type AgentToEngine =
   | { t: "ready" }
   | { t: "error"; where: "video" | "audio" | "encoder"; message: string }
-  | { t: "frame"; rtp: number; refMs: number; width: number; height: number }
-  | { t: "video-chunk"; rtp: number; key: boolean; data: ArrayBuffer; encodeMs: number }
+  /** `refresh` is set for a frame that repeats the last one (`RequestRefreshFrame`), which is no new content. */
+  | { t: "frame"; rtp: number; refMs: number; width: number; height: number; refresh?: boolean }
+  /**
+   * `complexity` is the frame complexity estimate in [0, 1] (absent when the frame could not be examined) and
+   * `durationMs` the frame's duration, which lossiness is measured over.
+   */
+  | { t: "video-chunk"; rtp: number; key: boolean; data: ArrayBuffer; encodeMs: number; durationMs?: number; complexity?: number }
   /** The frame never produced a chunk (encoder queue full, evicted, unsupported, or swallowed by the encoder). */
   | { t: "video-drop"; rtp: number }
   | { t: "audio-drop"; seq: number }

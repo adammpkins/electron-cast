@@ -8,7 +8,10 @@
  * where the OS has it), reads the tracks with `MediaStreamTrackProcessor`, and encodes with WebCodecs
  * `VideoEncoder` (VP8 by default) and `AudioEncoder` (Opus, 10 ms frames, 48 kHz stereo). The engine decides which
  * raw frames are encoded (the drop decision of `VideoSender::InsertRawVideoFrame`); the agent only holds a few
- * frames for it and never copies pixels: a `VideoFrame` goes straight into the encoder.
+ * frames for it. A `VideoFrame` goes straight into the encoder; its pixels are read once per encoded frame, to
+ * estimate the frame's complexity (media/cast/encoding/frame_complexity_estimator.cc), which stands in for the
+ * quantizer WebCodecs does not report. The engine also tells the agent the capture size to encode at
+ * (`capture-size`): the encoder scales frames to its configured size.
  *
  * Messages are those of agent-protocol.ts.
  */
@@ -52,6 +55,9 @@ export const AGENT_SOURCE = String.raw`
   const inFlight = [];                 // { rtp, ts, key, startedAt } in encoder order
   let lastFrameClone = null;
   let lastRtp = 0;
+  let captureSize = null;              // { width, height } the engine's capture size oracle wants encoded, null for the source size
+  let encodeChain = Promise.resolve(); // encodes run one after another: the complexity estimate awaits a pixel copy
+  let lastEncodedTimestamp = null;     // capture clock (us) of the frame encoded before, for GetFrameDuration
   let firstTimestamp = null;
   let lastCapture = null;              // { timestamp (capture clock, us), refMs (epoch ms) } of the newest frame, refresh or not
   const pendingAudio = new Map();      // seq -> AudioData
@@ -113,7 +119,8 @@ export const AGENT_SOURCE = String.raw`
         // the device is suspended.
         if (!frozen) refreshFrame();
         return;
-      case "encode": return encodeFrame(m.rtp);
+      case "encode": return (encodeChain = encodeChain.then(() => encodeFrame(m.rtp)));
+      case "capture-size": captureSize = { width: m.width, height: m.height }; return;
       case "encode-audio": return encodeAudio(m.seq);
       case "drop-audio": { const d = pendingAudio.get(m.seq); pendingAudio.delete(m.seq); if (d) d.close(); return; }
       case "stop": return stop();
@@ -191,7 +198,8 @@ export const AGENT_SOURCE = String.raw`
     const rtp = rtpFor(lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000);
     lastCapture = { timestamp: lastCapture.timestamp + (nowMs - lastCapture.refMs) * 1000, refMs: nowMs };
     holdFrame(rtp, clone);
-    send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight });
+    // refresh: it repeats the last frame, which is no new content to the capture-size oracle.
+    send({ t: "frame", rtp, refMs: nowMs, width: clone.displayWidth, height: clone.displayHeight, refresh: true });
   }
 
   // ResumeDevice restarts the capturer (FrameSinkVideoCaptureDevice::MaybeStartConsuming), and a restarted capturer
@@ -251,6 +259,8 @@ export const AGENT_SOURCE = String.raw`
     if (lastFrameClone) { lastFrameClone.close(); lastFrameClone = null; }
     lastCapture = null;
     firstTimestamp = null;
+    // The new tab's capture starts at its own size until the engine's new oracle says otherwise.
+    captureSize = null;
     const nextVideo = next.getVideoTracks()[0];
     const nextAudio = next.getAudioTracks()[0];
     if (video && nextVideo) pumpVideo(nextVideo, video);
@@ -300,6 +310,61 @@ export const AGENT_SOURCE = String.raw`
     }
   }
 
+  // FrameComplexityEstimator (media/cast/encoding/frame_complexity_estimator.cc), a port of Chrome's: the entropy of the
+  // luma differences, between neighbouring pixels for a key frame and against the same pixel of the last frame
+  // otherwise, over 10% of the rows, mapped linearly to [0, 1]. WebCodecs reports no quantizer, which is the case
+  // MediaVideoEncoderWrapper falls back to this estimate for.
+  const SAMPLING_PERCENT = 10;
+  const HISTOGRAM_SIZE = 511;
+  const ENTROPY_AT_MAX_COMPLEXITY = 7.5;
+  const complexity = { last: new Uint8Array(0), width: 0, height: 0, copy: new Uint8Array(0) };
+  const examinable = (f) => /^(I420|I420A|I422|I444|NV12)$/.test(f.format) && f.visibleRect && f.visibleRect.width > 0 && f.visibleRect.height > 0;
+  function entropyOf(histogram, samples) {
+    let entropy = 0;
+    for (let i = 0; i < histogram.length; i++) {
+      const p = histogram[i] / samples;
+      if (p > 0) entropy -= p * Math.log2(p);
+    }
+    return Math.min(1, entropy / ENTROPY_AT_MAX_COMPLEXITY);
+  }
+  function estimateFromLuma(luma, stride, width, height, key) {
+    const rows = Math.max(1, Math.floor((height * SAMPLING_PERCENT) / 100));
+    const rowSkip = Math.floor(height / rows);
+    // A new frame size has nothing to compare with: it is estimated as a key frame.
+    if (!key && (complexity.width !== width || complexity.height !== height || complexity.last.length === 0)) key = true;
+    if (complexity.width !== width || complexity.height !== height || complexity.last.length === 0) {
+      complexity.last = new Uint8Array(width * rows);
+      complexity.width = width;
+      complexity.height = height;
+    }
+    const histogram = new Int32Array(HISTOGRAM_SIZE);
+    let y = 0;
+    for (let i = 0; i < rows; i++, y += rowSkip) {
+      const row = luma.subarray(y * stride, y * stride + width);
+      const kept = complexity.last.subarray(i * width, (i + 1) * width);
+      if (key) {
+        for (let x = 1; x < width; x++) histogram[row[x] - row[x - 1] + 255]++;
+      } else {
+        for (let x = 0; x < width; x++) histogram[row[x] - kept[x] + 255]++;
+      }
+      kept.set(row);
+    }
+    const samples = key ? (width - 1) * rows : width * rows;
+    return samples > 0 ? entropyOf(histogram, samples) : null;
+  }
+  async function estimateComplexity(frame, key) {
+    try {
+      if (!examinable(frame)) return null;
+      const need = frame.allocationSize();
+      if (complexity.copy.length < need) complexity.copy = new Uint8Array(need);
+      const layout = await frame.copyTo(complexity.copy);
+      const { offset, stride } = layout[0];
+      return estimateFromLuma(complexity.copy.subarray(offset), stride, frame.visibleRect.width, frame.visibleRect.height, key);
+    } catch {
+      return null;
+    }
+  }
+
   async function pumpVideo(track, params) {
     videoInfo = params;
     // A switch starts another pump on the new track; this one ends with its own track.
@@ -338,7 +403,9 @@ export const AGENT_SOURCE = String.raw`
         if (!info) return;
         const data = new ArrayBuffer(chunk.byteLength);
         chunk.copyTo(data);
-        send({ t: "video-chunk", rtp: info.rtp, key: chunk.type === "key", data, encodeMs: performance.now() - info.startedAt });
+        const message = { t: "video-chunk", rtp: info.rtp, key: chunk.type === "key", data, encodeMs: performance.now() - info.startedAt, durationMs: info.durationMs };
+        if (info.complexity !== null) message.complexity = info.complexity;
+        send(message);
       },
       error: (err) => { abandonInFlight(); send({ t: "encoder-status", kind: "video", status: "codec_runtime_error", message: describe(err) }); },
     });
@@ -347,12 +414,22 @@ export const AGENT_SOURCE = String.raw`
     keyNext = true;
   }
 
+  // The size to encode a frame at: the oracle's capture size while it keeps the frame's aspect ratio and is not larger,
+  // else the frame's own (a source that changed shape is followed at once; the oracle catches up).
+  function encodeSize(frame) {
+    const w = frame.displayWidth, h = frame.displayHeight;
+    const t = captureSize;
+    if (!t || t.width >= w || t.height >= h) return { width: w, height: h };
+    if (Math.abs(t.width * h - t.height * w) > 0.02 * t.height * w) return { width: w, height: h };
+    return t;
+  }
+
   async function encodeFrame(rtp) {
     const frame = pendingFrames.get(rtp);
     if (!frame) { dropVideo(rtp); return; }
     pendingFrames.delete(rtp);
     try {
-      const w = frame.displayWidth, h = frame.displayHeight;
+      const { width: w, height: h } = encodeSize(frame);
       if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize || encoderSize.width !== w || encoderSize.height !== h) {
         const support = await VideoEncoder.isConfigSupported(encoderConfig(w, h));
         if (!support.supported) { dropVideo(rtp); send({ t: "encoder-status", kind: "video", status: "unsupported_codec", message: videoCodec.string + (videoCodec.hardware ? " (hardware)" : "") + " at " + w + "x" + h }); return; }
@@ -362,7 +439,13 @@ export const AGENT_SOURCE = String.raw`
       if (videoEncoder.encodeQueueSize > 4) { dropVideo(rtp); return; }
       const key = keyNext;
       keyNext = false;
-      inFlight.push({ rtp, ts: frame.timestamp, key, startedAt: performance.now() });
+      const estimated = await estimateComplexity(frame, key);
+      // GetFrameDuration: the frame's own duration, else the time since the last frame within [1/60 s, 1/24 s].
+      const durationMs = frame.duration != null && frame.duration > 0
+        ? frame.duration / 1000
+        : Math.min(Math.max((frame.timestamp - (lastEncodedTimestamp === null ? 0 : lastEncodedTimestamp)) / 1000, 1000 / 60), 1000 / 24);
+      lastEncodedTimestamp = frame.timestamp;
+      inFlight.push({ rtp, ts: frame.timestamp, key, startedAt: performance.now(), complexity: estimated, durationMs });
       videoEncoder.encode(frame, { keyFrame: key });
     } catch (err) {
       dropVideo(rtp);

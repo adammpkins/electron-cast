@@ -753,6 +753,8 @@ sender policy, plus the session host, plus the routing.
 | `sender/sender.ts` | openscreen `impl/sender_impl.cc` (`Sender`) |
 | `sender/packet-router.ts` | openscreen `impl/sender_packet_router.cc` |
 | `sender/bandwidth-estimator.ts` | openscreen `impl/bandwidth_estimator.cc` |
+| `sender/video-encoder-metrics.ts` | Chromium `media/cast/encoding/media_video_encoder_wrapper.cc` (`CalculateEncoderUtilization`, `ComputeAndRecordUtilization`, `ComputeLossiness`) |
+| `sender/capture-size-oracle.ts` | Chromium `media/capture/content/video_capture_oracle.cc` (`RecordConsumerFeedback`, `AnalyzeAndAdjust`, `AnalyzeForDecreasedArea`, `AnalyzeForIncreasedArea`), `capture_resolution_chooser.cc`, `media/base/feedback_signal_accumulator.h`, `media/capture/video/video_capture_types.cc` (`SuggestConstraints`), `media/base/video_util.cc` (`ScaleSizeToTarget`, `PadToMatchAspectRatio`) |
 | `sender/frame-sender.ts` | Chromium `media/cast/sender/openscreen_frame_sender.cc`, `video_sender.cc`, `audio_sender.cc`, `media/cast/constants.h` |
 | `session-host.ts` | Chromium `components/mirroring/service/openscreen_session_host.cc` (`NegotiateMirroring`, `OnError` fallback offer, `OnVideoEncoderStatus`, `MaybeFallbackHardwareFrameRate`, `MaybeDenylistHardwareCodecAndRenegotiate`), `mirror_settings.cc`, `mirroring_features.cc`, `media/cast/openscreen/config_conversions.cc` |
 | `encoding-support.ts` | Chromium `media/cast/encoding/encoding_support.cc` (`IsHardwareEnabled`, `IsSoftwareEnabled`, the hardware deny list, `GetCodecParameterString`, `ToProfile`) and the `kCastStreamingForce{Enable,Disable}Hardware*` switches of `media/base/media_switches.cc` |
@@ -762,7 +764,7 @@ sender policy, plus the session host, plus the routing.
 | `stats/*.ts` | openscreen `impl/statistics_{collector,dispatcher,analyzer,common}.cc`, `impl/clock_offset_estimator_impl.cc`, `public/statistics.cc`; Chromium `openscreen_stats_client.cc`, `openscreen_session_host.cc` (`GetMirroringStats`), `stats_event_subscriber.cc` (`CastStatToString`) |
 | `engine.ts` | assembles `OpenscreenSessionHost` around a backend, as the Mirroring Service does with its resource provider |
 | `transport/udp-environment.ts` | openscreen `cast/streaming/public/environment.cc` (`SendPacket`, `GetMaxPacketSize`, `OnRead`) and `SenderPacketRouter::OnReceivedPacket` (packets only from the announced endpoint) |
-| `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc`, `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate, utilization), `openscreen_session_host.cc` (`OnVideoEncoderStatus`), `media/capture/video_capture_types.cc` (`SuggestConstraints`), `content/browser/media/capture/frame_sink_video_capture_device.cc` (`SetResolutionConstraints`), blink `media_stream_constraints_util_video_content.cc` (`SelectResolutionPolicyFromCandidates`), blink `video_encoder.cc` (`GetRequiredEncoderType`, `isConfigSupported`) |
+| `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc` (`ProcessFeedback`, `SwitchVideoCaptureHost`), `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate), `media_video_encoder_wrapper.cc` (frame duration, utilization, lossiness), `frame_complexity_estimator.cc` (the agent's complexity estimate), `components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc` (what the oracle is shown per frame), `openscreen_session_host.cc` (`OnVideoEncoderStatus`, `ProcessFeedback`), `media/capture/video_capture_types.cc` (`SuggestConstraints`), `content/browser/media/capture/frame_sink_video_capture_device.cc` (`SetResolutionConstraints`), blink `media_stream_constraints_util_video_content.cc` (`SelectResolutionPolicyFromCandidates`), blink `video_encoder.cc` (`GetRequiredEncoderType`, `isConfigSupported`) |
 | `electron/host.ts` | Chromium `chrome/browser/media/cast_mirroring_service_host.cc` (the tab and desktop capture sources) and the hardware encoder query of `openscreen_session_host.cc` (`supported_profiles_`), answered by WebCodecs |
 | `mirroring-activity.ts` `shouldForceLetterboxing` | Chromium `mirroring_activity.cc` (`ShouldForceLetterboxing`) |
 
@@ -793,9 +795,65 @@ The agent and the engine split the work as Chrome splits capture and the Mirrori
 raw frame (RTP timestamp, reference time); the engine runs `VideoSender::InsertRawVideoFrame` (the drop decision) and
 answers `encode`; the agent encodes and posts the chunk; the engine assigns the frame id and calls
 `FrameSender::EnqueueFrame`. Audio works the same way per 10 ms buffer. A frame that never yields a chunk (encoder queue full, evicted, unsupported, swallowed by the encoder, encoder error) is reported as `video-drop` or `audio-drop`; the engine turns a video drop into Chrome's empty encoded frame (`VideoSender::OnFrameDroppedByEncoder`) so the sender's in-encoder count never leaks, and an audio drop becomes skipped samples on the next frame. Audio RTP and reference times follow `AudioEncoder::ImplBase::EncodeAudio` (underrun skip above `kUnderrunSkipThreshold`). A bitrate change reconfigures the running encoder in place and forces no key frame. The agent holds at most three raw frames and
-closes the oldest, so a dropped frame costs nothing. Pixels are not copied: a `VideoFrame` goes from the track
-processor into the encoder. Encoded chunks are copied once, through the port (Electron cannot transfer an
+closes the oldest, so a dropped frame costs nothing. A `VideoFrame` goes from the track
+processor into the encoder; the only pixel read is one copy of the frame per encoded frame for the complexity estimate (see "Encoder feedback"). Encoded chunks are copied once, through the port (Electron cannot transfer an
 `ArrayBuffer` over a `MessagePortMain`).
+
+### Encoder feedback: lossiness, utilization and the capture size
+
+What Chrome does. `MediaVideoEncoderWrapper::OnFrameEncodeDone` gives every encoded frame an `encoder_utilization`
+(`CalculateEncoderUtilization`: processing time over the target frame duration for a software encoder, the worse of
+backlog and latency for a hardware one, clamped to [0, 2] and smoothed with an exponential average of weight 0.1) and a
+`lossiness`: the frame's bitrate as a share of the target bitrate, times a normalized quantizer (`ComputeLossiness`,
+clamped to [0, 5]). The quantizer is the encoder's QP when it reports one; otherwise the wrapper asks
+`FrameComplexityEstimator` before encoding: the Shannon entropy of the luma differences (neighbouring pixels in a key
+frame, the same pixel of the previous frame otherwise) over 10% of the rows, divided by 7.5 and capped at 1.
+`VideoSender` keeps the last of each, and `ReportResourceUtilization` passes `max(utilization, lossiness) / 0.75` (a key
+frame capped at 1) to `OpenscreenSessionHost::ProcessFeedback` and `VideoCaptureClient::ProcessFeedback`, which attaches
+it to the next buffer it releases. For a tab that reaches `FrameSinkVideoCaptureDevice::OnUtilizationReport` and
+`FrameSinkVideoCapturerImpl`, whose `VideoCaptureOracle` (created with auto-throttling on, in `FrameSinkManagerImpl`)
+turns it into a capture size. The first positive utilization activates throttling. Each report updates an average of the
+area the consumer could handle (capture area divided by utilization). When that, or the buffer pool's utilization, is
+below the current area, the target drops by at least one snapped size (`CaptureResolutionChooser`: steps of 90 lines,
+each at least 15% smaller in area, between the limits of the resolution change policy). When both leave room, it rises
+one step: at once for content that is not animating, after 30 s of contiguous headroom while it is. A change takes
+effect at most every 3 s. A fixed resolution has one size, so nothing adapts. The desktop capturer
+(`DesktopCaptureDevice`) has a `CaptureResolutionChooser` too but never reads the feedback, so a screen is always
+captured at the largest allowed size.
+
+What is built. WebCodecs reports no QP, so Chrome's no-QP path is the only path. The agent copies each encoded frame's
+planes once (0.5 to 1.4 ms for 1080p in the smoke test, measured around the copy and the estimate) and runs a port of
+the estimator over the same 10% of rows (`agent-source.ts`), for I420, I420A, I422, I444 and NV12 frames. Other formats
+get no complexity and no lossiness, as in Chrome, where the estimator returns nothing for them. The agent reports
+`complexity` and the frame duration (the frame's own `duration`, else the time since the last frame clamped to 1/60 to
+1/24 s: `GetFrameDuration`). `PortBackend` computes lossiness and utilization with the wrapper's formulas
+(`sender/video-encoder-metrics.ts`), against the target bitrate in force when the chunk arrives. `VideoSender` was
+already the consumer of both. No web API carries a `VideoCaptureFeedback` from a page to the capture device
+(WebCodecs, `MediaStreamTrackProcessor` and the track API have none), so the oracle (`sender/capture-size-oracle.ts`)
+runs in the engine, for tab sources only, and is shown each frame as `FrameSinkVideoCapturerImpl::MaybeCaptureFrame`
+shows it: source size, the event, then the capture with the pipeline utilization (frames in the encoder over 6). Its
+capture size goes to the agent as `capture-size`, rounded down to even numbers as `DesktopCaptureDevice` does with
+`& ~1`. The agent configures the encoder for that size and gives it the unscaled frame, which a WebCodecs encoder
+scales (checked in Electron 45: a 1920x1080 frame encoded with a 640x360 configuration decodes at 640x360). A change
+of size reconfigures the encoder, as a change of source size already did.
+
+Differences:
+
+- The capture still happens at the source size, since the browser's capturer never sees our oracle: a smaller capture
+  size saves encoder and network load, not capture load.
+- `AnimatedContentSampler` finds animation from damage rectangles, which a page cannot see. Frames arriving at most
+  200 ms apart (the oracle's own minimum of 5 fps) count as animating here, and a refresh frame does not. A page that
+  keeps painting waits the 30 s proving period before each step up; a static one does not.
+- The feedback is applied to the frame whose chunk produced it, not to the next buffer released (one frame later in
+  Chrome).
+- Switching the mirrored tab starts a new oracle at the full size, as Chrome's `VideoCaptureClient::SwitchVideoCaptureHost`
+  starts a new capture device (with its own oracle) on the new tab.
+- Whether an encoder is hardware for `CalculateEncoderUtilization` is what the session host chose
+  (`useHardwareEncoder`, from the WebCodecs hardware query), not what the encoder reports, since WebCodecs does not say
+  which implementation it picked under `prefer-hardware`.
+- The estimator runs on the agent's main thread, not on a thread-pool task.
+- The oracle's samplers (`SmoothEventSampler`, `AnimatedContentSampler`) are not ported, and neither is the max frame
+  rate and max pixels feedback, which `VideoSender` never sends.
 
 ### Local audio while mirroring
 
@@ -1071,7 +1129,7 @@ pins; the files are identical on main) unless noted:
   with the live harness in `examples/live-mirroring/`) tab mirroring ran at 1080p30 with Opus and VP8 in software, the
   picture smooth and the audio in sync and only on the TV; desktop mirroring sent picture and system audio, with local
   audio kept on Windows as Chrome keeps it there. Linux and macOS have not been tried.
-- Not ported: Remoting (RPC playback; see "Media remoting" below), UMA (see Mirroring statistics).
+- Not ported: Remoting (RPC playback; see "Media remoting" below), UMA (see Mirroring statistics; each frame's lossiness and utilization are computed, the averages Chrome records are not).
 - Hardware encoding differs from Chrome in how it is found out and run: the GPU factories (`MirroringGpuFactoriesFactory`,
   `OnGpuFactoryContextLost`) have no counterpart because the encoder is WebCodecs in the capture page; a lost GPU
   surfaces as an encoder error, which takes the same deny-list path. Which profile a hardware encoder supports is a

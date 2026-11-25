@@ -8,6 +8,8 @@ import type {
   AudioCaptureSink, AudioEncoderCallbacks, AudioEncoderPort, MirroringBackend, VideoCaptureSink, VideoEncoderCallbacks,
 } from "../backend.ts";
 import type { FrameSenderConfig, ResolutionChangePolicy, VideoCaptureParams } from "../mirror-settings.ts";
+import { CaptureSizeOracle, suggestConstraints } from "../sender/capture-size-oracle.ts";
+import { EncoderUtilizationAverage, calculateEncoderUtilization, computeLossiness } from "../sender/video-encoder-metrics.ts";
 import type { RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
 import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.ts";
 
@@ -15,6 +17,14 @@ const toLocalMs = (epochMs: number): number => epochMs - performance.timeOrigin;
 
 /** media/cast/encoding/audio_encoder.cc `kUnderrunSkipThreshold`. */
 export const UNDERRUN_SKIP_THRESHOLD = 3;
+
+/**
+ * `FrameSinkVideoCapturerImpl::GetPipelineUtilization`: frames in flight over `kDesignLimitMaxFrames` (10) times
+ * `kTargetPipelineUtilization` (0.6).
+ */
+const PIPELINE_CAPACITY = 10 * 0.6;
+/** Frames this close together count as animating content, standing in for `AnimatedContentSampler`'s detection. */
+const ANIMATION_MAX_GAP_MS = 200;
 
 /** What `ImplBase::EncodeAudio` decided for one buffer: the frame's timestamps and the samples skipped before it. */
 interface AudioMeta {
@@ -41,6 +51,14 @@ export class PortBackend implements MirroringBackend {
   private audioMeta = new Map<number, AudioMeta>();
   private currentAudioSeq = 0;
   private frameInterval = 1000 / 30;
+  private targetBitrate = 0;
+  private isHardwareEncoder = false;
+  private readonly utilizationAverage = new EncoderUtilizationAverage();
+  private oracle: CaptureSizeOracle | undefined;
+  private oracleFrames = new Map<number, number>();
+  private feedbackFrame: number | undefined;
+  private lastContentFrameMs: number | undefined;
+  private sentCaptureSize: string | undefined;
   private audioConfig: { sampleRate: number; channels: number } | undefined;
   private audioSenderConfig: FrameSenderConfig | undefined;
   private stopped = false;
@@ -62,15 +80,26 @@ export class PortBackend implements MirroringBackend {
         else this.videoCallbacks?.onStatus("codec_runtime_error", m.message);
         break;
       case "frame":
+        this.observeCapturedFrame(m.rtp, toLocalMs(m.refMs), m.width, m.height, m.refresh === true);
         this.videoSink?.insertVideoFrame({ rtpTimestamp: m.rtp, referenceTimeMs: toLocalMs(m.refMs), visibleRectEmpty: false });
         break;
       case "video-chunk": {
         const ref = this.pendingVideo.get(m.rtp);
+        // The frame still counts in the backlog while its own output is processed (`recent_metadata_` is popped last).
+        const backlog = this.pendingVideo.size;
         this.pendingVideo.delete(m.rtp);
         if (ref === undefined) return;
         const frameId = this.nextVideoFrameId++;
         const referenced = m.key ? frameId : this.lastVideoFrameId;
         this.lastVideoFrameId = frameId;
+        const data = Buffer.from(m.data);
+        // OnFrameEncodeDone: WebCodecs reports no quantizer, so the frame's estimated complexity stands in for it and
+        // only frames that were estimated have a lossiness.
+        const lossiness =
+          m.complexity !== undefined && this.targetBitrate > 0
+            ? computeLossiness(data.length, m.durationMs ?? this.frameInterval, this.targetBitrate, m.complexity)
+            : undefined;
+        this.feedbackFrame = this.oracleFrames.get(m.rtp);
         this.videoCallbacks?.onEncoded(ref, {
           isKeyFrame: m.key,
           frameId,
@@ -78,13 +107,17 @@ export class PortBackend implements MirroringBackend {
           rtpTimestamp: m.rtp,
           referenceTimeMs: ref,
           newPlayoutDelayMs: 0,
-          data: Buffer.from(m.data),
+          data,
           // Electron's capture reports one time per frame, so it stands for the begin and the end of the capture.
           captureBeginTimeMs: ref,
           captureEndTimeMs: ref,
-          // How much of the frame interval the encoder needed, the utilization `VideoSender` feeds back.
-          encoderUtilization: Math.max(0, m.encodeMs / this.frameInterval),
+          // ComputeAndRecordUtilization: how much of the frame interval the encoder needed, smoothed.
+          encoderUtilization: this.utilizationAverage.record(
+            calculateEncoderUtilization(this.isHardwareEncoder, backlog, m.encodeMs, this.frameInterval),
+          ),
+          lossiness,
         });
+        this.feedbackFrame = undefined;
         break;
       }
       case "video-drop": {
@@ -93,6 +126,7 @@ export class PortBackend implements MirroringBackend {
         const ref = this.pendingVideo.get(m.rtp);
         if (ref === undefined) return;
         this.pendingVideo.delete(m.rtp);
+        this.feedbackFrame = this.oracleFrames.get(m.rtp);
         this.videoCallbacks?.onEncoded(ref, {
           isKeyFrame: false,
           frameId: this.nextVideoFrameId,
@@ -103,6 +137,7 @@ export class PortBackend implements MirroringBackend {
           data: new Uint8Array(0),
           encoderUtilization: -1,
         });
+        this.feedbackFrame = undefined;
         break;
       }
       case "audio-drop": {
@@ -159,13 +194,20 @@ export class PortBackend implements MirroringBackend {
     this.pendingVideo.clear();
     this.nextVideoFrameId = 0;
     this.lastVideoFrameId = -1;
+    this.targetBitrate = config.startBitrate;
+    // CalculateEncoderUtilization treats hardware and software encoders differently; the session host says which one
+    // this is (a WebCodecs hardware encoder was found for the codec).
+    this.isHardwareEncoder = config.useHardwareEncoder;
     this.port.postMessage({ t: "set-codec", codec: config.videoCodec ?? "vp8", codecString: config.codecParameter, hardware: config.useHardwareEncoder });
     this.port.postMessage({ t: "set-bitrate", bps: config.startBitrate });
     // The agent reports unsupported or failed codecs; "initialized" is the default until it says otherwise.
     queueMicrotask(() => callbacks.onStatus("initialized"));
     return {
       generateKeyFrame: () => this.port.postMessage({ t: "key-frame" }),
-      setBitRate: (bps) => this.port.postMessage({ t: "set-bitrate", bps }),
+      setBitRate: (bps) => {
+        this.targetBitrate = bps;
+        this.port.postMessage({ t: "set-bitrate", bps });
+      },
       setMaxFrameRate: (rate) => {
         this.frameInterval = 1000 / rate;
       },
@@ -240,7 +282,29 @@ export class PortBackend implements MirroringBackend {
     this.videoSink = sink;
     this.lastVideoParams = JSON.stringify(params);
     this.videoParams = { width: params.width, height: params.height, frameRate: params.frameRate, resolutionChangePolicy: params.resolutionChangePolicy };
+    this.resetOracle();
     this.maybeStart();
+  }
+
+  /**
+   * A capture device of its own, with its own oracle: at the start, and when a switch moves the capture to another tab
+   * (`VideoCaptureClient::SwitchVideoCaptureHost` binds the new tab's host and starts a new device on it). Only the
+   * capturer of a tab (viz's FrameSinkVideoCapturerImpl) acts on resource utilization. A desktop capture
+   * (DesktopCaptureDevice) has the same CaptureResolutionChooser but never narrows it: it always captures at the
+   * largest size the constraints allow.
+   */
+  private resetOracle(): void {
+    const params = this.videoParams;
+    this.oracle =
+      params !== undefined && this.source.kind === "tab"
+        ? new CaptureSizeOracle({
+            ...suggestConstraints({ width: params.width, height: params.height }, params.resolutionChangePolicy),
+            minCapturePeriodMs: 1000 / params.frameRate,
+          })
+        : undefined;
+    this.oracleFrames.clear();
+    this.lastContentFrameMs = undefined;
+    this.sentCaptureSize = undefined;
   }
 
   private videoParams: { width: number; height: number; frameRate: number; resolutionChangePolicy: ResolutionChangePolicy } | undefined;
@@ -292,6 +356,8 @@ export class PortBackend implements MirroringBackend {
   }
 
   switchVideoCaptureHost(): void {
+    if (!this.started || this.stopped) return;
+    this.resetOracle();
     this.requestSwitch("video");
   }
 
@@ -311,7 +377,41 @@ export class PortBackend implements MirroringBackend {
     this.port.postMessage({ t: "refresh" });
   }
 
-  processFeedback(): void {}
+  /**
+   * `VideoCaptureClient::ProcessFeedback`. Chrome keeps the feedback for the next buffer it releases and the capture
+   * device's oracle takes it from there (`FrameSinkVideoCapturerImpl`, `VideoCaptureOracle::RecordConsumerFeedback`);
+   * here it goes to the oracle at once, for the frame whose output produced it.
+   */
+  processFeedback(resourceUtilization: number): void {
+    if (this.oracle === undefined || this.feedbackFrame === undefined) return;
+    this.oracle.recordConsumerFeedback(this.feedbackFrame, resourceUtilization);
+  }
+
+  /**
+   * The oracle sees each captured frame as `FrameSinkVideoCapturerImpl::MaybeCaptureFrame` shows it one: the source
+   * size, the event, then the capture with the pipeline's utilization. The size it proposes goes to the agent when it
+   * changes.
+   */
+  private observeCapturedFrame(rtp: number, refMs: number, width: number, height: number, refresh: boolean): void {
+    const oracle = this.oracle;
+    if (oracle === undefined) return;
+    const animating = !refresh && this.lastContentFrameMs !== undefined && refMs - this.lastContentFrameMs <= ANIMATION_MAX_GAP_MS;
+    if (!refresh) this.lastContentFrameMs = refMs;
+    oracle.setSourceSize({ width, height });
+    oracle.observeEvent(refMs, animating);
+    this.oracleFrames.set(rtp, oracle.nextFrameNumber);
+    if (this.oracleFrames.size > 64) this.oracleFrames.delete(this.oracleFrames.keys().next().value!);
+    oracle.recordCapture(this.pendingVideo.size / PIPELINE_CAPACITY);
+
+    // The encoder wants even dimensions (I420 chroma); the capture constraints round their maximum to even for the same reason.
+    const { width: w, height: h } = oracle.captureSize;
+    const size = { width: w - (w % 2), height: h - (h % 2) };
+    const key = `${size.width}x${size.height}`;
+    if (key !== this.sentCaptureSize) {
+      this.sentCaptureSize = key;
+      this.port.postMessage({ t: "capture-size", ...size });
+    }
+  }
 
   stopAll(): void {
     if (this.stopped) return;

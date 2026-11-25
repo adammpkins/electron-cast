@@ -14,8 +14,8 @@ is frozen and behaves as before for pages; it shares the device list.
 ### Highlights
 
 - **Tab and desktop mirroring, tested on a Chromecast Ultra.** `createCastManager({ mirroring })` enables
-  `startCasting(sinkId, { castMode: "tab_mirror", webContentsId })` and `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })`
-  in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
+  `startCasting(sinkId, { castMode: "tab_mirror", webContentsId })` and
+  `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })` in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
   `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
   `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
   (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
@@ -180,6 +180,13 @@ senders started. Both are covered by unit tests with fakes.
   cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
   no longer upscaled to 1920x1080. The hardware encoders, the new offer after an encoder failure and the
   letterboxing are tested against the fake receiver and in the smoke test; not yet on a real device.
+- **Mirroring adapts to encoder load as Chrome does.** Each encoded frame now carries Chrome's encoder utilization
+  (smoothed, clamped) and lossiness, estimated from the frame's pixels because WebCodecs reports no quantizer (a port of
+  `FrameComplexityEstimator`). `VideoSender` feeds the larger of the two back, and for a tab the capture size follows it
+  like Chrome's `VideoCaptureOracle`: it steps down when the encoder or the link is overloaded and back up when there is
+  room, within the limits of the resolution change policy. Screens are captured at the full size, as in Chrome.
+  Switching the tab starts the size over, as a new capture device does in Chrome. The `LOSSINESS` statistic now reads
+  each frame's value; it is -100, as in Chrome, until a frame has reported one. Not yet tried on a real device.
 - **The manager follows network changes by itself, as Chrome's `DiscoveryNetworkMonitor` tells its media router.** It
   computes Chrome's network id from the connected interfaces and, when it changes, does what Chrome's two observers do:
   DIAL devices given up on as non-Cast are tried again, the sinks of the network being left are remembered and reopened
