@@ -151,6 +151,12 @@ export interface CastManager extends CastManagerApi {
   /** Try again now to open a channel to each discovered device that has none (Chrome: `CastMediaSinkService::DiscoverSinksNow`). */
   discoverSinksNow(): void;
   /**
+   * Tell the manager the machine's network changed (Chrome's `DiscoveryNetworkMonitor` does this by itself). A device that
+   * only DIAL found, and that a channel could not be opened to ten times, is tried again after it
+   * (`CastMediaSinkServiceImpl::OnNetworksChanged`).
+   */
+  networkChanged(): void;
+  /**
    * Resolves when no channel is being opened and none is waiting to be (a retry waiting out its backoff does not count),
    * so the devices that can be reached are listed. Discovery and Chrome's random delay (up to 5 s) come first, so call it
    * some time after `start()`.
@@ -1020,6 +1026,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
+    networkChanged: () => service.networkChanged(),
     settled: (options) => service.settled(options),
     addSinkByAddress: (device) => service.addSinkByAddress(device),
     configureAccessCode: (settings) => service.configureAccessCode(settings),

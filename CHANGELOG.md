@@ -56,9 +56,16 @@ is frozen and behaves as before for pages; it shares the device list.
   HTTP requests to devices stop entirely). A custom `discovery` turns it off unless `dial` is given.
   - A DIAL sink that is a Cast sink too is removed, as Chrome removes it, and only DIAL discovery adds it back (not
     the Cast sink going away).
-  - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009) and
-    requests have timeouts (Chrome sets none). A DIAL route has no volume or media control, as in Chrome
-    (`BindMediaController` is not implemented there).
+  - Differences from Chrome: requests have timeouts (Chrome sets none). A DIAL route has no volume or media control,
+    as in Chrome (`BindMediaController` is not implemented there).
+  - **A DIAL device is tried as a Cast device**, as Chrome's `CastMediaSinkServiceImpl` does
+    (`OnSinkAddedOrUpdated`, `TryConnectDialDiscoveredSink`, `CreateCastSinkFromDialSink`): when a DIAL sink is new or
+    changed, and on `discoverSinksNow()`, a Cast channel is opened to its address on port 8009. If it opens and the device
+    authenticates, the device is a Cast sink (id the sink's UUID, its friendly name and model, audio and video, or audio
+    only for an audio-only certificate) and the DIAL sink is removed, as above. It is skipped when a Cast sink has that id or that
+    address. Every failed attempt is counted per device; at ten (`kMaxDialSinkFailureCount`) the device is taken for a
+    non-Cast device and not tried again, until it is opened from mDNS or the app calls the new `manager.networkChanged()`
+    (Chrome resets on a network change by itself, through `DiscoveryNetworkMonitor`).
   - DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
     thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see,
     the monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its

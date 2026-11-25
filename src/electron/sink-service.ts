@@ -4,6 +4,7 @@
 import { EventEmitter } from "node:events";
 import type { CastDevice } from "../discovery/index.ts";
 import { isLoopback, isPubliclyRoutable, parseIpBytes } from "../discovery/ip-policy.ts";
+import { processDeviceUuid } from "../dial/parse.ts";
 import type { CastClientLike, DeviceSource } from "./session-service.ts";
 
 /** How a channel is opened (Chrome: `CastSocketOpenParams`, built by `CreateCastSocketOpenParams`). */
@@ -69,6 +70,12 @@ export interface CastSinkServiceOptions extends CastSinkOptions {
   source: DeviceSource;
   createClient(device: CastDevice, params: ChannelParams): CastClientLike;
   /**
+   * The DIAL sinks (devices with `dial` set; their `deviceChanged` says the list changed). A DIAL sink that is new or
+   * changed is tried as a Cast device, as `CastMediaSinkServiceImpl` observes `DialMediaSinkServiceImpl`
+   * (`OnSinkAddedOrUpdated` -> `TryConnectDialDiscoveredSink`).
+   */
+  dial?: DeviceSource;
+  /**
    * Whether something still uses a client the sink no longer lists. A replaced channel is not closed while it is in use
    * (Chrome leaves the old socket alone, so a session on it goes on); call {@link CastSinkService.releaseUnused} when
    * that may have changed. Default: nothing uses it.
@@ -105,7 +112,7 @@ const endpointOf = (device: CastDevice): string => `${device.host}:${device.port
 
 const sameDevice = (a: CastDevice, b: CastDevice): boolean => JSON.stringify(a) === JSON.stringify(b);
 
-type OpenSource = "discovery" | "retry-on-error" | "access-code";
+type OpenSource = "discovery" | "retry-on-error" | "access-code" | "dial";
 
 /** The delays between attempts (`BackoffEntry`'s policy); the number of attempts is the service's `retry.maxAttempts`. */
 export type OpenBackoff = Required<Omit<SinkRetryOptions, "maxAttempts">>;
@@ -122,6 +129,21 @@ export interface OpenSinkOptions {
 interface OpenContext extends OpenSinkOptions {
   done?: (opened: boolean, error?: Error) => void;
 }
+
+/** `CastMediaSinkServiceImpl::kMaxDialSinkFailureCount`: failed attempts on a device found by DIAL before it is given up on. */
+const MAX_DIAL_SINK_FAILURE_COUNT = 10;
+/** `kCastControlPort`, the port `CreateCastSinkFromDialSink` opens the channel to. */
+const CAST_CONTROL_PORT = 8009;
+/** `cast_channel::CastDeviceCapability` bits as the mDNS `ca` record has them. */
+const VIDEO_OUT = 1;
+const AUDIO_OUT = 4;
+
+const sameAddress = (a: string, b: string): boolean => {
+  if (a === b) return true;
+  const x = parseIpBytes(a);
+  const y = parseIpBytes(b);
+  return x !== null && y !== null && x.length === y.length && x.every((byte, i) => byte === y[i]);
+};
 
 const MAX_CONNECT_TIMEOUT_MS = 30_000;
 const MAX_LIVENESS_TIMEOUT_MS = 60_000;
@@ -156,6 +178,14 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   private readonly isClientInUse: (client: CastClientLike) => boolean;
   /** Failed attempts per device since its last success, as `failure_count_map_`. */
   private readonly failureCounts = new Map<string, number>();
+  /**
+   * Failed attempts on devices that DIAL found, by Cast sink id (`dial_sink_failure_count_`): every attempt counts, not
+   * only a run of them; reset when the device is opened from any other source, or when the network changes.
+   */
+  private readonly dialFailureCounts = new Map<string, number>();
+  /** The DIAL sinks as last seen, to tell the new or changed ones (`AddOrUpdateSink` notifies only those). */
+  private dialSeen = new Map<string, string>();
+  private readonly dialSource: DeviceSource | undefined;
   /** Clients of replaced channels that were in use when replaced. */
   private readonly retired = new Set<CastClientLike>();
   private readonly warned = new Set<string>();
@@ -176,6 +206,7 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   private readonly waiting = new Set<(opened: boolean) => void>();
   private disposed = false;
   private readonly onSourceEvent = (): void => this.openChannelsWithRandomizedDelay();
+  private readonly onDialEvent = (): void => this.onDialSinksChanged();
 
   constructor(options: CastSinkServiceOptions) {
     super();
@@ -197,6 +228,8 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     };
     this.source.on("deviceUp", this.onSourceEvent);
     this.source.on("deviceChanged", this.onSourceEvent);
+    this.dialSource = options.dial;
+    this.dialSource?.on("deviceChanged", this.onDialEvent);
     // Chrome opens channels for what discovery already knows when it starts (`Start()` then the first DNS-SD event).
     if (this.source.devices().length > 0) this.openChannelsWithRandomizedDelay();
   }
@@ -273,6 +306,17 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
    */
   discoverSinksNow(): void {
     this.openChannels("discovery");
+    // `CastMediaSinkServiceImpl::DiscoverSinksNow` tries the DIAL sinks again, which recovers a sink lost to a flaky network.
+    for (const sink of this.dialSource?.devices() ?? []) this.tryConnectDialDiscoveredSink(sink);
+  }
+
+  /**
+   * The network the machine is on has changed: devices found by DIAL that were given up on are tried again
+   * (`CastMediaSinkServiceImpl::OnNetworksChanged` clears `dial_sink_failure_count_`). Chrome learns of it from
+   * `DiscoveryNetworkMonitor`; nothing here watches the network, so the app tells the manager.
+   */
+  networkChanged(): void {
+    this.dialFailureCounts.clear();
   }
 
   /**
@@ -327,6 +371,7 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     this.disposed = true;
     this.source.off("deviceUp", this.onSourceEvent);
     this.source.off("deviceChanged", this.onSourceEvent);
+    this.dialSource?.off("deviceChanged", this.onDialEvent);
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     this.reopening = 0;
@@ -363,6 +408,57 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     this.batchTimer.unref?.();
   }
 
+  /** The DIAL sinks new or changed since the last look are tried, as `OnSinkAddedOrUpdated` is called for those only. */
+  private onDialSinksChanged(): void {
+    if (this.disposed || this.dialSource === undefined) return;
+    const now = new Map<string, string>();
+    const fresh: CastDevice[] = [];
+    for (const sink of this.dialSource.devices()) {
+      const key = JSON.stringify(sink);
+      now.set(sink.id, key);
+      if (this.dialSeen.get(sink.id) !== key) fresh.push(sink);
+    }
+    this.dialSeen = now;
+    for (const sink of fresh) this.tryConnectDialDiscoveredSink(sink);
+  }
+
+  /**
+   * `TryConnectDialDiscoveredSink`: a device found by DIAL may be a Cast device too, so a channel is opened to it on port
+   * 8009. Not when it has failed too often to be one, when a Cast sink has its id (the manager hides the DIAL sink, which
+   * is Chrome's removing it from the DIAL service) or when a Cast sink already has its address (a second channel would be
+   * redundant and would tear down a session on the first).
+   */
+  private tryConnectDialDiscoveredSink(dialSink: CastDevice): void {
+    if (this.disposed || dialSink.dial === undefined || !dialSink.id.startsWith("dial:")) return;
+    // `GetCastSinkIdFromDial`: "dial:" becomes "cast:"; ids here carry no prefix, so the bare uuid is the id.
+    const id = dialSink.id.slice("dial:".length);
+    if (this.isProbablyNonCastDevice(id)) return;
+    const address = dialSink.dial.ipAddress;
+    for (const record of this.sinkMap.values()) {
+      if (processDeviceUuid(record.device.id) === id || sameAddress(record.device.host, address)) return;
+    }
+    // `CreateCastSinkFromDialSink`: the DIAL sink's name and model, its address with the Cast control port; the
+    // capabilities are learnt from the opened channel (`onOpened`).
+    this.openChannel({
+      id,
+      name: dialSink.name,
+      model: dialSink.dial.modelName,
+      host: address,
+      addresses: [address],
+      port: CAST_CONTROL_PORT,
+      capabilities: 0,
+      isGroup: false,
+      statusText: "",
+      instanceName: id,
+      txt: {},
+    }, "dial", 0);
+  }
+
+  /** `IsProbablyNonCastDevice`: a device found by DIAL only that a channel could not be opened to ten times over. */
+  private isProbablyNonCastDevice(id: string): boolean {
+    return (this.dialFailureCounts.get(id) ?? 0) >= MAX_DIAL_SINK_FAILURE_COUNT;
+  }
+
   private openChannels(source: OpenSource): void {
     if (this.disposed) return;
     for (const device of this.source.devices()) this.openChannel(device, source, 0);
@@ -387,6 +483,8 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
       ctx.done?.(false);
       return;
     }
+    // Anything but DIAL opening the device shows it to be a Cast device (`OpenChannel`).
+    if (source !== "dial") this.dialFailureCounts.delete(processDeviceUuid(device.id));
     const existing = this.sinkMap.get(device.id);
     // The sink's own endpoint stays while the device still offers it, so an address list reordered by mDNS does not
     // replace a channel that works.
@@ -424,7 +522,7 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
           run.done?.(false);
           return;
         }
-        this.onOpened(device, client);
+        this.onOpened(device, client, source);
         run.done?.(true);
       },
       (err: unknown) => {
@@ -440,6 +538,10 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     if (this.disposed) {
       run.done?.(false);
       return;
+    }
+    if (source === "dial") {
+      const key = processDeviceUuid(device.id);
+      this.dialFailureCounts.set(key, (this.dialFailureCounts.get(key) ?? 0) + 1);
     }
     this.failureCounts.set(device.id, Math.min((this.failureCounts.get(device.id) ?? 0) + 1, MAX_FAILURE_COUNT));
     const error = err instanceof Error ? err : new Error(String(err));
@@ -479,7 +581,14 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   }
 
   /** `OnChannelOpenSucceeded`. */
-  private onOpened(device: CastDevice, client: CastClientLike): void {
+  private onOpened(opened: CastDevice, client: CastClientLike, source: OpenSource): void {
+    let device = opened;
+    // DIAL says nothing of capabilities: a Cast device plays audio, and video unless its certificate restricts it to audio
+    // (`socket->audio_only()`); the icon follows from them.
+    if (source === "dial") {
+      const audioOnly = client.deviceAuth?.policy === "audio_only";
+      device = { ...device, capabilities: AUDIO_OUT | (audioOnly ? 0 : VIDEO_OUT) };
+    }
     const endpoint = endpointOf(device);
     const previous = this.sinkMap.get(device.id);
     const record: SinkRecord = { device: { ...device }, client, endpoint };

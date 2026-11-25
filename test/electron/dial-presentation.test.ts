@@ -82,6 +82,12 @@ async function setup(over: { warm?: boolean; cast?: CastDevice[]; http?: FakeHtt
     sinks: FAST_SINKS,
     createClient: (d) => {
       const c = new FakeClient(d);
+      // The DIAL device is a TV with no Cast channel: the manager tries port 8009 on it (Chrome's promotion of DIAL
+      // sinks, see dial-promotion.test.ts) and nothing answers, so it stays a DIAL sink.
+      if (d.host === DEVICE_IP && d.port === 8009) {
+        c.connectError = new Error("connection refused");
+        return c;
+      }
       clients.push(c);
       return c;
     },

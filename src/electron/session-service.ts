@@ -42,6 +42,8 @@ export interface CastClientLike {
    */
   readonly senderId?: string;
   readonly connected: boolean;
+  /** What device authentication found out, once connected (`CastClient.deviceAuth`); absent when the device was not verified. */
+  readonly deviceAuth?: { readonly policy: string } | undefined;
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
@@ -364,6 +366,7 @@ export class CastSessionService {
     this.sinkService = new CastSinkService({
       ...options.sinks,
       source: options.devices,
+      ...(options.dial !== undefined ? { dial: options.dial.source } : {}),
       createClient: options.createClient,
       isClientInUse: (client) => [...this.sessions.values()].some((rec) => rec.client === client),
     });
@@ -403,6 +406,11 @@ export class CastSessionService {
   /** The devices as a {@link DeviceSource}: what `devices()` lists, with the events of that list changing. */
   deviceSource(): DeviceSource {
     return this.sinkService;
+  }
+
+  /** The network changed: DIAL devices given up on as not Cast devices are tried again. */
+  networkChanged(): void {
+    this.sinkService.networkChanged();
   }
 
   /**
