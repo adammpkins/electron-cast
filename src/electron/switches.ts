@@ -85,6 +85,78 @@ export function allowAllSitesToInitiateMirroring(commandLine: CommandLineLike | 
   return featureEnabled(commandLine, "AllowAllSitesToInitiateMirroring", false);
 }
 
+/**
+ * The parameters `--enable-features=Feature:name/value/name/value` gives `feature`, as `FeatureList::ParseEnableFeatureString`
+ * and `AssociateFieldTrialParamsFromString` read them (values are URL-escaped; a comma ends the feature, so it is written
+ * `%2C`). Empty when the feature has no parameters, is not named in `--enable-features`, or is also named in
+ * `--disable-features` (the disable override is registered first and the first override of a feature wins, so its field
+ * trial, which carries the parameters, is never associated), and for a malformed entry (a name without a value, or a second
+ * `:`), which Chrome rejects whole. The first entry naming the feature wins, as `FeatureList::RegisterOverride` keeps the
+ * first.
+ */
+export function featureParams(commandLine: CommandLineLike | undefined, feature: string): ReadonlyMap<string, string> {
+  const none = new Map<string, string>();
+  if (commandLine === undefined || !commandLine.hasSwitch("enable-features") || featureNames(commandLine, "disable-features").has(feature)) return none;
+  const decode = (text: string): string => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return text;
+    }
+  };
+  for (const item of commandLine.getSwitchValue("enable-features").split(",")) {
+    const entry = item.trim();
+    if (entry === "") continue;
+    const colons = entry.split(":");
+    const name = colons[0]!.split(".")[0]!.split("<")[0]!.replace(/^[*!]/, "").trim();
+    if (name !== feature) continue;
+    if (colons.length !== 2) return none;
+    const parts = colons[1]!.split("/").map((p) => p.trim());
+    if (parts.length % 2 !== 0) return none;
+    const params = new Map<string, string>();
+    for (let i = 0; i < parts.length; i += 2) params.set(decode(parts[i]!), decode(parts[i + 1]!));
+    return params;
+  }
+  return none;
+}
+
+/** `mirroring::features::CongestionSignal`, named by `kCongestionSignalOptions`. */
+export type CongestionSignal = "before_or_after_encoding" | "before_encoding" | "after_encoding";
+const CONGESTION_SIGNALS: readonly CongestionSignal[] = ["before_or_after_encoding", "before_encoding", "after_encoding"];
+
+/**
+ * `kCastStreamingCongestionSignal` (components/mirroring/service/mirroring_features.cc), the `congestion_signal` parameter of
+ * `kCastStreamingGradualBandwidthBackoff`: which video frame drops tell `OpenscreenSessionHost::UpdateBandwidthEstimate`
+ * that the network is congested. Given as `--enable-features=CastStreamingGradualBandwidthBackoff:congestion_signal/before_encoding`.
+ * Anything else, an empty value included, is the default `before_or_after_encoding`; a non-empty value that names no option
+ * is reported to `warn`, as `GetFieldTrialParamByFeatureAsEnum` logs it.
+ */
+export function castStreamingCongestionSignal(commandLine: CommandLineLike | undefined, warn: (message: string) => void = () => {}): CongestionSignal {
+  const value = featureParams(commandLine, "CastStreamingGradualBandwidthBackoff").get("congestion_signal");
+  if (value === undefined || value === "") return "before_or_after_encoding";
+  const found = CONGESTION_SIGNALS.find((s) => s === value);
+  if (found !== undefined) return found;
+  warn(`Failed to parse field trial param congestion_signal with string value ${value} under feature CastStreamingGradualBandwidthBackoff into an enum. Falling back to default value of 0`);
+  return "before_or_after_encoding";
+}
+
+/**
+ * `media::kCastStreamingPerformanceOverlay` (media/base/media_switches.cc), disabled by default: `VideoSender` draws the
+ * performance metrics overlay on each frame before it is encoded.
+ */
+export function castStreamingPerformanceOverlay(commandLine: CommandLineLike | undefined): boolean {
+  return featureEnabled(commandLine, "CastStreamingPerformanceOverlay", false);
+}
+
+/**
+ * `media::kPulseaudioLoopbackForCast` (media/base/media_switches.cc), disabled by default and read on Linux only
+ * (`media_router::IsSystemAudioCaptureSupported`, `DesktopMediaPickerController`): whether Cast offers system audio with a
+ * desktop capture. Elsewhere the OS decides and the answer is yes.
+ */
+export function systemAudioCaptureSupported(commandLine: CommandLineLike | undefined, platform: string = process.platform): boolean {
+  return platform !== "linux" || featureEnabled(commandLine, "PulseaudioLoopbackForCast", false);
+}
+
 /** `base::StringToInt`: an optional sign and digits only, no whitespace, within `int`. */
 function stringToInt(text: string): number | undefined {
   if (!/^[+-]?\d+$/.test(text)) return undefined;

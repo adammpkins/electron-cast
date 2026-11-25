@@ -471,7 +471,7 @@ class ObserverSet<T> {
  * Sinks observation over a device source: `registerMediaSinksObserver` plus the source subscription, which is made
  * while at least one observer is registered. A change that leaves the (filtered) list as it was is not reported.
  */
-export function createSinksObservers(source: DeviceSource, availability?: AppAvailability, status?: MediaSinkServiceStatus): {
+export function createSinksObservers(source: DeviceSource, availability?: AppAvailability, status?: MediaSinkServiceStatus, options: { systemAudioCapture?: boolean } = {}): {
   register(observer: MediaSinksObserver, query?: MediaSinksQuery, signal?: AbortSignal, eligible?: (d: CastDevice) => boolean): () => void;
   dispose(): void;
 } {
@@ -498,7 +498,7 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       const mirrorSource =
         query?.castMode === undefined
           ? undefined
-          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(0) : desktopMediaSource("any", query.withAudio === true));
+          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(0) : desktopMediaSource("any", query.withAudio === true && options.systemAudioCapture !== false));
       const matchesBase = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
         && (mirrorSource === undefined || (d.dial === undefined && sinkSupportsSource(mirrorSource, d.capabilities)));
       const matches = (d: CastDevice): boolean => matchesBase(d)

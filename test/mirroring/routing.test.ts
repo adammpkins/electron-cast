@@ -98,13 +98,14 @@ function device(capabilities: number): CastDevice {
   return { id: "dev-1", name: "Fake TV", model: "Fake", host: "127.0.0.1", addresses: ["127.0.0.1"], port: 8009, capabilities, isGroup: false, statusText: "", instanceName: "fake", txt: {} };
 }
 
-async function startManager(capabilities: number) {
+async function startManager(capabilities: number, extra: { systemAudioCapture?: boolean } = {}) {
   const receiver = await FakeReceiver.create({ verifyBody: true });
   const client = new FakeClient();
   client.receiver = receiver;
   const manager = new MirroringManager({
     findDevice: (id) => (id === "dev-1" ? device(capabilities) : undefined),
     createClient: () => client,
+    ...extra,
     createService: createMirroringServiceFactory({
       createBackend: () => new FakeBackend(() => performance.now()),
       encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(["vp8"]) }),
@@ -219,6 +220,17 @@ test("a frozen route stops sending video on its last frame while audio goes on, 
     assert.equal(h.receiver.lastOffer, offer, "no renegotiation");
     assert.equal(h.receiver.stats.invalidFrames, 0);
     assert.equal(h.manager.routes()[0]!.webContentsId, 6);
+  } finally {
+    h.manager.dispose();
+    h.receiver.close();
+  }
+});
+
+test("without system audio capture (Linux without PulseaudioLoopbackForCast) withAudio is ignored, as Chrome's picker offers no audio", async () => {
+  const h = await startManager(AV, { systemAudioCapture: false });
+  try {
+    const route = await h.manager.startMirroring("dev-1", { castMode: "desktop_mirror", desktopSourceId: "screen:0:0", withAudio: true });
+    assert.ok(!route.mediaSource.includes("with_audio"), route.mediaSource);
   } finally {
     h.manager.dispose();
     h.receiver.close();

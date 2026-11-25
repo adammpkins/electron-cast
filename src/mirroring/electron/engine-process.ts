@@ -9,7 +9,7 @@
 import { createEncodingSupport } from "../encoding-support.ts";
 import { createMirroringServiceFactory } from "../engine.ts";
 import type { MirroringService } from "../mirroring-activity.ts";
-import type { SessionParameters } from "../session-host.ts";
+import type { MirroringFeatures, SessionParameters } from "../session-host.ts";
 import type { MirroringStats } from "../stats/statistics.ts";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { AgentPort, AgentToEngine, CaptureSource, EngineToAgent } from "./agent-protocol.ts";
@@ -29,6 +29,10 @@ export type ToEngine =
       /** Chrome's codec switches and features as the app's command line sets them. */
       encodingPolicy: { hardwareFeatures: VideoCodec[]; softwareFeatures: VideoCodec[]; forceEnable: VideoCodec[]; forceDisable: VideoCodec[] };
       env?: Record<string, string | undefined>;
+      /** `CastMirroringServiceHost::GetCaptureResolutionConstraint()`. */
+      maxResolution?: { width: number; height: number };
+      /** The Chrome features read from the app's command line (`mirroring_features.cc`, `media_switches.cc`). */
+      features?: MirroringFeatures;
     }
   | { type: "message"; namespace: string; json: string }
   /** `SwitchMirroringSourceTab`: `source` is the new tab's capture id. */
@@ -95,6 +99,8 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
           },
         ),
         env: data.env,
+        maxResolution: data.maxResolution,
+        features: data.features,
       });
       service = factory(
         data.params,

@@ -110,6 +110,19 @@ function startAgent() {
       }
     },
     VideoEncoder: FakeEncoder,
+    // A frame made from a buffer, as the performance overlay makes one: the encoder gets it, so a test reads its pixels.
+    VideoFrame: class {
+      data: Uint8Array;
+      init: Record<string, any>;
+      constructor(data: Uint8Array, init: Record<string, any>) { this.data = data; this.init = init; }
+      get format() { return this.init.format; }
+      get timestamp() { return this.init.timestamp; }
+      get duration() { return this.init.duration; }
+      get displayWidth() { return this.init.displayWidth; }
+      get displayHeight() { return this.init.displayHeight; }
+      get visibleRect() { return { width: this.init.codedWidth, height: this.init.codedHeight }; }
+      close() {}
+    },
     AudioEncoder: class { static async isConfigSupported() { return { supported: true }; } state = "configured"; configure() {} encode() {} close() {} },
     ArrayBuffer, Uint8Array, Float32Array, Map, String, Math, Promise,
   });
@@ -830,4 +843,41 @@ test("port backend: a wake is asked of the agent and runs once when the agent an
   backend.stopAll();
   backend.requestWake(1, () => ran.push("c"));
   assert.equal(port.out.filter((m) => m.t === "wake").length, 2);
+});
+
+test("agent: the performance overlay is drawn on a copy of the luma plane, right-aligned in the bottom lines, and only when asked for", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  await a.capture(0, { luma: () => 100, duration: 33_333 });
+  await a.capture(33_000, { luma: () => 100, duration: 33_333 });
+  const [first, second] = a.rtps() as [number, number];
+  await a.command({ t: "encode", rtp: first });
+  await a.command({ t: "encode", rtp: second, overlay: { targetPlayoutDelayMs: 200, lowLatencyMode: false, targetBitrate: 5_000_000, framesAgo: 1, encoderUtilization: -1, lossiness: -1 } });
+  const encodes = a.encoders[0]!.encodes;
+  assert.equal((encodes[0]!.frame as { data?: unknown }).data, undefined, "without the overlay the captured frame is encoded as it is");
+  const drawn = encodes[1]!.frame as unknown as { data: Uint8Array; init: { codedWidth: number; codedHeight: number; displayWidth: number } };
+  assert.equal(drawn.init.codedWidth, 640);
+  assert.equal(drawn.init.displayWidth, 640);
+  let changed = 0, firstRow = Infinity, lastCol = -1;
+  for (let y = 0; y < 360; y++) {
+    for (let x = 0; x < 640; x++) {
+      const v = drawn.data[y * 640 + x]!;
+      if (v === 100) continue;
+      assert.equal(v, 52, "luma 100 diverges down by 48");
+      changed++; firstRow = Math.min(firstRow, y); lastCol = Math.max(lastCol, x);
+    }
+  }
+  assert.ok(changed > 0);
+  assert.ok(firstRow >= 360 - 3 * 28, "three lines of 28 rows at the bottom");
+  assert.ok(lastCol < 640 - 8, "the last glyph ends 9 pixels from the right edge");
+  // The chroma planes are copied as they were.
+  assert.ok(drawn.data.subarray(640 * 360).every((v) => v === 0));
+});
+
+test("agent: the overlay leaves frames it cannot draw on as they are", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  await a.capture(0, { luma: () => 100, format: "BGRA" });
+  await a.command({ t: "encode", rtp: a.rtps()[0]!, overlay: { targetPlayoutDelayMs: 200, lowLatencyMode: true, targetBitrate: 1000, framesAgo: 1, encoderUtilization: 0.5, lossiness: 0 } });
+  assert.equal((a.encoders[0]!.encodes[0]!.frame as { data?: unknown }).data, undefined);
 });

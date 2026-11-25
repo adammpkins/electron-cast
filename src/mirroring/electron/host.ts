@@ -15,9 +15,9 @@ import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { MirroringStats } from "../stats/statistics.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
-import { castDesktopMirroringKeepLocalAudio } from "../../electron/switches.ts";
+import { castDesktopMirroringKeepLocalAudio, castStreamingCongestionSignal, castStreamingPerformanceOverlay } from "../../electron/switches.ts";
 import { encodingPolicyFromCommandLine, hardwareCodecsToProbe, softwareCodecsToProbe, type CommandLineLike } from "../encoding-support.ts";
-import { getCodecParameterString } from "../mirror-settings.ts";
+import { getCaptureResolutionConstraint, getCodecParameterString, type PrimaryScreenLike } from "../mirror-settings.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
 import type { CaptureSource } from "./agent-protocol.ts";
 import { AGENT_PRELOAD_SOURCE, AGENT_SOURCE } from "./agent-source.ts";
@@ -72,6 +72,12 @@ export interface ElectronMirroringApi {
    * Chrome's defaults apply.
    */
   app?: { commandLine: CommandLineLike };
+  /**
+   * `screen`: its primary display caps the capture resolution (`CastMirroringServiceHost::GetCaptureResolutionConstraint`,
+   * which asks `display::Screen::GetPrimaryDisplay()` for tab and desktop mirroring alike). Without it the capture is
+   * limited to 1920x1080, as in Chrome when it cannot get the screen.
+   */
+  screen?: PrimaryScreenLike;
   /**
    * `systemPreferences`: `getMediaAccessStatus("screen")` is how macOS's Screen Recording permission is read, which Chrome
    * checks before it casts the screen (`MediaRouterUI::CreateRoute`, `ui::IsScreenCaptureAllowed`). Without it the
@@ -249,11 +255,13 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         // fallback). Hardware is asked about at the session's maximum resolution, as Chrome does; software, VP8 first and
         // anything else only when asked for, as before.
         const macBaseline = platform === "darwin";
+        // CastMirroringServiceHost::Start passes GetCaptureResolutionConstraint() to the Mirroring Service, once per session.
+        const maxResolution = getCaptureResolutionConstraint(e.screen);
         const probes: { codec: VideoCodec; hardware: boolean; string: string; width: number; height: number }[] = [];
         // Read at every session, as Chrome reads its command line and features whenever it negotiates.
         const policy = encodingPolicyFromCommandLine(e.app?.commandLine, platform);
         for (const codec of hardwareCodecsToProbe(policy)) {
-          probes.push({ codec, hardware: true, string: probeString(codec, 1920, 1080, macBaseline), width: 1920, height: 1080 });
+          probes.push({ codec, hardware: true, string: probeString(codec, maxResolution.width, maxResolution.height, macBaseline), width: maxResolution.width, height: maxResolution.height });
         }
         for (const codec of softwareCodecsToProbe(policy)) {
           probes.push({ codec, hardware: false, string: probeString(codec, SOFTWARE_PROBE_SIZE.width, SOFTWARE_PROBE_SIZE.height, macBaseline), ...SOFTWARE_PROBE_SIZE });
@@ -306,6 +314,12 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
               forceEnable: [...policy.forceEnable], forceDisable: [...policy.forceDisable],
             },
             env: options.env,
+            maxResolution,
+            // Features are read at every session, like the encoding policy.
+            features: {
+              congestionSignal: castStreamingCongestionSignal(e.app?.commandLine, (message) => log("info", message)),
+              performanceOverlay: castStreamingPerformanceOverlay(e.app?.commandLine),
+            },
           },
           [channelMain.port2],
         );

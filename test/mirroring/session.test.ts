@@ -183,3 +183,35 @@ test("an error response to GET_CAPABILITIES leaves the session running", async (
   assert.ok(h.log.some((m) => m.includes("Remoting is disabled for this session")));
   h.close();
 });
+
+test("the capture resolution constraint caps the capture and the codec strings follow it", async () => {
+  const h = await startHarness({ receiver: {}, maxResolution: { width: 1280, height: 720 } });
+  try {
+    await sleep(200);
+    assert.equal(h.backend.videoCaptureStarts[0]?.width, 1280);
+    assert.equal(h.backend.videoCaptureStarts[0]?.height, 720);
+  } finally {
+    h.close();
+  }
+});
+
+test("congestion_signal picks which frame drops back the bandwidth off", async () => {
+  const drive = async (congestionSignal: "before_encoding" | "after_encoding" | "before_or_after_encoding", field: "framesDroppedBeforeEncoding" | "framesDroppedAfterEncoding"): Promise<boolean> => {
+    const h = await startHarness({ receiver: {}, features: { congestionSignal } });
+    try {
+      await sleep(100);
+      h.host.updateBandwidthEstimate(1_000_000);
+      const before = h.host.currentUsableBandwidth;
+      (h.host.video as unknown as Record<string, number>)[field]! += 1;
+      h.host.updateBandwidthEstimate(1_000_000);
+      return h.host.currentUsableBandwidth < before;
+    } finally {
+      h.close();
+    }
+  };
+  assert.equal(await drive("before_encoding", "framesDroppedBeforeEncoding"), true);
+  assert.equal(await drive("before_encoding", "framesDroppedAfterEncoding"), false);
+  assert.equal(await drive("after_encoding", "framesDroppedAfterEncoding"), true);
+  assert.equal(await drive("after_encoding", "framesDroppedBeforeEncoding"), false);
+  assert.equal(await drive("before_or_after_encoding", "framesDroppedAfterEncoding"), true);
+});

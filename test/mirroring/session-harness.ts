@@ -1,6 +1,6 @@
 import { CAST_WEBRTC_NAMESPACE } from "../../src/mirroring/protocol/constants.ts";
 import { createEncodingSupport } from "../../src/mirroring/encoding-support.ts";
-import { OpenscreenSessionHost, type MirroringError, type SessionType } from "../../src/mirroring/session-host.ts";
+import { OpenscreenSessionHost, type MirroringError, type SessionHostDeps, type SessionType } from "../../src/mirroring/session-host.ts";
 import { SenderPacketRouter } from "../../src/mirroring/sender/packet-router.ts";
 import { UdpEnvironment } from "../../src/mirroring/transport/udp-environment.ts";
 import type { VideoCodec } from "../../src/mirroring/protocol/constants.ts";
@@ -36,6 +36,8 @@ export async function startHarness(
     enableRtcpReporting?: boolean;
     /** `SessionParameters::target_playout_delay`. */
     targetPlayoutDelayMs?: number;
+    maxResolution?: { width: number; height: number };
+    features?: SessionHostDeps["features"];
   } = {},
 ): Promise<Harness> {
   const receiver = await FakeReceiver.create(opts.receiver);
@@ -59,6 +61,8 @@ export async function startHarness(
       // A fixed platform, so the offer (Baseline H.264 on a Mac, ToProfile) does not depend on the machine running the tests.
       platform: opts.platform ?? "linux",
       env: opts.env ?? {},
+      maxResolution: opts.maxResolution,
+      features: opts.features,
       messagePort: { postMessage: (_dest, ns, message) => setImmediate(() => receiver.onControlMessage(ns, message)) },
       observer: {
         onError: (error, message) => errors.push({ error, message }),

@@ -31,7 +31,7 @@ import { MediaRouterLogger } from "./logger.ts";
 import { CastMessageLog } from "./message-logging.ts";
 import {
   castAllowAllIpsFeature, castMirroringPlayoutDelayMs, developerCertificates, fixedCastDevices, mediaRouterFeatureEnabled,
-  showCastPermissionRejectedError, castMessageLogging, type CommandLineLike,
+  showCastPermissionRejectedError, castMessageLogging, systemAudioCaptureSupported, type CommandLineLike,
 } from "./switches.ts";
 
 /**
@@ -320,6 +320,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     ?? (options.mirroring !== undefined && "electron" in options.mirroring ? options.mirroring.electron.app?.commandLine : undefined);
   // media_router::MediaRouterEnabled: the router "does not support dynamic enabling/disabling"; it is read once
   const routerEnabled = mediaRouterFeatureEnabled(commandLine);
+  // IsSystemAudioCaptureSupported: on Linux Cast offers a desktop capture's audio only with PulseaudioLoopbackForCast
+  const systemAudioCapture = systemAudioCaptureSupported(commandLine);
   const logger = new MediaRouterLogger();
   // IsCastMessageLoggingEnabled: off unless --enable-features=CastMessageLogging; read once, with the other features
   const messageLog = castMessageLogging(commandLine) ? new CastMessageLog(logger) : undefined;
@@ -1074,6 +1076,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       },
       switchToFlingingIfPossible: (wcId) => void presentation?.switchToFlingingIfPossible(wcId),
       commandLine,
+      systemAudioCapture,
       issues,
       ...(castMirroringPlayoutDelayMs(commandLine) !== undefined ? { defaultTargetPlayoutDelayMs: castMirroringPlayoutDelayMs(commandLine)! } : {}),
       log: (level, message) => {
@@ -1147,7 +1150,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     }),
-  }, sinkStatus), {
+  }, sinkStatus, { systemAudioCapture }), {
     mediaRoutes: routes,
     observeSessions: (l) => {
       const off = service.observeSessions(l);

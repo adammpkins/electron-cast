@@ -82,6 +82,11 @@ export interface MirroringManagerOptions {
   switchToFlingingIfPossible?(webContentsId: number): void;
   /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
   commandLine?: { hasSwitch(name: string): boolean };
+  /**
+   * Whether a desktop capture can carry system audio (`media_router::IsSystemAudioCaptureSupported`: on Linux only with
+   * `PulseaudioLoopbackForCast`). Without it `withAudio` is ignored, as Chrome's picker offers no audio then. Default true.
+   */
+  systemAudioCapture?: boolean;
   log?(level: "info" | "error", message: string): void;
   /** Where Chrome raises its issues for a mirroring route (`CastActivityManager`, `MediaRouterUI`); none without it. */
   issues?: RouterIssues;
@@ -152,7 +157,11 @@ export class MirroringManager {
     const mediaSourceId = this.mediaSourceFor(options);
     const source = mirroringSourceFor(mediaSourceId)!;
     if (options.targetPlayoutDelayMs !== undefined) source.targetPlayoutDelayMs = options.targetPlayoutDelayMs;
-    return this.launchRoute(sinkId, source, options.webContentsId, { castMode: options.castMode, withAudio: options.withAudio === true });
+    return this.launchRoute(sinkId, source, options.webContentsId, { castMode: options.castMode, withAudio: this.withAudio(options) });
+  }
+
+  private withAudio(options: StartMirroringOptions): boolean {
+    return options.withAudio === true && this.options.systemAudioCapture !== false;
   }
 
   /**
@@ -391,7 +400,7 @@ export class MirroringManager {
     }
     if (options.castMode === "desktop_mirror") {
       if (typeof options.desktopSourceId !== "string" || options.desktopSourceId === "") throw new TypeError("desktop_mirror needs desktopSourceId");
-      return desktopMediaSource(options.desktopSourceId, options.withAudio === true);
+      return desktopMediaSource(options.desktopSourceId, this.withAudio(options));
     }
     throw new TypeError(`unknown castMode ${String(options.castMode)}`);
   }

@@ -16,6 +16,20 @@
   entry's keys sorted as Chrome writes them.
 - **A `castMode: "tab_mirror"` sinks query listed every device**, DIAL sinks and speakers without audio out included: it asked
   for a tab source Chrome's `IsTabMirroringSource` does not accept. It now lists the Cast sinks that can run a streaming app.
+- **The capture resolution is capped at the primary screen, as Chrome caps it** (`CastMirroringServiceHost::GetCaptureResolutionConstraint`
+  and `GetClampedResolution`): the screen's size in pixels, in landscape, limited to 1920x1080 and rounded down to a
+  whole step of 160x90. A 1366x768 laptop screen mirrors at 1280x720 instead of asking for 1080p. Pass Electron's `screen`
+  in `mirroring.electron`; without it the capture is limited to 1920x1080 as before, which is also what Chrome does when it
+  cannot get the screen.
+- **`--enable-features=CastStreamingGradualBandwidthBackoff:congestion_signal/before_encoding` (or `after_encoding`)**
+  chooses which video frame drops count as congestion, as Chrome's feature parameter does. The default
+  (`before_or_after_encoding`) is what the library always did. `--enable-features` now understands Chrome's
+  `Feature:name/value` parameter syntax.
+- **`--enable-features=CastStreamingPerformanceOverlay`** draws Chrome's performance metrics overlay (three lines of digits
+  at the bottom of each frame: frames in the encoder, encoder utilization and lossiness; capture time, playout delay, low
+  latency mode and target bitrate; frame duration, size and timestamp) on the frames sent to the receiver. Off by default.
+- **Desktop audio on Linux needs `--enable-features=PulseaudioLoopbackForCast`**, as in Chrome: without it `withAudio` is
+  ignored for a desktop capture and the sinks query does not ask for audio. Windows and macOS are unchanged.
 
 ### Fixed
 
