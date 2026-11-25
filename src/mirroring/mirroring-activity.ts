@@ -35,8 +35,8 @@ export interface MirroringClient {
  * says about scaling, unless the app was started with `--disable-cast-letterboxing`. Chrome marks it for removal
  * (crbug.com/41363512).
  */
-export function shouldForceLetterboxing(modelName: string, argv: readonly string[] = process.argv): boolean {
-  if (argv.includes("--disable-cast-letterboxing")) return false;
+export function shouldForceLetterboxing(modelName: string, commandLine?: { hasSwitch(name: string): boolean }): boolean {
+  if (commandLine?.hasSwitch("disable-cast-letterboxing") === true) return false;
   return modelName.includes("Nest Hub");
 }
 
@@ -78,6 +78,8 @@ export interface MirroringActivityOptions {
   onStop(): void;
   /** A change of route state (description, launching to mirroring). */
   onChange(): void;
+  /** The app's command line, where `--disable-cast-letterboxing` is looked for. */
+  commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
 }
 
@@ -94,6 +96,7 @@ export class MirroringActivity {
   private readonly createService: MirroringServiceFactory;
   private readonly onStop: () => void;
   private readonly onChange: () => void;
+  private readonly commandLine: { hasSwitch(name: string): boolean } | undefined;
   private readonly log: (level: "info" | "error", message: string) => void;
   private service: MirroringService | undefined;
   private stopping = false;
@@ -105,6 +108,7 @@ export class MirroringActivity {
     this.createService = options.createService;
     this.onStop = options.onStop;
     this.onChange = options.onChange;
+    this.commandLine = options.commandLine;
     // One id for what is sent and what is accepted, as in Chrome: both are `message_handler_->source_id()`. A receiver
     // addresses its replies to the source id of the message it answers, so a second id would drop every ANSWER.
     this.sourceId = options.client.senderId;
@@ -170,7 +174,7 @@ export class MirroringActivity {
       sourceId: this.sourceId,
       destinationId,
       targetPlayoutDelayMs: this.source.targetPlayoutDelayMs,
-      forceLetterboxing: shouldForceLetterboxing(this.sink.model),
+      forceLetterboxing: shouldForceLetterboxing(this.sink.model, this.commandLine),
     };
     this.service = this.createService(params, observer, channel, this.source);
   }

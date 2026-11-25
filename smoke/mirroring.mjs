@@ -4,8 +4,9 @@
 //
 // The video codec is whatever Chrome's rules give this machine: H.264 when WebCodecs has a hardware H.264 encoder here
 // (`prefer-hardware`), VP8 in software otherwise. The `hardware: "off"` variant uses Chrome's own
-// `--cast-streaming-force-disable-hardware-*` switches to get the software path on such a machine.
-import { BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
+// `--cast-streaming-force-disable-hardware-*` switches, appended to `app.commandLine` as an app would, to get the
+// software path on such a machine; `hardware: "vp9"` also makes the receiver ask for VP9, which is then software VP9.
+import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createCastManager } from "electron-cast/main";
@@ -29,12 +30,17 @@ const LOOPBACK_TV = {
 export async function runMirroringScenario({ pass, fail, engineModulePath, mode = "tab", hardware = "default", content = [640, 360] }) {
   // Every line says which scenario it belongs to, so a failure in a run of several is not ambiguous.
   const shape = content[0] * 9 === content[1] * 16 || mode === "desktop" ? "" : `, ${content[0]}x${content[1]} page`;
-  const name = `${mode}${hardware === "off" ? ", software" : ""}${shape}`;
+  const name = `${mode}${hardware === "off" ? ", software" : hardware === "vp9" ? ", software VP9" : ""}${shape}`;
+  // Chrome's switches go on the app's own command line, which the mirroring host reads at each session.
+  const switches = hardware === "default" ? [] : ["h264", "vp8", "vp9"].map((c) => `cast-streaming-force-disable-hardware-${c}`);
+  for (const s of switches) app.commandLine.appendSwitch(s);
   try {
     await runScenario({ pass: (m) => pass(`[${name}] ${m}`), fail: (e) => fail(e), engineModulePath, mode, hardware, content, name });
   } catch (err) {
     if (err instanceof Error) err.message = `[${name}] ${err.message}`;
     throw err;
+  } finally {
+    for (const s of switches) app.commandLine.removeSwitch(s);
   }
 }
 
@@ -52,7 +58,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     mover.showInactive();
   }
   // H.264 first: the receiver takes it when it is offered, which is when this machine has a hardware encoder.
-  const receiver = await FakeReceiver.create({ verifyBody: false, videoPreference: ["h264", "vp8"] });
+  const receiver = await FakeReceiver.create({ verifyBody: false, videoPreference: hardware === "vp9" ? ["vp9"] : ["h264", "vp8"] });
   const calls = [];
   let encodersLine = "";
   const client = new (class extends EventEmitter {
@@ -80,10 +86,8 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   const cast = createCastManager({
     ipcMain, discovery, createClient: () => client, selectDevice: async () => null, presentation: false, channel: "electron-cast-mirroring-smoke",
     mirroring: {
-      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents },
+      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents, app },
       engineModulePath,
-      // Chrome's switches, as the app's command line would carry them.
-      argv: hardware === "off" ? ["--cast-streaming-force-disable-hardware-h264", "--cast-streaming-force-disable-hardware-vp8", "--cast-streaming-force-disable-hardware-vp9"] : [],
       log: (l, m) => { if (m.startsWith("encoders:")) encodersLine = m; console.log(`smoke: [${name}] mirroring ${l}: ${m}`); },
     },
   });
@@ -116,17 +120,23 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   await new Promise((r) => setTimeout(r, 3000));
   const seconds = ((s.lastFrameAt ?? 0) - (s.firstFrameAt ?? 0)) / 1000;
   const codec = receiver.selectedVideoCodec;
-  const label = codec === "h264" ? "H.264" : "VP8";
+  const label = codec === "h264" ? "H.264" : codec === "vp9" ? "VP9" : "VP8";
   // The probe line names what the machine's WebCodecs found: hardware [...], software [...].
   const hardwareFound = /hardware \[([^\]]*)\]/.exec(encodersLine)?.[1] ?? "";
-  const expected = hardware !== "off" && hardwareFound.split(", ").includes("h264") ? "h264" : "vp8";
+  const expected = hardware === "vp9" ? "vp9" : hardware !== "off" && hardwareFound.split(", ").includes("h264") ? "h264" : "vp8";
   console.log(`smoke: [${name}] encoders found: ${encodersLine.replace(/^encoders: /, "")}; the receiver selected ${codec}`);
   console.log(`smoke: [${name}] mirroring video ${s.videoFrames} frames (${s.validVideoFrames} valid ${label}, ${s.videoKeyFrames} key, ${(s.videoFrames / seconds).toFixed(1)} fps, ${Math.round((s.videoBytes * 8) / seconds / 1000)} kbps, sizes ${[...s.videoSizes].join(" ")}), audio ${s.audioFrames} frames (${s.validAudioFrames} valid Opus, ${Math.round(s.audioBytes / Math.max(1, s.audioFrames))} B avg), invalid ${s.invalidFrames}`);
   assert.equal(codec, expected, `the encoders found (${encodersLine}) should give ${expected}`);
+  if (hardware === "vp9") {
+    // Software VP9 at 1080p30 on this machine: the receiver must get a steady stream, not a trickle.
+    const fps = s.videoFrames / seconds;
+    assert.ok(fps >= 20, `software VP9 delivered only ${fps.toFixed(1)} fps at ${[...s.videoSizes].join(" ")}`);
+  }
   assert.ok(s.validVideoFrames >= 30, `only ${s.validVideoFrames} valid ${label} frames reached the receiver`);
   // Sender-side letterboxing (resolution_change_policy fixed_aspect_ratio, which a receiver that cannot scale gets): the
   // stream keeps the aspect ratio of the maximum, 16:9, whatever shape the page or screen is.
-  assert.ok(s.videoSizes.size > 0, "no key frame told its size");
+  // The fake receiver reads the picture size from VP8 and H.264 key frames only.
+  if (codec !== "vp9") assert.ok(s.videoSizes.size > 0, "no key frame told its size");
   for (const size of s.videoSizes) {
     const [w, h] = size.split("x").map(Number);
     assert.ok(Math.abs(w / h - 16 / 9) < 0.02, `a ${size} frame is not 16:9`);

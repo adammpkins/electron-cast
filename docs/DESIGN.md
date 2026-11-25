@@ -416,8 +416,8 @@ Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) is a
 - **Hardware first.** A codec is offered in hardware when the encoder exists, its feature or switch allows it
   (`IsHardwareEnabled`: H.264, VP8 and VP9 by default; HEVC and AV1 only with
   `--cast-streaming-force-enable-hardware-hevc` / `-av1`; `--cast-streaming-force-disable-hardware-<codec>` wins) and
-  it is not on the hardware deny list. Software codecs (VP8; VP9 when the app asks, `extraVideoCodecs: ["vp9"]`) are
-  offered only when no hardware codec was (`kCastStreamingOfferHardwareFirst`, on by default), or in the one fallback
+  it is not on the hardware deny list. Software codecs (VP8 and VP9, `IsSoftwareEnabled`; AV1 only with
+  `--enable-features=CastStreamingAv1`) are offered only when no hardware codec was (`kCastStreamingOfferHardwareFirst`, on by default), or in the one fallback
   offer after the receiver selected no stream (`OnError`, `offering_fallback_codecs_`). The order is
   `kSupportedVideoCodecs` (HEVC, AV1, VP9, H.264, VP8). Chrome has no software H.264 encoder in the list, and no
   model-based codec deny list turned up in `openscreen_session_host.cc`, `mirroring_activity.cc` or openscreen's
@@ -480,12 +480,14 @@ machine in the tests is off Windows). `fixed_resolution` is only chosen when the
 - A receiver that answers a hardware-first offer with audio only (it took no video codec) gets no fallback offer: the
   fallback is sent on `NoStreamSelected`, which needs the ANSWER to select nothing at all. This is Chrome's behaviour.
 - Chrome sends the fallback offer after any `NoStreamSelected`, with or without a hardware codec in the first offer.
-- `kCastStreamingForceEnableHardware*` and `kCastStreamingForceDisableHardware*` are Chrome command-line switches;
-  they are read from the main process's `process.argv` (or `argv` in the mirroring options, for tests and embedders),
-  and `--disable-cast-letterboxing` from `process.argv`. They are Chrome's switches, not new API apart from that option.
+- `kCastStreamingForceEnableHardware*`, `kCastStreamingForceDisableHardware*`, `--disable-cast-letterboxing` and the
+  `CastStreaming*` features (`--enable-features` / `--disable-features`: Vp8, Vp9, Av1, HardwareHevc, Win/MacHardwareH264)
+  are read from Electron's `app.commandLine` (`hasSwitch`, `getSwitchValue`), as Chrome reads `base::CommandLine`, so
+  switches the app appended with `app.commandLine.appendSwitch` count too. The app's `electron` object carries `app`
+  already; there is no option for it. Only these features are read, not the whole `base::FeatureList` (field trials,
+  `::` params); a feature named in both lists is disabled, as there.
 - `PortBackend` restarts nothing when the 30 fps fallback asks for a capture restart (`RestartWithParams`); it is
   never asked to, as above.
-- VP9 stays opt-in for hardware as well as software (`extraVideoCodecs`), where Chrome offers it by default.
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the
   session's, which reads as swapped for a message from the receiver; `MirroringActivity` here takes the transport as
   the source and the sender's id (or `*`) as the destination.

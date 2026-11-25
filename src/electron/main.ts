@@ -452,6 +452,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       findDevice: (id) => discovery.devices().find((d) => d.id === id),
       createClient: (d) => createClient(d),
       createService,
+      commandLine: "electron" in m ? m.electron.app?.commandLine : undefined,
       log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
     });
   }

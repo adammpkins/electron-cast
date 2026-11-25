@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { VideoCodec } from "../../src/mirroring/protocol/constants.ts";
-import { createEncodingSupport, hardwareCodecsToProbe, hardwareSwitchesFromArgv, SUPPORTED_VIDEO_CODECS } from "../../src/mirroring/encoding-support.ts";
+import { createEncodingSupport, hardwareCodecsToProbe, encodingPolicyFromCommandLine, softwareCodecsToProbe, SUPPORTED_VIDEO_CODECS } from "../../src/mirroring/encoding-support.ts";
 import { getCodecParameterString } from "../../src/mirroring/mirror-settings.ts";
 import { validateH264Frame } from "./media-validate.ts";
 import { makeH264Frame } from "./fake-backend.ts";
@@ -198,12 +198,30 @@ test("the fallback offer is sent after any NoStreamSelected, hardware offered or
 
 // encoding_support.cc
 
+/** A command line as Electron's `app.commandLine` answers for it. */
+function cl(...args: string[]) {
+  const parsed = new Map(args.map((a) => { const [k, ...v] = a.replace(/^--/, "").split("="); return [k!, v.join("=")] as const; }));
+  return { hasSwitch: (n: string) => parsed.has(n), getSwitchValue: (n: string) => parsed.get(n) ?? "" };
+}
+
 test("the force-enable and force-disable switches decide which hardware codecs are asked about", () => {
-  assert.deepEqual(hardwareCodecsToProbe(hardwareSwitchesFromArgv([])), ["h264", "vp8", "vp9"], "HEVC and AV1 are off by default");
-  const s = hardwareSwitchesFromArgv(["--cast-streaming-force-enable-hardware-hevc", "--cast-streaming-force-disable-hardware-vp9", "--cast-streaming-force-disable-hardware-h264", "--cast-streaming-force-enable-hardware-h264", "--other"]);
-  assert.deepEqual(hardwareCodecsToProbe(s), ["hevc", "vp8"], "disable wins over enable");
-  const support = createEncodingSupport({ hardware: new Set<VideoCodec>(["hevc", "h264", "vp9"]), software: new Set<VideoCodec>() }, { switches: s });
+  assert.deepEqual(hardwareCodecsToProbe(encodingPolicyFromCommandLine(cl(), "win32")), ["h264", "vp8", "vp9"], "HEVC and AV1 are off by default");
+  const p = encodingPolicyFromCommandLine(cl("--cast-streaming-force-enable-hardware-hevc", "--cast-streaming-force-disable-hardware-vp9", "--cast-streaming-force-disable-hardware-h264", "--cast-streaming-force-enable-hardware-h264", "--other"), "win32");
+  assert.deepEqual(hardwareCodecsToProbe(p), ["hevc", "vp8"], "disable wins over enable");
+  const support = createEncodingSupport({ hardware: new Set<VideoCodec>(["hevc", "h264", "vp9"]), software: new Set<VideoCodec>() }, { policy: p });
   assert.deepEqual((["hevc", "h264", "vp9", "vp8"] as VideoCodec[]).map((c) => support.isHardwareEnabled(c)), [true, false, false, false]);
+});
+
+test("--enable-features and --disable-features switch the CastStreaming codec features", () => {
+  const sw = (...args: string[]) => softwareCodecsToProbe(encodingPolicyFromCommandLine(cl(...args), "linux"));
+  assert.deepEqual(sw(), ["vp8", "vp9"], "VP8 and VP9 are on by default, AV1 off, H.264 and HEVC have no software encoder");
+  assert.deepEqual(sw("--disable-features=CastStreamingVp9"), ["vp8"]);
+  assert.deepEqual(sw("--enable-features=CastStreamingAv1:foo/bar,Unrelated"), ["vp8", "vp9", "av1"]);
+  assert.deepEqual(sw("--enable-features=CastStreamingAv1", "--disable-features=CastStreamingAv1"), ["vp8", "vp9"], "disable wins");
+  const hw = (platform: string, ...args: string[]) => hardwareCodecsToProbe(encodingPolicyFromCommandLine(cl(...args), platform));
+  assert.deepEqual(hw("win32", "--disable-features=CastStreamingWinHardwareH264"), ["vp8", "vp9"]);
+  assert.deepEqual(hw("darwin", "--disable-features=CastStreamingWinHardwareH264"), ["h264", "vp8", "vp9"], "the Windows feature does not apply on macOS");
+  assert.deepEqual(hw("win32", "--enable-features=CastStreamingHardwareHevc"), ["h264", "hevc", "vp8", "vp9"]);
 });
 
 test("a codec can be deny-listed once, and then it is not hardware-enabled", () => {
@@ -260,8 +278,8 @@ test("a receiver that scales gets any size within the limit, unless the model fo
 });
 
 test("a Nest Hub is always letterboxed, unless --disable-cast-letterboxing", () => {
-  assert.equal(shouldForceLetterboxing("Google Nest Hub", []), true);
-  assert.equal(shouldForceLetterboxing("Google Nest Hub Max", []), true);
-  assert.equal(shouldForceLetterboxing("Chromecast Ultra", []), false);
-  assert.equal(shouldForceLetterboxing("Google Nest Hub", ["--disable-cast-letterboxing"]), false);
+  assert.equal(shouldForceLetterboxing("Google Nest Hub", cl()), true);
+  assert.equal(shouldForceLetterboxing("Google Nest Hub Max", cl()), true);
+  assert.equal(shouldForceLetterboxing("Chromecast Ultra", cl()), false);
+  assert.equal(shouldForceLetterboxing("Google Nest Hub", cl("--disable-cast-letterboxing")), false);
 });

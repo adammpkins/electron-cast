@@ -60,6 +60,8 @@ export interface MirroringManagerOptions {
   /** A fresh Cast client for the device; the manager connects it and closes it when the route ends. */
   createClient(device: CastDevice): MirroringClient;
   createService: MirroringServiceFactory;
+  /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
+  commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
 }
 
@@ -129,6 +131,7 @@ export class MirroringManager {
       source,
       client,
       createService: this.options.createService,
+      commandLine: this.options.commandLine,
       log,
       onStop: () => {
         if (this.entries.get(routeId) === entry) {

@@ -24,12 +24,12 @@ What to expect:
   `encoders: hardware [...], software [...]` says what this machine can encode, and `negotiated a new mirroring
   session. ... video codec=h264 (hardware)` says what the receiver took.
 
-Options: `--extra-codecs` lets the sender also offer VP9 (VP8 is always offered, and Opus for audio).
-
-Video codec, as in Chrome: when the machine has a hardware H.264 encoder (checked with WebCodecs `prefer-hardware`),
-H.264 is offered, alone among the video codecs; when it has none, VP8 is. To compare the two on one machine, add
+Video codec, as in Chrome: when the machine has a hardware encoder for H.264, VP8 or VP9 (checked with WebCodecs
+`prefer-hardware`), those are offered, alone among the video codecs; when it has none, software VP8 and VP9 are.
+Opus is always offered for audio. To compare the two on one machine, add
 Chrome's own switches after the device name: `--cast-streaming-force-disable-hardware-h264` gives VP8,
-`--cast-streaming-force-disable-hardware-vp8` and `...-vp9` switch those hardware encoders off the same way, and
+`--cast-streaming-force-disable-hardware-vp8` and `...-vp9` switch those hardware encoders off the same way,
+`--disable-features=CastStreamingVp9` takes VP9 out altogether, and
 `--cast-streaming-force-enable-hardware-hevc` / `-av1` switch on codecs that are off by default (a receiver that
 cannot decode them will take nothing, or fall back to VP8). A hardware encoder that fails during a session is dropped
 for the rest of the run and the session offers again, so the log shows a second `OFFER` and a `Hardware h264 encoding

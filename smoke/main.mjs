@@ -9,7 +9,7 @@ import { createCastManager } from "electron-cast/main";
 import { FakeClient, FakeDiscovery, TV } from "./fakes.mjs";
 import { runMirroringScenario } from "./mirroring.mjs";
 
-const TIMEOUT_MS = 150_000;
+const TIMEOUT_MS = 200_000;
 const SCHEME = "smoke";
 const PAGE_ORIGIN = `${SCHEME}://app`;
 const APP_ID = "233637DE";
@@ -214,6 +214,8 @@ async function main() {
   // A 4:3 page must still come out 16:9 (letterboxed), and the software path must work on a machine with a hardware encoder.
   await runMirroringScenario({ pass, fail, content: [640, 480] });
   await runMirroringScenario({ pass, fail, hardware: "off" });
+  // Chrome offers software VP9 by default (kCastStreamingVp9); a receiver that prefers it gets it at 1080p30.
+  await runMirroringScenario({ pass, fail, hardware: "vp9", content: [1920, 1080] });
   await runMirroringScenario({ pass, fail, mode: "desktop" });
 
   await cast.dispose();

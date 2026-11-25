@@ -6,7 +6,7 @@
   "tab_mirror" | "desktop_mirror", webContentsId, desktopSourceId, withAudio })` in the main process, with `castMode`
   and `withAudio` filters on `registerMediaSinksObserver`. It is a TypeScript port of Chrome's Cast Streaming sender
   (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
-  routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  routing): OFFER/ANSWER, VP8, VP9 and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route. No new
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
   tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
@@ -16,7 +16,11 @@
   Annex B); VP8 in software is offered only when no hardware codec is, or when the receiver takes none of the hardware
   ones. A hardware encoder that fails mid-session no longer stops mirroring: the codec is dropped for the rest of the
   app's run and the session negotiates again. Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>` and
-  `--disable-cast-letterboxing` switches are honoured (new `mirroring.argv` option says where to read the hardware ones from).
+  `--disable-cast-letterboxing` switches, and the `CastStreamingVp8` / `Vp9` / `Av1` / `HardwareHevc` / `Win|MacHardwareH264`
+  features of `--enable-features` / `--disable-features`, are honoured, read from `app.commandLine` (so switches the app
+  appends count) when the `electron` object passed as `mirroring.electron` includes `app`.
+- **VP9 is offered by default, as in Chrome.** In hardware when an encoder takes it, in software under the same
+  hardware-first rule as VP8. The `extraVideoCodecs` option and the harness's `--extra-codecs` flag are gone.
 - **Mirroring letterboxes like Chrome.** The capture now asks for the `fixed_aspect_ratio` policy when the receiver
   cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
   no longer upscaled to 1920x1080.

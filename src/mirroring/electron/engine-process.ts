@@ -25,8 +25,8 @@ export type ToEngine =
       softwareCodecs: VideoCodec[];
       /** Codecs whose hardware encoder failed earlier in the app's run (`GetHardwareCodecDenyList`). */
       hardwareDenyList: VideoCodec[];
-      /** The `--cast-streaming-force-{enable,disable}-hardware-*` switches the app was started with. */
-      hardwareSwitches: { forceEnable: VideoCodec[]; forceDisable: VideoCodec[] };
+      /** Chrome's codec switches and features as the app's command line sets them. */
+      encodingPolicy: { hardwareFeatures: VideoCodec[]; softwareFeatures: VideoCodec[]; forceEnable: VideoCodec[]; forceDisable: VideoCodec[] };
       env?: Record<string, string | undefined>;
     }
   | { type: "message"; namespace: string; json: string }
@@ -79,7 +79,10 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
           {
             denyListed: new Set(data.hardwareDenyList),
             onDenyListed: (codec) => parentPort.postMessage({ type: "deny-hardware-codec", codec }),
-            switches: { forceEnable: new Set(data.hardwareSwitches.forceEnable), forceDisable: new Set(data.hardwareSwitches.forceDisable) },
+            policy: {
+              hardwareFeatures: new Set(data.encodingPolicy.hardwareFeatures), softwareFeatures: new Set(data.encodingPolicy.softwareFeatures),
+              forceEnable: new Set(data.encodingPolicy.forceEnable), forceDisable: new Set(data.encodingPolicy.forceDisable),
+            },
           },
         ),
         env: data.env,

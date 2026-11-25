@@ -38,7 +38,7 @@ const child = spawn(electron, [fileURLToPath(new URL("main.mjs", import.meta.url
 const killer = setTimeout(() => {
   console.error("smoke: FAIL electron did not exit within 180 s");
   child.kill();
-}, 180_000);
+}, 240_000);
 child.on("exit", (code, signal) => {
   clearTimeout(killer);
   if (code === null) console.error(`smoke: FAIL electron was killed by ${signal}`);

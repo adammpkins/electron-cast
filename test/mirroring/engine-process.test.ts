@@ -95,7 +95,7 @@ test("the engine process streams frames from a port-driven agent to the receiver
       type: "start",
       params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1" },
       source: { kind: "tab", mediaSourceId: "tab-id" },
-      hardwareCodecs: [], softwareCodecs: ["vp8"], hardwareDenyList: [], hardwareSwitches: { forceEnable: [], forceDisable: [] },
+      hardwareCodecs: [], softwareCodecs: ["vp8"], hardwareDenyList: [], encodingPolicy: { hardwareFeatures: [], softwareFeatures: ["vp8"], forceEnable: [], forceDisable: [] },
       env: {},
     },
     ports: [agent],

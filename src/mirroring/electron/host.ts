@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
-import { hardwareCodecsToProbe, hardwareSwitchesFromArgv, type HardwareSwitches } from "../encoding-support.ts";
+import { encodingPolicyFromCommandLine, hardwareCodecsToProbe, softwareCodecsToProbe, type CommandLineLike } from "../encoding-support.ts";
 import { getCodecParameterString } from "../mirror-settings.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
 import type { CaptureSource } from "./agent-protocol.ts";
@@ -63,23 +63,19 @@ export interface ElectronMirroringApi {
   MessageChannelMain: new () => { port1: PortMainLike; port2: PortMainLike };
   desktopCapturer: { getSources(options: { types: string[] }): Promise<{ id: string; name: string }[]> };
   webContents: { fromId(id: number): WebContentsMirrorLike | undefined };
+  /**
+   * `app`: its `commandLine` is where Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>`,
+   * `--enable-features` / `--disable-features` (`CastStreamingVp8`, `Vp9`, `Av1`, `HardwareHevc`, `Win/MacHardwareH264`)
+   * and `--disable-cast-letterboxing` are read, including switches the app appended itself. Without it only
+   * Chrome's defaults apply.
+   */
+  app?: { commandLine: CommandLineLike };
 }
 
 export interface ElectronMirroringOptions {
   electron: ElectronMirroringApi;
-  /**
-   * Video codecs the sender may offer when WebCodecs can encode them, in addition to VP8 (always). Chrome's software
-   * list is VP8 and VP9 (`encoding_support.cc`); default none, so a stream is VP8 unless you opt in.
-   */
-  extraVideoCodecs?: ("vp9")[];
   /** Absolute path of the engine entry (`engine-process.js` next to this file in the built package). */
   engineModulePath?: string;
-  /**
-   * The app's command-line arguments, where Chrome's `--cast-streaming-force-enable-hardware-<codec>` and
-   * `--cast-streaming-force-disable-hardware-<codec>` switches are looked for (h264, hevc, vp8, vp9, av1); default
-   * `process.argv`.
-   */
-  argv?: readonly string[];
   /** Environment for the session host (`CHROME_MIRRORING_PLAYOUT_DELAY`); default none. */
   env?: Record<string, string | undefined>;
   log?(level: "info" | "error", message: string): void;
@@ -111,7 +107,6 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
   const e = options.electron;
   const log = options.log ?? (() => {});
   const live = new Set<() => void>();
-  const switches: HardwareSwitches = hardwareSwitchesFromArgv(options.argv ?? process.argv);
   // `GetHardwareCodecDenyList()` is process-wide in Chrome: a hardware encoder that failed in one session is not
   // offered in the next either, for as long as the app runs.
   const hardwareDenyList = new Set<VideoCodec>();
@@ -214,12 +209,12 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         // anything else only when asked for, as before.
         const macBaseline = platform === "darwin";
         const probes: { codec: VideoCodec; hardware: boolean; string: string; width: number; height: number }[] = [];
-        for (const codec of hardwareCodecsToProbe(switches)) {
-          // Only the codecs the app may use: VP9 is opt-in in software and so in hardware.
-          if (codec === "vp9" && !(options.extraVideoCodecs ?? []).includes("vp9")) continue;
+        // Read at every session, as Chrome reads its command line and features whenever it negotiates.
+        const policy = encodingPolicyFromCommandLine(e.app?.commandLine, platform);
+        for (const codec of hardwareCodecsToProbe(policy)) {
           probes.push({ codec, hardware: true, string: probeString(codec, 1920, 1080, macBaseline), width: 1920, height: 1080 });
         }
-        for (const codec of ["vp8", ...(options.extraVideoCodecs ?? [])] as VideoCodec[]) {
+        for (const codec of softwareCodecsToProbe(policy)) {
           probes.push({ codec, hardware: false, string: probeString(codec, SOFTWARE_PROBE_SIZE.width, SOFTWARE_PROBE_SIZE.height, macBaseline), ...SOFTWARE_PROBE_SIZE });
         }
         const found = (await wc.executeJavaScript(
@@ -264,7 +259,10 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         proc.postMessage(
           {
             type: "start", params, source: capture, hardwareCodecs, softwareCodecs, hardwareDenyList: [...hardwareDenyList],
-            hardwareSwitches: { forceEnable: [...switches.forceEnable], forceDisable: [...switches.forceDisable] },
+            encodingPolicy: {
+              hardwareFeatures: [...policy.hardwareFeatures], softwareFeatures: [...policy.softwareFeatures],
+              forceEnable: [...policy.forceEnable], forceDisable: [...policy.forceDisable],
+            },
             env: options.env,
           },
           [channelMain.port2],
