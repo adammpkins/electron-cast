@@ -532,6 +532,13 @@ export class CastSessionService {
             sink: true,
             ...(isRecord(params) && typeof params.deviceId === "string" ? { presetDeviceId: params.deviceId } : {}),
           });
+        case "pickSink":
+        case "pickSinkOnDevice":
+          // main only: the sink for a request the presentation handler serves with a mirroring route; nothing is launched here
+          return await this.handleRequestSession(sender, params, {
+            pickOnly: true,
+            ...(method === "pickSinkOnDevice" ? { presetDeviceId: isRecord(params) && typeof params.deviceId === "string" ? params.deviceId : "" } : {}),
+          });
         case "joinRunningSession":
           return await this.handleJoinRunningSession(sender, params);
         case "sendMessage":
@@ -763,9 +770,10 @@ export class CastSessionService {
    * `requestSession`; with `presetDeviceId` (`requestSessionOnDevice`) the picker is skipped: that device is the choice
    * (and must still be eligible). With `sink` (`requestSink`) the request may name a DIAL app as well as, or instead
    * of, a Cast app, and the picker is offered the DIAL sinks that have it too; a DIAL choice is returned as
-   * `{ dialSink }` and nothing is launched here (the presentation handler creates the DIAL route).
+   * `{ dialSink }` and nothing is launched here (the presentation handler creates the DIAL route). With `pickOnly`
+   * (`pickSink`) the choice of a Cast sink is returned as `{ pickedSink }` and nothing is launched either.
    */
-  private async handleRequestSession(sender: SenderInfo, params: unknown, opts: { presetDeviceId?: string; sink?: boolean } = {}): Promise<BridgeResult> {
+  private async handleRequestSession(sender: SenderInfo, params: unknown, opts: { presetDeviceId?: string; sink?: boolean; pickOnly?: boolean } = {}): Promise<BridgeResult> {
     const presetDeviceId = opts.presetDeviceId;
     const p: RequestParams | null = opts.sink === true ? parseRequestSink(params) : parseRequestSessionParams(params);
     if (p === null) return bad("invalid_parameter");
@@ -846,6 +854,9 @@ export class CastSessionService {
         return good({ dialSink: choice });
       }
       if (appId === null) return bad("invalid_parameter");
+      // The chosen sink is the answer (`{ pickedSink }`): the mirroring route that serves a site-initiated request is not
+      // a Cast app to launch here
+      if (opts.pickOnly === true) return choice === "stop" ? bad("cancel") : good({ pickedSink: choice });
       if (choice === "stop") {
         const rec = request.session !== undefined ? this.sessions.get(request.session.sessionId) : undefined;
         if (rec === undefined) return bad("cancel");

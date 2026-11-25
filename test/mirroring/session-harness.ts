@@ -34,6 +34,8 @@ export async function startHarness(
     platform?: string;
     forceLetterboxing?: boolean;
     enableRtcpReporting?: boolean;
+    /** `SessionParameters::target_playout_delay`. */
+    targetPlayoutDelayMs?: number;
   } = {},
 ): Promise<Harness> {
   const receiver = await FakeReceiver.create(opts.receiver);
@@ -45,7 +47,7 @@ export async function startHarness(
   const log: string[] = [];
   let stopped = false;
   const host = new OpenscreenSessionHost(
-    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0", forceLetterboxing: opts.forceLetterboxing, ...(opts.enableRtcpReporting === true ? { enableRtcpReporting: true } : {}) },
+    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0", forceLetterboxing: opts.forceLetterboxing, ...(opts.targetPlayoutDelayMs !== undefined ? { targetPlayoutDelayMs: opts.targetPlayoutDelayMs } : {}), ...(opts.enableRtcpReporting === true ? { enableRtcpReporting: true } : {}) },
     {
       environment: env,
       router,

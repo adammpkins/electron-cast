@@ -406,9 +406,14 @@ a key; `streamingTargetPlayoutDelayMillis`, `streamingCaptureAudio`, `supportedA
 used only when `base::StringToInt` accepts it and it is above 0; a URL over 64 KB is refused. A sink is offered for a URL when
 some app of it is available there and the sink has all of that app's capabilities
 (`CastAppAvailabilityTracker::GetAvailableSinks`), and the app launched is `ChooseAppId`'s: the first the sink can run.
-`streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio` are parsed but no code reads them yet: a page's mirroring
-sources are reported unavailable (see below), so there is no mirroring session for them to configure; they join the
-mirroring session when site-initiated mirroring is ported.
+`streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio` configure a page's site-initiated mirroring session
+(see [Site-initiated mirroring](#site-initiated-mirroring-and-mirroring-to-flinging)): `main.ts` passes the parse's
+`targetPlayoutDelayMillis`, `siteRequestedAudioCapture` and app infos to `siteMirroringSource`. `MirroringActivity::StartSession`
+makes the session audio only when the sink has `audio_out` and `CastMediaSource::ProvidesStreamingAudioCapture()` holds
+(the page did not say `streamingCaptureAudio=0`, and a streaming app of the URL requires `audio_out`), and gives the
+service `target_playout_delay()`, which `MirrorSettings::GetVideoConfig` and `GetAudioConfig` put in each stream's
+`targetDelay` of the OFFER. A `cast:` URL carries no capabilities (its `(caps)` text stays in the app id), so only the
+legacy form can ask for sound. Tested: `test/electron/site-mirroring-offer.test.ts`.
 
 Chrome's Cast provider builds a `CastMediaSource` from each presentation URL
 (`components/media_router/common/providers/cast/cast_media_source.cc`, `FromMediaSource`): `remote-playback:` and plain
@@ -426,11 +431,89 @@ controller delegate Electron's own browser side reports every URL `UNAVAILABLE`
 sources (`PresentationFrame` listens per URL; `PresentationAvailabilityState::GetScreenAvailability` is available when any
 is), so the first ordinary one is served. Blink drops URLs of unknown protocol in the constructor
 (`PresentationRequest::Create`, `IsKnownProtocolForPresentationUrl`: http family, `cast`, `cast-dial`), which the stand-in
-repeats. Site-initiated mirroring for the allowlisted origins (docs, meet, music.youtube.com) is not available here
-either, though Chrome offers it there. A plain https URL (Chrome's one-UA tab mirroring) is still rejected as
+repeats. A streaming URL is served as site-initiated mirroring for the allowlisted origins (docs, meet, music.youtube.com) when
+the `mirroring` option is on (see [Site-initiated mirroring](#site-initiated-mirroring-and-mirroring-to-flinging)), and
+reported unavailable otherwise. A plain https URL (Chrome's one-UA tab mirroring) is still rejected as
 `NotSupportedError`, not `NotFoundError`. A `cast-dial:` URL is the DIAL kind (`MediaSource::IsDialSource`): with DIAL on,
 `chooseSource` returns it next to the first Cast app URL and the sink the user picks decides which is used (see
 [DIAL](#dial-srcdial)); with DIAL off it is a URL nothing here serves.
+### Site-initiated mirroring and mirroring to flinging
+
+Source: `src/electron/mirroring-to-flinging.ts` (the rules, pure), `presentation-handler.ts` (`startSiteMirroring`,
+`fling`), `main.ts` (the wiring), `mirroring-manager.ts` (`startSiteInitiatedMirroring`, `switchToFlingingIfPossible`).
+Not yet tried on a real device; the tests use fakes.
+
+**Site-initiated mirroring** (S1). A page may name a Cast Streaming app in its `PresentationRequest` URLs, as Google Meet
+and Docs do ("Present to Cast"). `IsSiteInitiatedMirroringSource` (`cast_media_source.cc`) is any Cast Presentation URL
+(`cast:` or the legacy `https://google.com/cast#` form) with a streaming app id (`0F5096E8`, `85CDB22F`). Chrome offers
+the source's sinks only to the origins of `kPresentationApiAllowlist` (`CastMediaRouteProvider::GetOrigins`,
+`cast_media_route_provider.cc`: `https://docs.google.com`, `https://meet.google.com`, `https://music.youtube.com`), or to
+every origin when the feature `kAllowAllSitesToInitiateMirroring` (`AllowAllSitesToInitiateMirroring`, off by default) is
+on. For any other origin the sinks are empty, so `getAvailability` says false and `start()` is "No screens found.". The
+origin is compared as `url::Origin` is (scheme, host, port). The feature is read from `app.commandLine`
+(`--enable-features`, a name also in `--disable-features` is off), through the `mirroring` option's `electron.app`.
+No public option exists for any of it.
+
+With the `mirroring` option on, such a URL from an allowed origin is a source like any other (URLs are served in order, a
+streaming URL competing with ordinary ones): `getAvailability` follows the devices that have the app, and `start()` shows
+the app's picker (Chrome's dialog is the consent; electron-cast has no other prompt) offering the same sinks, then
+`CastActivityManager::DoLaunchSession` with a streaming source is `MirroringManager.startSiteInitiatedMirroring`: a tab
+mirroring route whose source is the page's URL (`MirroringActivity::GetMirroringType`: "the source having a valid Cast
+presentation URL indicates that it is site initiated mirroring, which we represent as tab mirroring here") and whose tab
+is the page's window (`frame_tree_node_id` of the web contents' main frame, so an iframe's request mirrors the window).
+The route obeys every mirroring rule (one per sink, one per page, the mirrored tab muted). `terminate()` on the page's
+connection is `TerminateRoute`; `close()` only closes the connection (the route stays, as Chrome's `DetachRoute` is
+`NOTIMPLEMENTED` for Cast); when the route ends the connection ends `terminated`. The default request of a window may be
+a streaming URL as well: `startCasting` then starts this route and the page gets `connectionavailable`.
+
+Differences, all of them narrower than Chrome:
+
+- A URL with a `clientId` gets no `receiver_action` and `new_session` messages after the launch
+  (`HandleLaunchSessionResponse` sends them whenever the client id is non-empty): the session belongs to the mirroring
+  service and has no snapshot to send. The Cast SDK's own URLs always carry a client id but never name a streaming app;
+  what Meet and Docs send could not be checked.
+- A legacy URL that lists several apps keeps the capabilities of only the one electron-cast's own parser reads, and the
+  app chosen is the first the sink can run (`ChooseAppId`). The streaming parameters of the URL are read (see the URL
+  parameters section above).
+- A mirroring route cannot be joined again with `reconnect` (Chrome's `FindActivityForSessionJoin` only finds a
+  `cast-session_` id), and an auto-join naming a streaming URL answers "No matching route" (Chrome would launch the
+  streaming app on the frame's sink again).
+
+**Mirroring to flinging** (M5). A tab mirrored to a sink can turn into a real Cast session of the page's own app.
+Two entry points, one rule (`CastActivityManager::JoinSession`, `cast_activity_manager.cc`):
+
+- A join with the presentation id `auto-join` (what the Cast SDK's `initialize` sends through
+  `PresentationRequest.reconnect("auto-join")`) first looks for an app activity to join
+  (`FindActivityForAutoJoin`, the existing `initialize` rules); when there is none and the source's
+  `defaultActionPolicy` is not `cast_this_tab`, and the page's frame has a mirroring route
+  (`GetSinkForMirroringActivity`: the frame's own route in `routes_by_frame_`, when it is a mirroring one, which here is a
+  tab route of the window), `LaunchSession` launches the app on that sink. The route keeps the presentation id
+  `auto-join`, and the page's connection gets `receiver_action` (cast) then `new_session`, as for a `start()`. The
+  launch ends the frame's mirroring route as `DoLaunchSession` does (here the route ends when the session is up, as
+  every session launch does). `cast_this_tab`, "mirror, not cast, despite the name" (`DefaultActionPolicy`), keeps the
+  tab mirrored and the join fails with "No matching route". Only the exact string counts; any other value is
+  `create_session`. `page_scoped` auto-join policy does not stop it: Chrome checks only that no activity was found.
+- `SwitchToFlingingIfPossible` (`components/media_router/browser/mirroring_to_flinging_switcher.cc`) runs after
+  `MirroringActivity::DidGetTabSourceId`, i.e. after `switchMirroringSourceTab` moved the capture to another window (and
+  `OnSourceChanged` ended that window's own routes): if the window has a default presentation request, it joins with
+  `auto-join` and the request's first URL ("TODO(crbug.com/1418744): Handle multiple URLs") and the result goes to the
+  page as `OnPresentationResponse` does, only while that request is still the window's default one.
+
+Differences: the sink is launched on whatever its capabilities are (Chrome's `ChooseAppId` only logs a mismatch) and
+without asking whether it has the app; and the mirroring route ends when the new session is up
+(`onSessionLaunched`), not when the launch starts as in `DoLaunchSession`, so a launch that fails leaves the tab mirrored
+where Chrome has already stopped it.
+
+**The desktop capture escalation guard** (M6). `MediaRouterDesktop::JoinRoute` refuses, with `USER_NOT_ALLOWED` and the
+text "Cannot switch to desktop capture without user consent", a join whose source is desktop mirroring unless the route
+joined is itself desktop mirroring; auto-join, and a presentation id that names no route, always refuse
+(`IsDesktopCaptureEscalation`, `media_router_desktop.cc`). The guard only looks at a join that has a provider (auto-join, a
+`cast-session_` id, or an id some route has) and at least one route, as Chrome's check order does; the page sees
+`NotFoundError` with that text (`OnJoinRouteResponse`). A page cannot name a desktop source (Blink drops presentation
+URLs of an unknown scheme), so this only guards what reaches `reconnectPresentation` from the main process or a page
+that bypasses the stand-in. Chrome's message for a join with no route at all is "Route not found"; electron-cast's is
+"No matching route" (both `NotFoundError`).
+
 ## DIAL (`src/dial/`)
 
 Chrome's Media Router has a second provider next to Cast: DIAL (Discovery and Launch), which starts an app on a TV

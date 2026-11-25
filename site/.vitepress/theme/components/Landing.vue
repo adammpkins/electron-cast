@@ -208,6 +208,10 @@ const tabs = [
                 <th scope="row">Casting from iframes</th>
                 <td colspan="3">Tested on a Nest Hub Max, from a same-origin and a cross-origin iframe (media reached PLAYING). Moving or removing an iframe while it casts is unit-tested only.</td>
               </tr>
+              <tr>
+                <th scope="row">Chrome's rules for URLs, the channel and mirroring from a page</th>
+                <td colspan="3">Presentation URL parameters, sink order, the channel's CONNECT, LAUNCH and timers, switching a mirrored tab to a Cast session, and a page that starts mirroring (docs.google.com, meet.google.com, music.youtube.com): ported from Chromium and unit-tested. Not yet tried on a real device.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -220,6 +224,7 @@ const tabs = [
               <li>Mirroring at 1080p without the video lag on a Chromecast Ultra (under investigation)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>
+              <li>The Chrome-parity rules above, tried on a real device</li>
             </ul>
           </div>
           <div>

@@ -203,7 +203,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         let capture: CaptureSource;
         let mintTabSource: (() => CaptureSource) | undefined;
         if (source.type === "tab") {
-          const tabId = Number(source.id.slice(source.id.lastIndexOf(":") + 1));
+          const tabId = source.tabId ?? Number(source.id.slice(source.id.lastIndexOf(":") + 1));
           const target = e.webContents.fromId(tabId);
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
           tabTarget = target;

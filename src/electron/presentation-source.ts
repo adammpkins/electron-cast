@@ -62,6 +62,11 @@ export function classifyPresentationUrl(url: string): PresentationSourceKind {
 export interface LaunchableUrl {
   url: string;
   parsed: PresentationUrl;
+  /**
+   * Set when the URL names a Cast Streaming app and the page's origin may initiate mirroring: the source is served by a
+   * mirroring route (`CastActivityManager::DoLaunchSession`, `ContainsStreamingApp`), not by launching an app.
+   */
+  mirroring?: true;
 }
 
 /** A `cast-dial:` URL with the app it names (`MediaSource::AppNameFromDialSource`). */
@@ -89,15 +94,26 @@ export type SourceChoice =
  * chosen sink supports (`QueryResultManager`, `MediaRouterUI`), and a page is told a screen is available when any
  * source has one. A Cast sink supports a Cast app source and a DIAL sink a `cast-dial:` one, so this is the first
  * plain Cast app URL and, with `dial` on, the first `cast-dial:` URL naming a valid app; a mirroring or
- * `remote-playback:` entry never blocks an ordinary one next to it. With DIAL off a `cast-dial:` URL is one nothing
+ * `remote-playback:` entry never blocks an ordinary one next to it. With `mirroring` on (the page's origin may start
+ * mirroring) a Cast Streaming URL competes with the ordinary ones in URL order. With DIAL off a `cast-dial:` URL is one nothing
  * here understands.
  */
-export function chooseSource(urls: readonly string[], options: { dial?: boolean } = {}): SourceChoice {
+export function chooseSource(urls: readonly string[], options: { dial?: boolean; mirroring?: boolean } = {}): SourceChoice {
   let unservable = false;
   let cast: LaunchableUrl | undefined;
   let dial: DialSourceUrl | undefined;
   for (const url of urls) {
     const kind = classifyPresentationUrl(url);
+    if (kind === "mirroring" && options.mirroring === true) {
+      // site-initiated mirroring (`IsSiteInitiatedMirroringSource`) for an origin `GetOrigins` allows: a source like any
+      // other, served in URL order
+      if (cast === undefined) {
+        const parsed = parsePresentationUrl(url);
+        if (parsed !== null) cast = { url, parsed, mirroring: true };
+        else unservable = true;
+      }
+      continue;
+    }
     if (kind === "mirroring" || kind === "remote_playback") {
       unservable = true;
       continue;

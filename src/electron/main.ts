@@ -2,7 +2,7 @@ import { CastSessionService, type CastClientLike, type DeviceSource, type CastRe
 import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
-import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle } from "./presentation-handler.ts";
+import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle, type SiteMirroringHooks } from "./presentation-handler.ts";
 import { randomUUID } from "node:crypto";
 import {
   MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
@@ -10,7 +10,9 @@ import {
 } from "./manager-api.ts";
 import { getReceiverIdHashToken, type ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
+import { parseCastMediaSource } from "./cast-media-source.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
+import { AUTO_JOIN_PRESENTATION_ID, siteInitiatedMirroringAllowed, siteMirroringSource } from "./mirroring-to-flinging.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-presentation.ts";
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
@@ -525,12 +527,54 @@ export function createCastManager(options: CastManagerOptions): CastManager {
 
   const wired = options.wiredDisplay !== undefined && options.presentation !== false ? createWiredDisplay(options.wiredDisplay) : undefined;
 
+  /** The mirroring routes a page started through the Presentation API, so their connections end with them. */
+  const siteRoutes = new Set<string>();
+  /**
+   * Site-initiated mirroring and mirroring-to-flinging (see mirroring-to-flinging.ts). `routes_by_frame_` keys a route by
+   * the web contents' main frame, so a sender (any frame) is looked up through its window.
+   */
+  const siteMirroring: SiteMirroringHooks | undefined = options.mirroring === undefined ? undefined : {
+    allowed: (origin) => siteInitiatedMirroringAllowed(origin, "electron" in options.mirroring! ? options.mirroring.electron.app?.commandLine : undefined),
+    async start({ senderId, url, deviceId }) {
+      const wc = senders.get(senderId)?.wc;
+      if (wc === undefined || mirroring === undefined) throw new Error("the page is gone");
+      // CastMediaSource::target_playout_delay() and site_requested_audio_capture() of the page's URL, from the one parse
+      const parsed = parseCastMediaSource(url);
+      const source = siteMirroringSource(url, wc.id, parsed ?? {});
+      if (source === undefined) throw new Error(`not a mirroring source: ${url}`);
+      try {
+        const route = await mirroring.startSiteInitiatedMirroring(deviceId, source);
+        siteRoutes.add(route.id);
+        return { routeId: route.id, presentationId: route.presentationId };
+      } catch (err) {
+        if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+        throw err;
+      }
+    },
+    terminate: (routeId) => void mirroring?.terminate(routeId),
+    sinkOfFrame(senderId) {
+      const wcId = senders.get(senderId)?.wc.id;
+      return mirroring?.routes().find((r) => r.castMode === "tab_mirror" && r.webContentsId === wcId)?.sinkId;
+    },
+  };
+
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
   const setUpPresentation = () => {
     const ipc = options.ipcMain;
     const on = ipc.on!.bind(ipc);
     const off = ipc.removeListener!.bind(ipc);
-    const h = new CastPresentationHandler({ service, token: hashToken, ...(dial !== undefined ? { dial } : {}), dialRoutesChanged: notifyRoutes });
+    const h = new CastPresentationHandler({
+      service,
+      token: hashToken,
+      ...(dial !== undefined ? { dial } : {}),
+      dialRoutesChanged: notifyRoutes,
+      ...(siteMirroring !== undefined ? { mirroring: siteMirroring } : {}),
+      // `MediaRouterDesktop::GetCurrentRoutes`: the routes a join can name, by presentation id
+      currentRoutes: () => [
+        ...(mirroring?.routes() ?? []).map((r) => ({ presentationId: r.presentationId, mediaSource: r.mediaSource })),
+        ...service.mediaRoutes().map((r) => ({ presentationId: `cast-session_${r.id}`, mediaSource: r.mediaSource })),
+      ],
+    });
     handler = h;
     const connections = new Map<string, { conn: PresentationConnectionHandle | null; sid: number }>();
     const watches = new Map<string, { ac: AbortController; sid: number }>();
@@ -749,8 +793,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
               if (wired !== undefined && (displayOnly(urls) || wired.provider.local.isLocalPresentation(presentationId))) {
                 return await open(sid, p.connectionId, async () => wired.controllers.reconnect({ urls, senderId: sid }, presentationId));
               }
-              return await open(sid, p.connectionId,
-                () => h.reconnectPresentation({ urls: wired !== undefined && castUrlsOf(urls).length > 0 ? castUrlsOf(urls) : urls, origin, senderId: sid, presentationId }));
+              let joined: PresentationConnectionHandle | undefined;
+              const reconnected = await open(sid, p.connectionId, async () => {
+                joined = await h.reconnectPresentation({ urls: wired !== undefined && castUrlsOf(urls).length > 0 ? castUrlsOf(urls) : urls, origin, senderId: sid, presentationId });
+                return joined;
+              });
+              // an auto-join that flung the mirrored tab launched a session: it is the page's route now (`routes_by_frame_`)
+              if (reconnected.ok && joined?.launchedSessionId != null) launchedFrom.set(sid, joined.launchedSessionId);
+              return reconnected;
             }
           case "close":
           case "terminate": {
@@ -881,11 +931,51 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           if (dialRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
           return dialRoute;
         }
+        if (!result.value.id.startsWith("cast-session_")) {
+          // a site-initiated mirroring route: the connection's id is the route's presentation id
+          const prefix = `urn:x-org.chromium:media:route:${result.value.id}/`;
+          const mirrorRoute = routes().find((r) => r.id.startsWith(prefix));
+          if (mirrorRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
+          return mirrorRoute;
+        }
         const sessionId = result.value.id.slice("cast-session_".length);
         launchedFrom.set(webContentsId, sessionId);
         const route = routes().find((r) => r.id === sessionId);
         if (route === undefined) throw new MediaRouteError("route_not_found", `no route ${sessionId}`);
         return route;
+      },
+      /**
+       * `SwitchToFlingingIfPossible` (components/media_router/browser/mirroring_to_flinging_switcher.cc): when the window has
+       * a default presentation request, join it with "auto-join" (`MediaRouter::JoinRoute`), which `CastActivityManager::
+       * JoinSession` turns into a launch on the mirroring sink; the answer goes to the page as `OnPresentationResponse`
+       * does, only while the request is still the default one. "Handle multiple URLs" is a TODO in Chrome, which joins
+       * with the first URL only.
+       */
+      async switchToFlingingIfPossible(webContentsId: number): Promise<void> {
+        const request = defaults.get(webContentsId);
+        if (request === null || !senders.has(webContentsId)) return;
+        const connectionId = randomUUID();
+        let joined: PresentationConnectionHandle | undefined;
+        const result = await open(
+          webContentsId,
+          connectionId,
+          async () => {
+            joined = await h.reconnectPresentation({
+              urls: [request.presentationUrls[0]!],
+              origin: request.frameOrigin,
+              senderId: webContentsId,
+              presentationId: AUTO_JOIN_PRESENTATION_ID,
+            });
+            return joined;
+          },
+          (conn) => {
+            const current = defaults.get(webContentsId);
+            if (current === null || !samePresentationRequest(current, request)) return false;
+            sendTo(webContentsId, { type: "connectionavailable", connectionId, id: conn.id, url: conn.url });
+            return true;
+          },
+        );
+        if (result.ok && joined?.launchedSessionId != null) launchedFrom.set(webContentsId, joined.launchedSessionId);
       },
       dispose(): void {
         ipc.removeHandler(`${channel}:presentation`);
@@ -921,8 +1011,18 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       terminateRoutesOfPage: (wcId) => {
         for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
       },
+      switchToFlingingIfPossible: (wcId) => void presentation?.switchToFlingingIfPossible(wcId),
       commandLine: "electron" in m ? m.electron.app?.commandLine : undefined,
       log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
+    });
+    // a route that ended ends the connections of the page that started it (`RemoveActivity`, `TERMINATED`)
+    mirroring.observe(() => {
+      const live = new Set(mirroring!.routes().map((r) => r.id));
+      for (const id of [...siteRoutes]) {
+        if (live.has(id)) continue;
+        siteRoutes.delete(id);
+        handler?.siteMirroringRouteEnded(id);
+      }
     });
   }
   const dialRoutes = (): MediaRoute[] =>
