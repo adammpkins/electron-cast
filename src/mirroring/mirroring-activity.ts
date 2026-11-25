@@ -424,18 +424,26 @@ export class MirroringActivity {
     this.service.onMessage(msg.namespace, msg.data);
   }
 
-  /** The receiver ended the app (the TV's own stop, another sender launching): the route ends. */
+  /**
+   * The receiver ended the app (the TV's own stop, another sender launching): the route ends. Chrome's
+   * `CastActivityManager::OnSessionRemoved` only removes the activity (`RemoveActivity`); it sends no STOP for a session the
+   * receiver has already dropped. Sending one is harmful: tried on a Nest Hub Max, the STOP for the old session that came
+   * after our own LAUNCH of another app made the receiver answer that launch with `LAUNCH_ERROR` `CANCELLED`.
+   */
   private onReceiverStatus(status: ReceiverStatus): void {
     const app = this.app;
     if (app === undefined || this.state === "stopped") return;
-    if (!status.applications.some((a) => a.sessionId === app.sessionId)) this.stopMirroring();
+    if (!status.applications.some((a) => a.sessionId === app.sessionId)) this.stopMirroring({ receiverEnded: true });
   }
+
+  /** Settles when the receiver has answered the STOP this route sent (at once when none was sent). */
+  stopSettled: Promise<void> = Promise.resolve();
 
   /**
    * `StopMirroring`: `on_stop_` runs once and the owner deletes the activity. `CastActivityManager::OnActivityStopped`
    * is `TerminateSession`, which stops the receiver's app, so the receiver goes back to its idle screen.
    */
-  stopMirroring(): void {
+  stopMirroring(options: { receiverEnded?: boolean } = {}): void {
     if (this.stopping) return;
     this.stopping = true;
     this.state = "stopped";
@@ -450,13 +458,16 @@ export class MirroringActivity {
     }
     this.service = undefined;
     const app = this.app;
-    if (app !== undefined) {
+    if (app !== undefined && options.receiverEnded === true) {
+      // nothing to stop or close: the receiver took the session down itself
+      this.client.close();
+    } else if (app !== undefined) {
       try {
         this.client.closeTransport(app.transportId);
       } catch {
         // the connection may already be gone
       }
-      void this.client.stop(app.sessionId).catch(() => {}).finally(() => this.client.close());
+      this.stopSettled = this.client.stop(app.sessionId).then(() => {}, () => {}).then(() => this.client.close());
     } else {
       this.client.close();
     }

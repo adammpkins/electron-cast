@@ -10,9 +10,9 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const here = (name) => fileURLToPath(new URL(name, import.meta.url));
 const electronDir = fileURLToPath(new URL("../../smoke/.out/electron/", import.meta.url));
 const [check, ...rest] = process.argv.slice(2);
-const script = { "dial-dedup": "dial-dedup.mjs", cast: "cast.mjs" }[check];
+const script = { "dial-dedup": "dial-dedup.mjs", cast: "cast.mjs", parity: "parity.mjs" }[check];
 if (script === undefined) {
-  console.error("usage: npm run live:checks -- dial-dedup [--secs 60]\n       npm run live:checks -- cast --sink <device name> --test top|iframe-same|iframe-cross|sandbox-no-presentation|sandbox-presentation|default-presentation --yes [--secs 80]");
+  console.error("usage: npm run live:checks -- dial-dedup [--secs 60]\n       npm run live:checks -- cast --sink <device name> --test top|iframe-same|iframe-cross|sandbox-no-presentation|sandbox-presentation|default-presentation --yes [--secs 80]\n       npm run live:checks -- parity --sink <device name> --test wire|close-leave|close-stop|token|sinks|issues|site-mirror|fling --yes [--secs 85] [--token-file <path>] [--logdir <dir>]");
   process.exit(2);
 }
 const run = (command) => {
@@ -24,6 +24,7 @@ run("node smoke/.out/electron/node_modules/electron/install.js");
 const electron = createRequire(`${electronDir}package.json`)("electron");
 run("npm run build");
 await build({ entryPoints: [here("preload.js")], outfile: here(".out/preload.cjs"), bundle: true, platform: "node", format: "cjs", target: "node20", external: ["electron"], logLevel: "warning" });
+await build({ entryPoints: [here("preload-chromecast.js")], outfile: here(".out/preload-chromecast.cjs"), bundle: true, platform: "node", format: "cjs", target: "node20", external: ["electron"], logLevel: "warning" });
 const { ELECTRON_RUN_AS_NODE: _unused, ...env } = process.env;
 const child = spawn(electron, [here(script), ...rest], { cwd: root, stdio: "inherit", env });
 child.on("exit", (code) => process.exit(code ?? 1));

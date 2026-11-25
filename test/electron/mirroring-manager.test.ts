@@ -93,6 +93,59 @@ test("a mirroring route runs on the device's kept-open channel, is a local route
   }
 });
 
+// Chrome: `CastActivityManager::OnSessionRemoved` -> `RemoveActivity` drops the activity and sends nothing. Tried on a Nest Hub
+// Max, a STOP for the old session sent after our LAUNCH of another app (mirroring to flinging) made the receiver answer that
+// launch with LAUNCH_ERROR CANCELLED.
+test("a mirroring route the receiver ended sends no STOP and no CLOSE for the session it dropped", async () => {
+  const receiver = await FakeReceiver.create({ verifyBody: true });
+  const clients: FakeClient[] = [];
+  const manager = createCastManager({
+    ipcMain: new FakeIpcMain(),
+    discovery: Object.assign(new FakeDevices([LOCAL_TV]), { async start() {}, stop() {} }),
+    sinks: { ...FAST_SINKS, allowAllIps: true },
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      c.echoReplies = true;
+      const send = c.send.bind(c);
+      c.send = (namespace, destinationId, payload) => {
+        send(namespace, destinationId, payload);
+        if (namespace === "urn:x-cast:com.google.cast.webrtc") setImmediate(() => receiver.onControlMessage(namespace, String(payload)));
+      };
+      receiver.sendControl = (json) =>
+        setImmediate(() => c.emit("message", { namespace: "urn:x-cast:com.google.cast.webrtc", sourceId: c.apps[0]?.transportId ?? "", destinationId: c.senderId, data: json }));
+      clients.push(c);
+      return c;
+    },
+    selectDevice: async () => null,
+    presentation: false,
+    mirroring: {
+      createService: createMirroringServiceFactory({
+        createBackend: () => new FakeBackend(() => performance.now()),
+        encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(["vp8"]) }),
+        env: {},
+      }),
+    },
+  });
+  try {
+    await manager.start();
+    await manager.settled();
+    const channel = clients[0]!;
+    await manager.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: 5 });
+    const before = channel.calls.length;
+    // another sender's launch took the receiver's app: the status no longer lists the mirroring session
+    channel.apps = [];
+    channel.emit("receiverStatus", { applications: [], volume: { ...channel.volume } });
+    await sleep(100);
+    assert.deepEqual(manager.getRoutes(), [], "the route ended");
+    const after = channel.calls.slice(before);
+    assert.deepEqual(after.filter((c) => c.startsWith("stop ") || c.startsWith("closeTransport")), [], String(after));
+    assert.equal(channel.closed, false, "the channel stays open");
+  } finally {
+    await manager.dispose();
+    receiver.close();
+  }
+});
+
 test("a mirroring cast mode without the mirroring option is unable_to_cast, and argument errors stay per mode", async () => {
   const manager = createCastManager({
     ipcMain: new FakeIpcMain(),

@@ -19,7 +19,7 @@ function setup(opts: {
   allowOrigin?: (o: string) => boolean;
   tweak?: (c: FakeClient) => void;
   sinks?: Record<string, unknown>;
-  onSessionLaunched?: (senderId: number) => void;
+  onSessionLaunching?: (senderId: number) => void;
   issues?: RouterIssues;
 } = {}) {
   const devices = opts.devices ?? new FakeDevices();
@@ -40,7 +40,7 @@ function setup(opts: {
       return opts.pick ? opts.pick(list, req) : (list.find((d) => d.id === TV.id) ?? null);
     },
     allowOrigin: opts.allowOrigin,
-    onSessionLaunched: opts.onSessionLaunched,
+    onSessionLaunching: opts.onSessionLaunching,
     ...(opts.issues === undefined ? {} : { issues: opts.issues }),
     emit: log.emit,
   }));
@@ -688,11 +688,18 @@ test("a launch that fails leaves what the device was running listed", async () =
   assert.deepEqual(service.mediaRoutes().map((r2) => r2.id), ["other"]);
 });
 
-test("onSessionLaunched fires for a launch, not for a join, and sessionsLaunchedBy names the launcher's sessions", async () => {
+test("onSessionLaunching fires for a launch, before the LAUNCH is sent, not for a join, and sessionsLaunchedBy names the launcher's sessions", async () => {
   const launched: number[] = [];
-  const { service } = setup({ onSessionLaunched: (id) => void launched.push(id) });
+  const launchSentBefore: boolean[] = [];
+  const { service, clients } = setup({
+    onSessionLaunching: (id) => {
+      launched.push(id);
+      launchSentBefore.push(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))));
+    },
+  });
   const snap = await session(service, PAGE);
   assert.deepEqual(launched, [PAGE.id]);
+  assert.deepEqual(launchSentBefore, [false], "the frame's earlier route is stopped before the LAUNCH goes out (DoLaunchSession)");
   assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), [snap.sessionId]);
   assert.deepEqual(service.sessionsLaunchedBy(PAGE2.id), []);
   await init(service, PAGE2);
@@ -703,6 +710,20 @@ test("onSessionLaunched fires for a launch, not for a join, and sessionsLaunched
   const ended = await service.terminateSession(snap.sessionId);
   assert.equal(ended.ok, true);
   assert.deepEqual(service.sessionsLaunchedBy(PAGE.id), []);
+});
+
+test("the LAUNCH waits for what onSessionLaunching returns (the old route's STOP being answered), as a Nest Hub Max needs", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const { service, clients } = setup({ onSessionLaunching: () => gate });
+  await init(service);
+  const pending = service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))), false, "no LAUNCH while the STOP is unanswered");
+  release();
+  const r = await pending;
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(clients.some((c) => c.calls.some((call) => call.startsWith("launch"))), true);
 });
 
 test("the launch carries the URL's supportedAppTypes and parsed appParams, and an invisible sender connects invisibly", async () => {

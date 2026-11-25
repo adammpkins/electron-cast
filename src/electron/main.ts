@@ -513,8 +513,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     },
     ...(networkMonitor !== undefined ? { networkMonitor } : {}),
     // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
-    // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
-    onSessionLaunched: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
+    // session ends a mirroring route of that page, before its LAUNCH is sent, as `DoLaunchSession` does. Subframe sender ids
+    // never match a tab, as only the main frame is one.
+    onSessionLaunching: (senderId) => mirroring?.stopMirroringRoutesOfTab(senderId),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);

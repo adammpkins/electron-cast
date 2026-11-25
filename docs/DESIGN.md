@@ -134,7 +134,7 @@ namespace messages.
 ### What the channel sends and waits for
 
 `CastClient` follows Chrome's `cast_channel` code for what it puts in its messages and for its timers. Everything below is
-tested against a fake receiver and **not yet tried on a real device**.
+tested against a fake receiver. Tried on a Nest Hub Max: the CONNECT and LAUNCH of a session started by Google's SDK (accepted by the device), the close events of `Session.leave()` (`closed`) and `Session.stop()` (`terminated`), and the `USER_ALLOWED` launch status. Not yet tried on a real device: the approval wait of Android TV receivers, the declined and notification replies, and the timers.
 
 | Rule | Where | Chromium |
 |---|---|---|
@@ -441,7 +441,7 @@ reported unavailable otherwise. A plain https URL (Chrome's one-UA tab mirroring
 
 Source: `src/electron/mirroring-to-flinging.ts` (the rules, pure), `presentation-handler.ts` (`startSiteMirroring`,
 `fling`), `main.ts` (the wiring), `mirroring-manager.ts` (`startSiteInitiatedMirroring`, `switchToFlingingIfPossible`).
-Not yet tried on a real device; the tests use fakes.
+Tried on a Nest Hub Max for both: site-initiated mirroring from a local page with `AllowAllSitesToInitiateMirroring` (the OFFER's `targetDelay` was 300, frames flowed, `terminate()` from the page ended the route) and mirroring to flinging through the SDK's auto-join. Switching the mirrored tab to a window with a default request is unit-tested only.
 
 **Site-initiated mirroring** (S1). A page may name a Cast Streaming app in its `PresentationRequest` URLs, as Google Meet
 and Docs do ("Present to Cast"). `IsSiteInitiatedMirroringSource` (`cast_media_source.cc`) is any Cast Presentation URL
@@ -489,8 +489,8 @@ Two entry points, one rule (`CastActivityManager::JoinSession`, `cast_activity_m
   (`GetSinkForMirroringActivity`: the frame's own route in `routes_by_frame_`, when it is a mirroring one, which here is a
   tab route of the window), `LaunchSession` launches the app on that sink. The route keeps the presentation id
   `auto-join`, and the page's connection gets `receiver_action` (cast) then `new_session`, as for a `start()`. The
-  launch ends the frame's mirroring route as `DoLaunchSession` does (here the route ends when the session is up, as
-  every session launch does). `cast_this_tab`, "mirror, not cast, despite the name" (`DefaultActionPolicy`), keeps the
+  launch ends the frame's mirroring route as `DoLaunchSession` does (before the LAUNCH is sent, as every session launch
+  does). `cast_this_tab`, "mirror, not cast, despite the name" (`DefaultActionPolicy`), keeps the
   tab mirrored and the join fails with "No matching route". Only the exact string counts; any other value is
   `create_session`. `page_scoped` auto-join policy does not stop it: Chrome checks only that no activity was found.
 - `SwitchToFlingingIfPossible` (`components/media_router/browser/mirroring_to_flinging_switcher.cc`) runs after
@@ -500,9 +500,11 @@ Two entry points, one rule (`CastActivityManager::JoinSession`, `cast_activity_m
   page as `OnPresentationResponse` does, only while that request is still the window's default one.
 
 Differences: the sink is launched on whatever its capabilities are (Chrome's `ChooseAppId` only logs a mismatch) and
-without asking whether it has the app; and the mirroring route ends when the new session is up
-(`onSessionLaunched`), not when the launch starts as in `DoLaunchSession`, so a launch that fails leaves the tab mirrored
-where Chrome has already stopped it.
+without asking whether it has the app. The mirroring route is stopped before the LAUNCH is sent (`onSessionLaunching`), as
+`DoLaunchSession` does it: a version that waited until the new session was up was tried on a Nest Hub Max, and the receiver
+answered the LAUNCH it got while the mirroring app still ran with `LAUNCH_ERROR` `CANCELLED`. A route the receiver ended
+itself (what a LAUNCH from another sender does) is dropped with no STOP or CLOSE, as `OnSessionRemoved` does
+(`MirroringActivity::onReceiverStatus`).
 
 **The desktop capture escalation guard** (M6). `MediaRouterDesktop::JoinRoute` refuses, with `USER_NOT_ALLOWED` and the
 text "Cannot switch to desktop capture without user consent", a join whose source is desktop mirroring unless the route
@@ -804,7 +806,7 @@ Where electron-cast differs from Chrome here:
 
 ### Issues, policies and switches (`issues.ts`, `switches.ts`, `logger.ts`)
 
-Not yet tried on a real device. Chromium `main` (November 2026).
+Tried on a Nest Hub Max: a failed launch (an app the device does not have) raises "Failed to cast. Please try again." for that sink as a warning, and the log and provider state show it. Not tried on a real device: the other issues, the 1 and 5 minute dismissals, and the policies and switches other than `AllowAllSitesToInitiateMirroring`. Chromium `main` (November 2026).
 
 **Issues.** `IssueManager` (`components/media_router/browser/issue_manager.cc`) is ported whole: issues are deduplicated by
 value (`IssueInfo::operator==`), the top issue is the oldest (the lowest id), an observer is told of the top issue
@@ -1162,8 +1164,8 @@ Not ported: the remoting branch of `SwitchSourceTab` (remoting is not offered).
 new one launches, and `OnSourceChanged` does the same for the new tab's frame on a switch. Here the two route kinds live in
 separate layers, so the rule is a pair of narrow hooks: `MirroringManagerOptions.terminateRoutesOfPage` (called when a page
 becomes a mirroring source, by a launch or a switch; `main.ts` ends the Cast SDK / Presentation API sessions that page
-*launched*, `CastSessionService.sessionsLaunchedBy`, through `terminateSession`) and `CastSessionServiceOptions.onSessionLaunched`
-(called when a page launches a session; `main.ts` ends that page's mirroring routes). A session the page only joined is not
+*launched*, `CastSessionService.sessionsLaunchedBy`, through `terminateSession`) and `CastSessionServiceOptions.onSessionLaunching`
+(called when a page launches a session, before its LAUNCH is sent; `main.ts` ends that page's mirroring routes). A session the page only joined is not
 ended, as Chrome's `routes_by_frame_` records launches only. Deviation: Chrome's key is the frame, here a main frame is
 its page (a subframe's session is not matched to a mirroring route, which in Chrome is also a main frame).
 

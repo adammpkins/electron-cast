@@ -141,10 +141,14 @@ export interface CastSessionServiceOptions {
    */
   ownsSession?(sessionId: string, sinkId: string): boolean;
   /**
-   * A session was launched for `senderId` (`CastActivityManager::DoLaunchSession`, where a route from the frame is
-   * recorded in `routes_by_frame_`). Not called for a join, which Chrome does not record there.
+   * A session is about to be launched for `senderId` (`CastActivityManager::DoLaunchSession`, where the frame's earlier
+   * route is stopped and the new one recorded in `routes_by_frame_`, before the LAUNCH is sent). Called before the LAUNCH
+   * goes out, as Chrome stops the old route first, and the LAUNCH waits for the returned promise (the old app's STOP being
+   * answered). Chrome sends the two back to back; tried on a Nest Hub Max, a LAUNCH sent while the tab's mirroring app was
+   * still running, or right behind its STOP, was answered with `LAUNCH_ERROR` `CANCELLED`. Not called for a join, which
+   * Chrome does not record there.
    */
-  onSessionLaunched?(senderId: number): void;
+  onSessionLaunching?(senderId: number): void | Promise<void>;
   /**
    * Where Chrome raises its issues (`CastActivityManager` and `MediaRouterUI`); none are raised without it. A launch the
    * receiver holds for its user's approval (`pending_authorization`, LAUNCH_STATUS USER_PENDING_AUTHORIZATION) raises the
@@ -1107,6 +1111,11 @@ export class CastSessionService {
     let app: ReceiverApplication;
     const issues = this.options.issues;
     try {
+      await this.options.onSessionLaunching?.(sender.id);
+    } catch (err) {
+      console.error("electron-cast: onSessionLaunching failed", err);
+    }
+    try {
       app = await client.launch(appId, {
         ...(request.launch.supportedAppTypes === undefined ? {} : { supportedAppTypes: request.launch.supportedAppTypes }),
         ...(appParams === undefined ? {} : { appParams }),
@@ -1175,11 +1184,6 @@ export class CastSessionService {
     const snapshot = this.snapshotOf(rec);
     rec.lastSnapshot = snapshot;
     this.sessions.set(app.sessionId, rec);
-    try {
-      this.options.onSessionLaunched?.(sender.id);
-    } catch (err) {
-      console.error("electron-cast: onSessionLaunched failed", err);
-    }
     return snapshot;
   }
 

@@ -365,10 +365,14 @@ export class MirroringManager {
    * End the mirroring routes of a page, and only those: what a Cast session launched by the page does to them. It must
    * not call `terminateRoutesOfPage`, which would end the session that was just launched.
    */
-  stopMirroringRoutesOfTab(webContentsId: number): void {
+  stopMirroringRoutesOfTab(webContentsId: number): Promise<void> {
+    const settled: Promise<void>[] = [];
     for (const entry of [...this.entries.values()]) {
-      if (entry.activity.webContentsId === webContentsId) entry.activity.stopMirroring();
+      if (entry.activity.webContentsId !== webContentsId) continue;
+      entry.activity.stopMirroring();
+      settled.push(entry.activity.stopSettled);
     }
+    return Promise.all(settled).then(() => {});
   }
 
   dispose(): void {
