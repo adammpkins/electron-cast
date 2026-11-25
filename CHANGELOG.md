@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0-next.2 (prerelease)
+
+A second prerelease of 0.5.0 on the npm `next` tag: install it with `npm i electron-cast@next` (`npm i electron-cast`
+still installs 0.4.0). Tab mirroring over a laggy link now behaves as Chrome's does: the capture gets smaller instead of
+the picture going blocky, and on Windows the sender keeps time. Presentation URLs, sink order and receiver labels follow
+Chrome more closely.
+
+### Documentation
+
+- **Troubleshooting for laggy or blocky mirroring**: which log lines to read, and what helps (a quieter network, a longer
+  playout delay). The README's 1080p lag known issue is gone: on a Chromecast Ultra a mirrored tab looked as clean as
+  Chrome's.
 
 ### Chrome parity
 
