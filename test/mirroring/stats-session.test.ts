@@ -161,7 +161,23 @@ test("the manager fetches statistics every 500 ms for sessions started while ena
     manager.terminate(route.id);
     await sleep(1200);
     assert.equal(seen.length, count);
+    // MediaRouterDebuggerImpl::GetMirroringStats returns most_recent_mirroring_stats_, which outlives the session, and
+    // has no error path: an ended route keeps its last statistics and an unknown one reads as empty.
+    const packets = (st: MirroringStats): number => (st.video?.NUM_PACKETS_SENT as number | undefined) ?? 0;
+    assert.ok(packets(manager.getMirroringStats(route.id)) > 0, "an ended route keeps its last statistics");
+    assert.deepEqual(manager.getMirroringStats("urn:x-org.chromium:media:route:nope"), {});
+    // GetMirroringStats is empty while ShouldFetchMirroringStats is false; the copy itself is not cleared.
+    manager.setMirroringStatsEnabled(false);
     assert.deepEqual(manager.getMirroringStats(route.id), {});
+    manager.setMirroringStatsEnabled(true);
+    assert.ok(packets(manager.getMirroringStats(route.id)) > 0);
+    // Chrome's one copy is replaced by the next push of any session.
+    const next = await manager.startMirroring("dev-1", { castMode: "tab_mirror", webContentsId: 3 });
+    assert.ok(packets(manager.getMirroringStats(route.id)) > 0, "kept until another route pushes");
+    await sleep(1200);
+    assert.ok(packets(manager.getMirroringStats(next.id)) > 0);
+    assert.deepEqual(manager.getMirroringStats(route.id), {});
+    manager.terminate(next.id);
   } finally {
     manager.dispose();
     receiver.close();

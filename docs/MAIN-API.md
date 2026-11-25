@@ -495,7 +495,7 @@ API; nothing is uploaded, and Chrome's UMA is not ported):
 manager.setMirroringStatsEnabled(true); // off by default; read when a session starts, so call it before startCasting
 const route = await manager.startCasting(sink.id, { castMode: "tab_mirror", webContentsId });
 const off = manager.registerMirroringStatsObserver((routeId, stats) => {}); // every 500 ms, as Chrome's observers
-manager.getMirroringStats(route.id); // { audio: {...}, video: {...} }; {} until the first fetch or when it was off
+manager.getMirroringStats(route.id); // { audio: {...}, video: {...} }; {} until the first fetch, while off, or for an unknown route
 manager.isMirroringStatsEnabled();
 ```
 
@@ -508,7 +508,7 @@ The dictionary has Chrome's names and units. Per stream: `ENQUEUE_FPS`, `AVG_CAP
 `E2E_LATENCY_MS_HISTO`, `LATE_FRAME_MS_HISTO`, each a list like `[{ "0-19": 12 }, { ">=800": 1 }]`), and from the session
 host `TARGET_BITRATE`, `ENCODER_UTILIZATION`, `LOSSINESS`, `FRAMES_INSERTED`, `FRAMES_DROPPED`. A value that is not
 finite is the string `"null"`. As in Chrome the structure is for logs, not a contract. `getMirroringStats` takes a route
-id because several routes can run (Chrome's debugger keeps one global copy).
+id because several routes can run (Chrome's debugger keeps one global copy). It never throws: like Chrome's `MediaRouterDebuggerImpl::GetMirroringStats`, which has no error path, it returns `{}` while statistics are off, before the first fetch and for a route id it does not know, and a route that has ended keeps its last statistics (Chrome's copy outlives the session) until another route pushes newer ones.
 
 `mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
 `BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`, and `app` so that Chrome's

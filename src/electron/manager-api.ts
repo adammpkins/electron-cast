@@ -238,7 +238,9 @@ export interface CastManagerApi {
    * starts: call `setMirroringStatsEnabled(true)` before `startCasting`. Then the route's latest statistics are in
    * `getMirroringStats`, refreshed every 500 ms, with Chrome's names and units (`ENQUEUE_FPS`,
    * `AVG_NETWORK_LATENCY_MS`, `NETWORK_LATENCY_MS_HISTO`, ...) under `audio` and `video`. Chrome guarantees no
-   * structure: it is for logs.
+   * structure: it is for logs. Never throws (Chrome's `MediaRouterDebuggerImpl::GetMirroringStats` has no error path):
+   * `{}` while statistics are off, before the first fetch and for an unknown route; a route that ended keeps its last
+   * statistics, as Chrome's copy outlives the session, until another route pushes newer ones.
    */
   getMirroringStats(routeId: string): MirroringStats;
   /** `MediaRouterDebugger::EnableRtcpReports` / `DisableRtcpReports`: applies to sessions that start afterwards. */
@@ -597,8 +599,8 @@ export function createManagerApi(
       need(routeId);
       host.unfreezeRoute?.(routeId);
     },
+    // `MediaRouterDebuggerImpl::GetMirroringStats` has no error path: an ended or unknown route reads as {}.
     getMirroringStats(routeId) {
-      need(routeId);
       return host.mirroringStats?.get(routeId) ?? {};
     },
     setMirroringStatsEnabled(enabled) {

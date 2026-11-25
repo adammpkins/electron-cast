@@ -1135,7 +1135,12 @@ pins; the files are identical on main) unless noted:
   `UNKNOWN_OPEN_SCREEN_STAT`. Receiver events that arrive before the clock offset is known are left out of the frame
   and end-to-end latencies, the late-frame count and the first and last event times.
 - **Deviations.** (1) Chrome's debugger is a single global one holding the most recent push of any session (its own
-  TODO says multiple sessions are not handled); `getMirroringStats` takes the route id and each route keeps its own.
+  TODO says multiple sessions are not handled); `getMirroringStats` takes the route id and each route keeps its own. What Chrome's copy does is kept per route:
+  `MediaRouterDebuggerImpl::GetMirroringStats` returns an empty dictionary while `ShouldFetchMirroringStats` is false
+  and otherwise `most_recent_mirroring_stats_`, which nothing clears when a session ends and which the next push of any
+  session replaces (`NotifyGetMirroringStats`, which also drops pushes while statistics are off). So `getMirroringStats`
+  never throws, returns `{}` while off and for an unknown route, and gives an ended route its last statistics until
+  another route pushes.
   (2) A video frame's capture begin is its capture time from the frame metadata (or the agent's estimate, see
   "Process split") and its capture end is when the agent read it from the track; Chrome has `capture_begin_time`
   and `capture_end_time` from the capturer, so the capture latency here also counts the delivery to the agent. Audio is the same as in Chrome (one time for both). (3) The stats

@@ -72,6 +72,8 @@ test("switchMirroringSourceTab, freezeRoute and unfreezeRoute: argument checks, 
   assert.throws(() => api.switchMirroringSourceTab("nope", 4), { code: "route_not_found" });
   assert.throws(() => api.freezeRoute("nope"), { code: "route_not_found" });
   assert.throws(() => api.unfreezeRoute("nope"), MediaRouteError);
+  // MediaRouterDebuggerImpl::GetMirroringStats has no error path.
+  assert.deepEqual(api.getMirroringStats("nope"), {});
   const without = mk(false);
   assert.throws(() => without.switchMirroringSourceTab("r1", 4), { code: "unable_to_cast" });
   without.freezeRoute("r1");

@@ -95,6 +95,12 @@ export class MirroringManager {
   private readonly statsListeners = new Set<MirroringStatsListener>();
   /** `MediaRouterDebugger` state: whether sessions that start next fetch their statistics. Off by default, as in Chrome. */
   private fetchMirroringStats = false;
+  /**
+   * `MediaRouterDebuggerImpl::most_recent_mirroring_stats_`: Chrome keeps one copy, the latest push of any session, and it
+   * outlives the session. Live routes keep their own here; this is the last copy of the route that ended most recently,
+   * until another route pushes newer statistics.
+   */
+  private lastEnded: { routeId: string; stats: MirroringStats } | undefined;
   private disposed = false;
 
   constructor(options: MirroringManagerOptions) {
@@ -157,7 +163,10 @@ export class MirroringManager {
       shouldFetchMirroringStats: () => this.fetchMirroringStats,
       onMirroringStats: (stats) => {
         if (this.entries.get(routeId) !== entry) return;
+        // `NotifyGetMirroringStats`: dropped while statistics are off, observers included.
+        if (!this.fetchMirroringStats) return;
         entry.stats = stats;
+        this.lastEnded = undefined;
         for (const l of [...this.statsListeners]) {
           try {
             l(routeId, structuredClone(stats));
@@ -169,6 +178,7 @@ export class MirroringManager {
       onStop: () => {
         if (this.entries.get(routeId) === entry) {
           this.entries.delete(routeId);
+          if (entry.stats !== undefined) this.lastEnded = { routeId, stats: entry.stats };
           this.notify();
         }
       },
@@ -211,11 +221,15 @@ export class MirroringManager {
   }
 
   /**
-   * `MediaRouterDebugger::GetMirroringStats`: the latest statistics of the route (Chrome keeps the most recent push of
-   * any session; here each route has its own). Empty before the first fetch or when statistics were off at the start.
+   * `MediaRouterDebuggerImpl::GetMirroringStats`: the latest statistics of the route (Chrome keeps the most recent push
+   * of any session; here each route has its own). Never fails, as Chrome's has no error path: empty while statistics are
+   * off, before the first fetch, when they were off at the start, and for a route id it does not know. A route that
+   * ended keeps its last statistics, as Chrome's copy outlives the session, until another route pushes newer ones.
    */
   getMirroringStats(routeId: string): MirroringStats {
-    return structuredClone(this.entries.get(routeId)?.stats ?? {});
+    if (!this.fetchMirroringStats) return {};
+    const stats = this.entries.get(routeId)?.stats ?? (this.lastEnded?.routeId === routeId ? this.lastEnded.stats : undefined);
+    return structuredClone(stats ?? {});
   }
 
   /** `MediaRouterDebugger::AddObserver`. Returns the remove function. */
@@ -293,6 +307,7 @@ export class MirroringManager {
     this.disposed = true;
     for (const entry of [...this.entries.values()]) entry.activity.stopMirroring();
     this.entries.clear();
+    this.lastEnded = undefined;
     this.listeners.clear();
     this.statsListeners.clear();
   }
