@@ -30,14 +30,28 @@ export function makeOpusPacket(rtpTimestamp: number, size: number): Buffer {
   return Buffer.concat([Buffer.from([0x78]), fakeFrameBody(rtpTimestamp, Math.max(0, size - 1))]);
 }
 
+/** The timers the backend runs on: Node's by default, a VirtualClock's in deterministic tests. */
+export interface FakeTimers {
+  setTimeout(cb: () => void, ms: number): unknown;
+  setInterval(cb: () => void, ms: number): () => void;
+}
+
+const realTimers: FakeTimers = {
+  setTimeout: (cb, ms) => setTimeout(cb, ms),
+  setInterval: (cb, ms) => {
+    const t = setInterval(cb, ms);
+    return () => clearInterval(t);
+  },
+};
+
 export class FakeBackend implements MirroringBackend {
   readonly videoBitrates: number[] = [];
   readonly keyFramesRequested: number[] = [];
   videoFramesProduced = 0;
   audioFramesProduced = 0;
   feedback: number[] = [];
-  private videoTimer: NodeJS.Timeout | undefined;
-  private audioTimer: NodeJS.Timeout | undefined;
+  private cancelVideoTimer: (() => void) | undefined;
+  private cancelAudioTimer: (() => void) | undefined;
   private paused = false;
   private videoSink: VideoCaptureSink | undefined;
   private lastVideoParams: VideoCaptureParams | undefined;
@@ -48,8 +62,11 @@ export class FakeBackend implements MirroringBackend {
   private nextVideoFrameId = 0;
   private lastVideoFrameId = -1;
 
-  constructor(now: () => number) {
+  private readonly timers: FakeTimers;
+
+  constructor(now: () => number, timers: FakeTimers = realTimers) {
     this.now = now;
+    this.timers = timers;
     this.t0 = now();
   }
 
@@ -76,7 +93,7 @@ export class FakeBackend implements MirroringBackend {
         const referenced = key ? frameId : self.lastVideoFrameId;
         self.lastVideoFrameId = frameId;
         const data = makeVp8Frame(key, frame.rtpTimestamp, size);
-        setTimeout(() => {
+        self.timers.setTimeout(() => {
           self.videoFramesProduced++;
           callbacks.onEncoded(referenceTimeMs, {
             isKeyFrame: key,
@@ -126,12 +143,12 @@ export class FakeBackend implements MirroringBackend {
   }
 
   startAudioCapture(_params: { sampleRate: number; channels: number; framesPerBuffer: number }, sink: AudioCaptureSink): void {
-    this.audioTimer = setInterval(() => sink.insertAudio(480, this.now()), 10);
+    this.cancelAudioTimer = this.timers.setInterval(() => sink.insertAudio(480, this.now()), 10);
   }
 
   stopAudioCapture(): void {
-    if (this.audioTimer !== undefined) clearInterval(this.audioTimer);
-    this.audioTimer = undefined;
+    this.cancelAudioTimer?.();
+    this.cancelAudioTimer = undefined;
   }
 
   startVideoCapture(params: VideoCaptureParams, sink: VideoCaptureSink): void {
@@ -139,7 +156,7 @@ export class FakeBackend implements MirroringBackend {
     this.videoSink = sink;
     this.paused = false;
     let last = 0;
-    this.videoTimer = setInterval(() => {
+    this.cancelVideoTimer = this.timers.setInterval(() => {
       if (this.paused) return;
       const ref = this.now();
       let rtp = Math.round((ref - this.t0) * 90) + 3000;
@@ -168,7 +185,7 @@ export class FakeBackend implements MirroringBackend {
 
   stopAll(): void {
     this.stopAudioCapture();
-    if (this.videoTimer !== undefined) clearInterval(this.videoTimer);
-    this.videoTimer = undefined;
+    this.cancelVideoTimer?.();
+    this.cancelVideoTimer = undefined;
   }
 }

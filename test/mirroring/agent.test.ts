@@ -59,6 +59,7 @@ function startAgent() {
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
     sent, encoders, settle,
+    advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
     capture: async (ts: number) => {
       now += 33;
@@ -173,4 +174,19 @@ test("port backend: audio timestamps follow the recorded times, and a lost chunk
     { id: 2, rtp: 960, ref: 1020, skipped: 480 },
     { id: 3, rtp: 1440 + 7 * 480, ref: 1100, skipped: 0 },
   ]);
+});
+
+test("agent: a refresh frame on a static screen is stamped with the elapsed time, not one tick", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0);
+  const first = a.rtps()[0]!;
+  a.advance(200);
+  await a.command({ t: "refresh" });
+  a.advance(50);
+  await a.command({ t: "refresh" });
+  const [, second, third] = a.rtps();
+  // 33 ms passed between the capture's reference time and the first refresh request, then 200, then 50.
+  assert.ok(Math.abs(second! - first - 200 * 90) < 90, `second ${second! - first}`);
+  assert.ok(Math.abs(third! - second! - 50 * 90) < 90, `third ${third! - second!}`);
 });

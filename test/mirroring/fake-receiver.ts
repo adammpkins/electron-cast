@@ -27,6 +27,16 @@ export interface FakeReceiverOptions {
   verifyBody?: boolean;
   /** Stop answering feedback (to test the sender with a silent receiver). */
   silent?: boolean;
+  /** Run on a virtual clock and in-memory network instead of the wall clock and a UDP socket (virtual-time.ts). */
+  net?: ReceiverNet;
+}
+
+/** What the receiver needs from a virtual network. */
+export interface ReceiverNet {
+  now(): number;
+  setInterval(cb: () => void, ms: number): () => void;
+  /** Send an RTCP packet to the sender. */
+  toSender(packet: Buffer): void;
 }
 
 interface FrameAssembly {
@@ -111,14 +121,16 @@ export class FakeReceiver {
   /** Called with every control message (JSON text) the receiver sends back. */
   sendControl: (json: string) => void = () => {};
   private readonly opts: Required<Pick<FakeReceiverOptions, "lossRate" | "playoutDelayMs">> & FakeReceiverOptions;
-  private readonly socket: Socket;
+  private readonly socket: Socket | undefined;
+  private readonly net: ReceiverNet | undefined;
+  private cancelNetTimer: (() => void) | undefined;
   private port = 0;
   private readonly streams = new Map<number, StreamState>();
-  private readonly ntp = new NtpTimeConverter(performance.now(), Date.now() / 1000);
+  private readonly ntp: NtpTimeConverter;
   private senderEndpoint: { address: string; port: number } | undefined;
   private timer: NodeJS.Timeout | undefined;
   private tokens = 8192;
-  private tokensAt = performance.now();
+  private tokensAt: number;
   private readonly random: () => number;
   /** The most recent OFFER's streams, for tests that want to look at them. */
   lastOffer: Record<string, unknown> | undefined;
@@ -126,14 +138,33 @@ export class FakeReceiver {
   private constructor(opts: FakeReceiverOptions) {
     this.opts = { lossRate: 0, playoutDelayMs: 200, ...opts };
     this.random = opts.random ?? Math.random;
-    this.socket = createSocket("udp4");
+    this.net = opts.net;
+    this.socket = opts.net === undefined ? createSocket("udp4") : undefined;
+    // A fixed wall-clock origin under a virtual clock keeps the NTP timestamps identical from run to run.
+    this.ntp = new NtpTimeConverter(this.clockNow(), opts.net === undefined ? Date.now() / 1000 : 1_700_000_000);
+    this.tokensAt = this.clockNow();
+  }
+
+  private clockNow(): number {
+    return this.net !== undefined ? this.net.now() : performance.now();
+  }
+
+  /** A packet arriving from the sender over the virtual network. */
+  deliver(packet: Buffer): void {
+    this.onPacket(packet, { address: "virtual", port: 1 } as RemoteInfo);
   }
 
   static async create(opts: FakeReceiverOptions = {}): Promise<FakeReceiver> {
     const r = new FakeReceiver(opts);
-    await new Promise<void>((resolve) => r.socket.bind(0, "127.0.0.1", resolve));
-    r.port = r.socket.address().port;
-    r.socket.on("message", (msg, rinfo) => r.onPacket(msg, rinfo));
+    if (r.net !== undefined) {
+      r.port = 40000;
+      r.cancelNetTimer = r.net.setInterval(() => r.tick(), 10);
+      return r;
+    }
+    const socket = r.socket!;
+    await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve));
+    r.port = socket.address().port;
+    socket.on("message", (msg, rinfo) => r.onPacket(msg, rinfo));
     r.timer = setInterval(() => r.tick(), 10);
     return r;
   }
@@ -145,7 +176,9 @@ export class FakeReceiver {
   close(): void {
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
-    this.socket.close();
+    this.cancelNetTimer?.();
+    this.cancelNetTimer = undefined;
+    this.socket?.close();
   }
 
   /** The OFFER, GET_CAPABILITIES and RPC/INPUT messages from the sender. */
@@ -209,7 +242,7 @@ export class FakeReceiver {
 
   private onPacket(buf: Buffer, rinfo: RemoteInfo): void {
     this.senderEndpoint = { address: rinfo.address, port: rinfo.port };
-    const now = performance.now();
+    const now = this.clockNow();
     // RTCP sender report.
     if (buf.length >= 28 && buf[0] === 0x80 && buf[1] === 200) {
       const stream = this.streams.get(buf.readUInt32BE(4));
@@ -303,7 +336,7 @@ export class FakeReceiver {
   /** Send feedback for streams with news, and at least every 100 ms. */
   private tick(): void {
     if (this.opts.silent === true || this.senderEndpoint === undefined) return;
-    const now = performance.now();
+    const now = this.clockNow();
     for (const stream of this.streams.values()) {
       if (!stream.dirty && now - stream.lastFeedbackAt < 100) continue;
       if (now - stream.lastFeedbackAt < 20) continue;
@@ -358,6 +391,7 @@ export class FakeReceiver {
     });
     stream.dirty = false;
     stream.lastFeedbackAt = now;
-    this.socket.send(rtcp, this.senderEndpoint!.port, this.senderEndpoint!.address);
+    if (this.net !== undefined) this.net.toSender(rtcp);
+    else this.socket!.send(rtcp, this.senderEndpoint!.port, this.senderEndpoint!.address);
   }
 }
