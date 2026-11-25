@@ -565,9 +565,12 @@ export const AGENT_SOURCE = String.raw`
   // just before it is encoded (VideoSender::InsertRawVideoFrame, kCastStreamingPerformanceOverlay). Each glyph is a few
   // rectangles of a 3x5 grid, 4 pixels per grid cell, and "diverges" the luma of its pixels by 48 so it shows on any
   // background. Only 8-bit planar I420 and NV12 are drawn on, as in Chrome, which returns other frames untouched.
-  // Chrome 120 right-aligns each line (the pointer moves on after a glyph). Current Chromium moves it on before the
-  // glyph (the span refactor), which shifts the line one glyph to the right and wraps the last glyph into the next row
-  // of pixels; that looks like a regression, so the layout here is the intended one.
+  // The layout is that of current Chromium main, which moves the pointer on before each glyph
+  // (p_ul = p_ul.subspan(kPixelsPerChar) at the top of the loop in RenderLineOfText). Chrome 120 moved it on after the
+  // glyph (for (size_t i = first_idx; i < line.size(); ++i, p_ul += kPixelsPerChar)), which right-aligns the line; main's
+  // shifts every glyph one cell to the right, so the last one runs past the visible width into the start of the next row
+  // of pixels. That looks like a regression from the span refactor, not a design, and may be fixed upstream; it is
+  // reproduced because the rule is to match current Chrome.
   const OVERLAY_SCALE = 4, OVERLAY_GLYPH_W = 3, OVERLAY_SPACING = 1, OVERLAY_LINE_HEIGHT = (5 + 2) * OVERLAY_SCALE;
   const OVERLAY_PX_PER_CHAR = (OVERLAY_GLYPH_W + OVERLAY_SPACING) * OVERLAY_SCALE;
   const GLYPHS = {
@@ -589,13 +592,15 @@ export const AGENT_SOURCE = String.raw`
     const lineWidth = ((OVERLAY_GLYPH_W + OVERLAY_SPACING) * line.length + OVERLAY_SPACING) * OVERLAY_SCALE;
     const first = lineWidth < width ? 0 : Math.floor((lineWidth - width) / OVERLAY_PX_PER_CHAR) + 1;
     let x0 = width - lineWidth + first * OVERLAY_PX_PER_CHAR;
-    for (let i = first; i < line.length; i++, x0 += OVERLAY_PX_PER_CHAR) {
+    for (let i = first; i < line.length; i++) {
+      x0 += OVERLAY_PX_PER_CHAR;
       const rects = GLYPHS[line[i].toLowerCase()];
       if (!rects) continue;
       for (const [rx, ry, rw, rh] of rects) {
         for (let y = ry * OVERLAY_SCALE; y < (ry + rh) * OVERLAY_SCALE; y++) {
           for (let x = rx * OVERLAY_SCALE; x < (rx + rw) * OVERLAY_SCALE; x++) {
             const at = offset + (top + y) * stride + x0 + x;
+            if (at < 0 || at >= luma.length) continue;
             const v = luma[at];
             // [16,63] -> [64,111]; [64,235] -> [16,187]
             luma[at] = v >= 64 ? v - 48 : v + 48;

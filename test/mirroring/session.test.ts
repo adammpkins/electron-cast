@@ -215,3 +215,57 @@ test("congestion_signal picks which frame drops back the bandwidth off", async (
   assert.equal(await drive("after_encoding", "framesDroppedBeforeEncoding"), false);
   assert.equal(await drive("before_or_after_encoding", "framesDroppedAfterEncoding"), true);
 });
+
+test("the backoff parameters replace the defaults of the gradual backoff", async () => {
+  const bandwidthBackoff = { goodNetworkCitizenFactor: 0.8, minBackoffFactor: 0.6, maxBackoffFactor: 0.6, fastRecoveryIncrease: 2, conservativeIncrease: 1.1 };
+  const h = await startHarness({ receiver: {}, features: { bandwidthBackoff } });
+  try {
+    await sleep(100);
+    h.host.updateBandwidthEstimate(1_000_000);
+    const start = h.host.currentUsableBandwidth;
+    (h.host.video as unknown as Record<string, number>).framesDroppedBeforeEncoding! += 1;
+    h.host.updateBandwidthEstimate(1_000_000);
+    const backedOff = h.host.currentUsableBandwidth;
+    assert.equal(backedOff, Math.trunc(start * 0.6));
+    h.host.updateBandwidthEstimate(20_000_000);
+    assert.equal(h.host.currentUsableBandwidth, Math.min(Math.trunc(backedOff * 2), Math.max(start, Math.trunc(backedOff * 1.1))));
+  } finally {
+    h.close();
+  }
+});
+
+test("good_network_citizen_factor scales the estimate the usable bandwidth drops to", async () => {
+  const bandwidthBackoff = { goodNetworkCitizenFactor: 0.5, minBackoffFactor: 0.5, maxBackoffFactor: 0.85, fastRecoveryIncrease: 1.5, conservativeIncrease: 1.1 };
+  const h = await startHarness({ receiver: {}, features: { bandwidthBackoff, gradualBandwidthBackoff: false } });
+  try {
+    await sleep(100);
+    h.host.updateBandwidthEstimate(1_000_000);
+    (h.host.video as unknown as Record<string, number>).framesDroppedBeforeEncoding! += 1;
+    h.host.updateBandwidthEstimate(1_000_000);
+    assert.equal(h.host.currentUsableBandwidth, 500_000);
+  } finally {
+    h.close();
+  }
+});
+
+test("without kCastStreamingGradualBandwidthBackoff a drop snaps to the estimate and a static screen changes nothing", async () => {
+  const h = await startHarness({ receiver: {}, features: { gradualBandwidthBackoff: false } });
+  try {
+    await sleep(100);
+    h.host.updateBandwidthEstimate(10_000_000);
+    const start = h.host.currentUsableBandwidth;
+    // A lower estimate without dropped frames: nothing changes.
+    h.host.updateBandwidthEstimate(1_000_000);
+    assert.equal(h.host.currentUsableBandwidth, start);
+    // Dropped frames: straight down to 0.8 of the estimate, not by a backoff factor.
+    (h.host.video as unknown as Record<string, number>).framesDroppedBeforeEncoding! += 1;
+    h.host.updateBandwidthEstimate(1_000_000);
+    assert.equal(h.host.currentUsableBandwidth, Math.max(Math.trunc(0.8 * 1_000_000), 384 << 10));
+    // No quick recovery: the legacy increase is conservative (1.1x) each time.
+    const low = h.host.currentUsableBandwidth;
+    h.host.updateBandwidthEstimate(20_000_000);
+    assert.equal(h.host.currentUsableBandwidth, Math.trunc(low * 1.1));
+  } finally {
+    h.close();
+  }
+});

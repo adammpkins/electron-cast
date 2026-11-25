@@ -295,3 +295,66 @@ test("the VP9 check reads a key frame's size from the uncompressed header and te
   assert.equal(validateVp9Frame(Uint8Array.from([0x82, 0x49, 0x83, 0x43, 0x40, 0x77, 0xf0, 0x43, 0x70])), undefined);
   assert.equal(validateVp9Frame(key.subarray(0, 6)), undefined);
 });
+
+// mirroring_features.cc, media_switches.cc
+
+test("kCastStreamingOfferHardwareFirst off: hardware and software codecs go in one offer, and no fallback offer follows", async () => {
+  const h = await startHarness({ type: "video_only", hardware: ["h264"], receiver: { videoPreference: ["vp8"] }, features: { offerHardwareFirst: false } });
+  try {
+    await sleep(800);
+    assert.deepEqual(offered(h).map((s) => s.codecName), ["h264", "vp8"]);
+    assert.equal(h.log.filter((l) => l.includes("Attempting fallback")).length, 0);
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.backend.videoEncoderConfigs[0]!.videoCodec, "vp8");
+  } finally {
+    h.close();
+  }
+});
+
+test("kCastStreamingOfferHardwareFirst off: a receiver that takes nothing ends the session without a second offer", async () => {
+  const h = await startHarness({ type: "video_only", hardware: ["h264"], receiver: { videoPreference: [] }, features: { offerHardwareFirst: false } });
+  try {
+    await sleep(800);
+    assert.equal(h.log.filter((l) => l.includes("Attempting fallback")).length, 0);
+    assert.equal(h.errors[0]?.error, "ANSWER_NO_AUDIO_OR_VIDEO");
+  } finally {
+    h.close();
+  }
+});
+
+test("kCastStreaming60fps: the offer asks for 60 fps (H.264 level 4.2)", async () => {
+  const h = await startHarness({ type: "video_only", hardware: ["h264"], receiver: { videoPreference: ["h264"] }, features: { enable60fps: true } });
+  try {
+    await sleep(500);
+    const stream = (h.receiver.lastOffer!.offer as { supportedStreams: { type: string; maxFrameRate?: string }[] }).supportedStreams.find((s) => s.type === "video_source")!;
+    assert.equal(stream.maxFrameRate, "60/1");
+    assert.deepEqual(offered(h).map((s) => s.codecParameter), ["avc1.4d002a"]);
+  } finally {
+    h.close();
+  }
+});
+
+test("without kCastStreaming60fps the offer is for 30 fps", async () => {
+  const h = await startHarness({ type: "video_only", hardware: ["h264"], receiver: { videoPreference: ["h264"] } });
+  try {
+    await sleep(500);
+    const stream = (h.receiver.lastOffer!.offer as { supportedStreams: { type: string; maxFrameRate?: string }[] }).supportedStreams.find((s) => s.type === "video_source")!;
+    assert.equal(stream.maxFrameRate, "30/1");
+    assert.equal(h.backend.videoEncoderConfigs[0]!.maxFrameRate, 30);
+  } finally {
+    h.close();
+  }
+});
+
+test("kCastStreamingMaxVideoBitrate sets the offered maximum bitrate and the starting level", async () => {
+  const h = await startHarness({ type: "video_only", receiver: {}, features: { maxVideoBitrate: 8_000_000 } });
+  try {
+    await sleep(500);
+    const stream = (h.receiver.lastOffer!.offer as { supportedStreams: { type: string; maxBitRate?: number }[] }).supportedStreams.find((s) => s.type === "video_source")!;
+    assert.equal(stream.maxBitRate, 8_000_000);
+    assert.equal(h.host.currentUsableBandwidth <= 8_000_000, true);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    h.close();
+  }
+});

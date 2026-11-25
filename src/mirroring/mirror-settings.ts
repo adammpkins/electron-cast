@@ -140,8 +140,15 @@ export class MirrorSettings {
   private senderSideLetterboxing = true;
   private readonly playoutDelayMs: number;
 
-  constructor(targetPlayoutDelayMs?: number, env: Record<string, string | undefined> = process.env, enable60fps = false) {
+  private readonly maxVideoBitrate: number;
+
+  /**
+   * `enable60fps` is `kCastStreaming60fps` (`GetMaxFrameRate`); `maxVideoBitrate` is `GetMaxVideoBitrate()`, which Chrome
+   * reads from `kCastStreamingMaxVideoBitrate` (see `castStreamingMaxVideoBitrate`).
+   */
+  constructor(targetPlayoutDelayMs?: number, env: Record<string, string | undefined> = process.env, enable60fps = false, maxVideoBitrate = LEGACY_MAX_VIDEO_BITRATE) {
     this.targetPlayoutDelayMs = targetPlayoutDelayMs;
+    this.maxVideoBitrate = maxVideoBitrate;
     this.maxFrameRate = enable60fps ? TARGET_MAX_FRAME_RATE_60 : DEFAULT_MAX_FRAME_RATE;
     this.playoutDelayMs = getPlayoutDelayMs(env);
   }
@@ -162,7 +169,7 @@ export class MirrorSettings {
   /** `GetVideoConfig`. */
   getVideoConfig(codec: VideoCodec): FrameSenderConfig {
     const delay = this.targetPlayoutDelayMs ?? this.playoutDelayMs;
-    const maxBitrate = LEGACY_MAX_VIDEO_BITRATE;
+    const maxBitrate = this.maxVideoBitrate;
     return {
       senderSsrc: VIDEO_SENDER_SSRC,
       receiverSsrc: VIDEO_RECEIVER_SSRC,

@@ -14,7 +14,7 @@
  */
 import { SUPPORTED_VIDEO_CODECS, type EncodingSupport } from "./encoding-support.ts";
 import { type MirroringBackend, type CapturedVideoFrame, type OperationalStatus, operationalStatusErrorMessage } from "./backend.ts";
-import type { CongestionSignal } from "../electron/switches.ts";
+import type { BandwidthBackoffParams, CongestionSignal } from "../electron/switches.ts";
 import { MirrorSettings, getCodecParameterString, LEGACY_MAX_VIDEO_BITRATE, type FrameSenderConfig } from "./mirror-settings.ts";
 import { ErrorCode, type SessionError } from "./protocol/errors.ts";
 import type { VideoCodec } from "./protocol/constants.ts";
@@ -37,8 +37,11 @@ export const BANDWIDTH_UPDATE_INTERVAL_MS = 500;
 /** media/cast/cast_config.h `kMinRequiredBitrate` (384 << 10). */
 export const MIN_REQUIRED_BITRATE = 384 << 10;
 
-/** mirroring_features.cc defaults of `kCastStreamingGradualBandwidthBackoff` (`GetBandwidthBackoffParams` clamps them). */
-export const BANDWIDTH_BACKOFF = {
+/**
+ * mirroring_features.cc defaults of `kCastStreamingGradualBandwidthBackoff` (`GetBandwidthBackoffParams` clamps them);
+ * `MirroringFeatures.bandwidthBackoff` replaces them with what the command line gives.
+ */
+export const BANDWIDTH_BACKOFF: BandwidthBackoffParams = {
   goodNetworkCitizenFactor: 0.8,
   minBackoffFactor: 0.5,
   maxBackoffFactor: 0.85,
@@ -91,6 +94,16 @@ export interface MirroringFeatures {
   congestionSignal?: CongestionSignal;
   /** `kCastStreamingPerformanceOverlay`; default off. */
   performanceOverlay?: boolean;
+  /** `kCastStreaming60fps`; default off: `GetMaxFrameRate` is 30. */
+  enable60fps?: boolean;
+  /** `MirrorSettings::GetMaxVideoBitrate()` (`kCastStreamingMaxVideoBitrate`); default 5 Mbps. */
+  maxVideoBitrate?: number;
+  /** `GetBandwidthBackoffParams()`, already clamped; default `BANDWIDTH_BACKOFF`. */
+  bandwidthBackoff?: BandwidthBackoffParams;
+  /** `kCastStreamingGradualBandwidthBackoff`; default on, off selects `UpdateBandwidthLegacy`. */
+  gradualBandwidthBackoff?: boolean;
+  /** `kCastStreamingOfferHardwareFirst`; default on. */
+  offerHardwareFirst?: boolean;
 }
 
 export interface SessionHostDeps {
@@ -135,7 +148,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   private videoEncoder: VideoEncoderPort | undefined;
   private activeVideoConfig: FrameSenderConfig | undefined;
   /** `usable_bandwidth_` initial value: min(kDefaultBitrate (10 Mbps), MirrorSettings::GetMaxVideoBitrate()) (openscreen_session_host.h). */
-  private usableBandwidth = Math.min(DEFAULT_BITRATE, LEGACY_MAX_VIDEO_BITRATE);
+  private usableBandwidth: number;
   private usableBandwidthBeforeBackoff = 0;
   private numVideoFramesDropped = 0;
   private cancelBandwidthTimer: (() => void) | undefined;
@@ -150,7 +163,9 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   constructor(params: SessionParameters, deps: SessionHostDeps) {
     this.params = params;
     this.deps = deps;
-    this.settings = new MirrorSettings(params.targetPlayoutDelayMs, deps.env);
+    const maxVideoBitrate = deps.features?.maxVideoBitrate ?? LEGACY_MAX_VIDEO_BITRATE;
+    this.settings = new MirrorSettings(params.targetPlayoutDelayMs, deps.env, deps.features?.enable60fps === true, maxVideoBitrate);
+    this.usableBandwidth = Math.min(DEFAULT_BITRATE, maxVideoBitrate);
     if (deps.maxResolution !== undefined) this.settings.setMaxResolutionConstraints(deps.maxResolution);
     this.session = new SenderSession({
       remoteAddress: params.receiverAddress,
@@ -251,9 +266,9 @@ export class OpenscreenSessionHost implements SenderSessionClient {
           offeredHardwareCodec = true;
         }
       }
-      // kCastStreamingOfferHardwareFirst is enabled by default: software only when no hardware codec was offered, or
-      // when the receiver took none of the hardware ones (`offering_fallback_codecs_`).
-      if (this.offeringFallbackCodecs || !offeredHardwareCodec) {
+      // With kCastStreamingOfferHardwareFirst (the default) software codecs go in only when no hardware codec was offered,
+      // or when the receiver took none of the hardware ones (`offering_fallback_codecs_`); without it, in every offer.
+      if (!this.offerHardwareFirst() || this.offeringFallbackCodecs || !offeredHardwareCodec) {
         for (const codec of SUPPORTED_VIDEO_CODECS) {
           const config = this.settings.getVideoConfig(codec);
           if (!encodingSupport.isHardwareEnabled(codec) && encodingSupport.isSoftwareEnabled(codec)) {
@@ -410,7 +425,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
         return;
       case ErrorCode.NoStreamSelected:
         // The receiver took none of the hardware-first offer: offer the software codecs too, once.
-        if (!this.offeringFallbackCodecs && this.state === "mirroring") {
+        if (this.offerHardwareFirst() && !this.offeringFallbackCodecs && this.state === "mirroring") {
           this.deps.observer.logInfo?.("No stream selected for ideal, hardware-accelerated codecs. Attempting fallback to software codecs.");
           this.offeringFallbackCodecs = true;
           this.negotiateMirroring();
@@ -563,7 +578,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   /**
    * `MaybeFallbackHardwareFrameRate`: hardware encoding at 30 fps is preferred over software at 60, so a hardware
    * encoder that fails above 30 fps is lowered to 30 in place and the capture is restarted at that rate. Capture is
-   * limited to 30 fps here (`kCastStreaming60fps` is off and not exposed), so this is never taken today.
+   * limited to 30 fps unless `kCastStreaming60fps` is on, so this is never taken without it.
    */
   private maybeFallbackHardwareFrameRate(config: FrameSenderConfig, status: OperationalStatus): boolean {
     const defaultMaxFrameRate = 30;
@@ -637,6 +652,10 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     }
   }
 
+  private offerHardwareFirst(): boolean {
+    return this.deps.features?.offerHardwareFirst ?? true;
+  }
+
   /** `UpdateBandwidthEstimate(int)`. Public so that tests can drive it with a chosen estimate. */
   updateBandwidthEstimate(bandwidthEstimate: number): void {
     if (this.videoSender === undefined) return;
@@ -645,20 +664,32 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     const isCongested = currentFramesDropped > this.numVideoFramesDropped;
     this.numVideoFramesDropped = currentFramesDropped;
     if (bandwidthEstimate <= 0) return;
-    const p = BANDWIDTH_BACKOFF;
+    const p = this.deps.features?.bandwidthBackoff ?? BANDWIDTH_BACKOFF;
     // Never use all of the bandwidth, but never go below the absolute minimum requirement either.
     const usableBandwidth = Math.max(Math.trunc(p.goodNetworkCitizenFactor * bandwidthEstimate), MIN_REQUIRED_BITRATE);
     const before = this.usableBandwidth;
-    this.updateBandwidthGradualBackoff(isCongested, usableBandwidth);
+    if (this.deps.features?.gradualBandwidthBackoff ?? true) this.updateBandwidthGradualBackoff(isCongested, usableBandwidth);
+    else this.updateBandwidthLegacy(isCongested, usableBandwidth);
     // openscreen_session_host.cc logs this at VLOG(2) ("updated available bandwidth"); here it is only a change.
     if (this.usableBandwidth !== before) {
       this.deps.observer.logInfo?.(`bandwidth ${before} -> ${this.usableBandwidth} (estimate ${bandwidthEstimate}, ${isCongested ? "frames dropped" : "no drops"})`);
     }
   }
 
+  /** `UpdateBandwidthLegacy`: increase conservatively, but snap straight down to the estimate when frames are dropped. */
+  private updateBandwidthLegacy(isCongested: boolean, usableBandwidth: number): void {
+    const p = this.deps.features?.bandwidthBackoff ?? BANDWIDTH_BACKOFF;
+    if (usableBandwidth > this.usableBandwidth) {
+      this.usableBandwidth = Math.min(Math.trunc(this.usableBandwidth * p.conservativeIncrease), usableBandwidth);
+    } else if (isCongested) {
+      this.usableBandwidth = usableBandwidth;
+    }
+    // Otherwise a lower estimate without frame drops (a static screen sends little) must not reduce the usable bandwidth.
+  }
+
   /** `UpdateBandwidthGradualBackoff`. */
   private updateBandwidthGradualBackoff(isCongested: boolean, usableBandwidth: number): void {
-    const p = BANDWIDTH_BACKOFF;
+    const p = this.deps.features?.bandwidthBackoff ?? BANDWIDTH_BACKOFF;
     if (isCongested) {
       // Back off multiplicatively toward the estimate rather than snapping to it.
       const backedOff = clamp(usableBandwidth, Math.trunc(this.usableBandwidth * p.minBackoffFactor), Math.trunc(this.usableBandwidth * p.maxBackoffFactor));

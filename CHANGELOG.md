@@ -28,6 +28,17 @@
 - **`--enable-features=CastStreamingPerformanceOverlay`** draws Chrome's performance metrics overlay (three lines of digits
   at the bottom of each frame: frames in the encoder, encoder utilization and lossiness; capture time, playout delay, low
   latency mode and target bitrate; frame duration, size and timestamp) on the frames sent to the receiver. Off by default.
+- **More of Chrome's mirroring flags are read**, each with Chrome's default and `Feature:name/value` syntax:
+  `--enable-features=CastStreaming60fps` (offer and capture 60 fps instead of 30),
+  `CastStreamingMaxVideoBitrate:max_bitrate_mbps/<n>` (the maximum video bitrate, default 5 Mbps as before; the start
+  bitrate stays at most 10 Mbps), the `good_network_citizen_factor`, `min_backoff_factor`, `max_backoff_factor`,
+  `fast_recovery_increase` and `conservative_increase` parameters of `CastStreamingGradualBandwidthBackoff` (clamped as
+  Chrome clamps them), `--disable-features=CastStreamingGradualBandwidthBackoff` (Chrome's legacy bandwidth update:
+  snap down to the estimate when frames drop) and `--disable-features=CastStreamingOfferHardwareFirst` (hardware and
+  software codecs in one offer, no fallback offer). Defaults change nothing.
+- **The performance overlay is laid out as current Chromium main draws it**, not as Chrome 120 did: main advances the
+  pointer before each glyph, so a line sits one glyph further right and its last glyph runs into the next pixel row. That
+  looks like a regression in Chromium; it is matched on purpose.
 - **Desktop audio on Linux needs `--enable-features=PulseaudioLoopbackForCast`**, as in Chrome: without it `withAudio` is
   ignored for a desktop capture and the sinks query does not ask for audio. Windows and macOS are unchanged.
 

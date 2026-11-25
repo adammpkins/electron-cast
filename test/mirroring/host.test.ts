@@ -377,9 +377,15 @@ test("host: the session start carries the features read from app.commandLine", a
     host.dispose();
     return (state.procs[0]!.posted.find((m) => (m as { type: string }).type === "start") as { features: unknown }).features;
   });
-  assert.deepEqual(await feature([]), { congestionSignal: "before_or_after_encoding", performanceOverlay: false });
+  const backoff = { goodNetworkCitizenFactor: 0.8, minBackoffFactor: 0.5, maxBackoffFactor: 0.85, fastRecoveryIncrease: 1.5, conservativeIncrease: 1.1 };
+  const defaults = { congestionSignal: "before_or_after_encoding", performanceOverlay: false, enable60fps: false, maxVideoBitrate: 5_000_000, bandwidthBackoff: backoff, gradualBandwidthBackoff: true, offerHardwareFirst: true };
+  assert.deepEqual(await feature([]), defaults);
   assert.deepEqual(
     await feature(["--enable-features=CastStreamingPerformanceOverlay,CastStreamingGradualBandwidthBackoff:congestion_signal/after_encoding"]),
-    { congestionSignal: "after_encoding", performanceOverlay: true },
+    { ...defaults, congestionSignal: "after_encoding", performanceOverlay: true },
+  );
+  assert.deepEqual(
+    await feature(["--enable-features=CastStreaming60fps,CastStreamingMaxVideoBitrate:max_bitrate_mbps/12", "--disable-features=CastStreamingGradualBandwidthBackoff,CastStreamingOfferHardwareFirst"]),
+    { ...defaults, enable60fps: true, maxVideoBitrate: 12_000_000, gradualBandwidthBackoff: false, offerHardwareFirst: false },
   );
 });
