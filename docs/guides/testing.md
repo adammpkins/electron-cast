@@ -156,3 +156,7 @@ Real networks, real firewalls, and real devices. Discovery on a VPN-laden Window
 TV that drops off Wi-Fi: these need a device. When you probe one, [read-only is the rule](../../CONTRIBUTING.md#probing-real-devices):
 discover, connect, authenticate and read status; do not launch apps, change volume or stop playback on a device that is
 not yours to disturb.
+
+For a DIAL TV there is a command that does this for you: `npx electron-cast@next dial-test` discovers DIAL devices, reads
+their description and app info, and opens and closes YouTube only if you say yes. It writes a scrubbed report to
+paste into an issue ([README](../../README.md#test-a-dial-tv)).

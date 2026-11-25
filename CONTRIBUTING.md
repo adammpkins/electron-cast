@@ -238,6 +238,13 @@ npm run tab -- "<device name>"       # mirror the demo window
 npm run desktop -- "<device name>"   # mirror the primary screen
 ```
 
+DIAL TVs are probed with `electron-cast dial-test` (`src/dial-test/`, built to `dist/cli.js`; [how a volunteer runs
+it](README.md#test-a-dial-tv)). It uses the library's own SSDP discovery, description fetch, app info, launch and stop, so what
+it reports is what the library does. Everything it does is read-only except opening and closing YouTube, which it does only
+after asking. It scrubs its report once, at the end, in `src/dial-test/scrub.ts`; anything new that goes into the report is
+scrubbed there, and the tests in `test/dial-test/` fail if a name, serial number, UDN, MAC, address or app-info value from
+the fake device appears in it. Do not run it against devices that are not yours.
+
 The trace recorder (`tools/capture-trace.mjs`) runs one session against a device: it connects, launches the Default Media
 Receiver, loads a public video, pauses, plays and stops, and always stops the app it launched. It scrubs names, ids and
 addresses before it writes a file, and refuses to write if something still looks like an IP, MAC or id.

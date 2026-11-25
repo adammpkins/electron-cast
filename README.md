@@ -202,6 +202,35 @@ addresses, were verified on real devices. Iframes are covered by unit tests only
 </div>
 </details>
 
+## Test a DIAL TV
+
+DIAL support has only been tested against a fake device. If you have a TV or stick that offers DIAL but not Chromecast
+(many Roku, Samsung, LG, Sony and Fire TV models), you can help with one command and a few y/n answers. You need Node 20 or
+later; you do not need Electron or the library installed.
+
+```sh
+npx electron-cast@next dial-test
+```
+
+(From a checkout of this repository: `npm ci && npm run build && node dist/cli.js dial-test`.)
+
+What it does, in order:
+
+1. Looks for DIAL devices for about 10 seconds with the library's own discovery, on every network interface, and lists
+   them by manufacturer and model.
+2. Reads the device description and the app info of YouTube and Netflix, and opens one TLS connection to port 8009 and
+   closes it at once (no Cast message is sent). Nothing on the TV changes.
+3. **Asks** "Open YouTube on your TV?". Only if you answer yes does it start YouTube with the library's own launch request,
+   ask whether it appeared, stop it again (if the TV allows that) and ask whether it closed. Ctrl-C at any point stops
+   what it opened. `--read-only` never opens anything.
+4. Prints a report, saves it as `dial-test-report.md` in the current folder, and prints a link that opens a prefilled
+   GitHub issue. Names, serial numbers, UUIDs, MAC addresses, IP addresses and URL hosts are replaced, and the values
+   under the app info's `additionalData` are removed. **Read the report before you post it.**
+
+If no device is found it says why that usually happens (a different network or VLAN, a firewall blocking UDP, a VPN) and
+still writes a report, which is useful too. Options: `--device N`, `--yes`, `--read-only`, `--seconds N`, `--out FILE`
+(`npx electron-cast@next dial-test --help`).
+
 ## Staying compatible with Google's SDK
 
 The page runs Google's SDK, which Google can change per Chrome major without an electron-cast release. `npm run canary`
