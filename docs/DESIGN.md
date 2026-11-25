@@ -678,3 +678,140 @@ the main process. The Blob is read in the page, as Blink reads it in the rendere
   `NotFoundError`, where Chrome never settles the promise; and one manager serves one provider where Chrome's
   `MediaRouter` is per profile, so presentations of different `createCastManager` calls do not know of each other.
 
+
+## Mirroring (`src/mirroring/`)
+
+Tab and desktop mirroring, as Chrome's Cast dialog offers ("Cast tab", "Cast screen"). It is a TypeScript port of the
+sender Chrome uses today, and it keeps Chrome's boundaries so the port can later be swapped for the real Mirroring
+Service (the upstream Electron RFC):
+
+```
+MirroringActivity  <->  CastMessageChannel  <->  Mirroring Service (OpenscreenSessionHost -> openscreen sender)
+ mirroring-activity.ts    (a callback pair)       engine.ts, session-host.ts, sender/
+ mirroring-manager.ts                              (utility process: electron/engine-process.ts)
+```
+
+Every module cites the Chromium or openscreen file and function it ports. Chromium paths are from
+`chromium/src@main`; openscreen paths are from `third_party/openscreen/src` (`cast/streaming/...`). Fetched, not
+recalled, on 2026-11-25.
+
+### What Chrome does (verified)
+
+Chrome no longer has its own RTP stack for this: `media/cast/sender/{video,audio}_sender.cc` and
+`openscreen_frame_sender.cc` wrap openscreen's `SenderSession`/`Sender`/`SenderPacketRouter`, and
+`components/mirroring/service/openscreen_session_host.cc` drives them. `MirroringActivity`
+(`chrome/browser/media/router/providers/cast/mirroring_activity.cc`) sits in the browser: it routes the CastMessages of
+the streaming namespaces and starts and stops the host. So the port is openscreen's sender, plus the Chromium frame
+sender policy, plus the session host, plus the routing.
+
+### Module map
+
+| Ours (`src/mirroring/`) | Ported from |
+|---|---|
+| `protocol/constants.ts` | openscreen `cast/streaming/public/constants.h`, `impl/rtp_defines.h`, `impl/session_config.h`, `public/capture_recommendations.h`, `impl/ssrc.cc` |
+| `protocol/frame-id.ts` | openscreen `cast/streaming/public/frame_id.h`, `impl/expanded_value_base.h` (`ExpandLessThanOrEqual`, `ExpandGreaterThan`) |
+| `protocol/offer.ts` | openscreen `public/offer_messages.cc` (`Offer::ToJson`, `Stream::ToJson`, `AudioStream`, `VideoStream`), `public/sender_session.cc` (`CreateStream`) |
+| `protocol/answer.ts` | openscreen `public/answer_messages.cc` (`Answer::TryParse`, constraints, display), `public/resolution.cc`, `public/receiver_message.cc` (`ReceiverMessage::Parse`, `ReceiverCapability`) |
+| `protocol/recommendations.ts` | openscreen `public/capture_recommendations.cc` (`GetRecommendations`) |
+| `protocol/messenger.ts` | openscreen `public/session_messenger.cc` (namespaces, 4 s reply timeout, `*` destination), `sender_session.cc` (`Negotiate`, `OnAnswer`, `RequestCapabilities`) |
+| `rtp/packetizer.ts` | openscreen `impl/rtp_packetizer.cc` |
+| `rtp/frame-crypto.ts` | openscreen `impl/frame_crypto.cc` |
+| `rtcp/ntp.ts`, `rtcp/sender-report.ts` | openscreen `impl/ntp_time.cc`, `impl/sender_report_builder.cc`, `impl/rtcp_common.cc` |
+| `rtcp/parser.ts` | openscreen `impl/compound_rtcp_parser.cc` |
+| `sender/sender.ts` | openscreen `impl/sender_impl.cc` (`Sender`) |
+| `sender/packet-router.ts` | openscreen `impl/sender_packet_router.cc` |
+| `sender/bandwidth-estimator.ts` | openscreen `impl/bandwidth_estimator.cc` |
+| `sender/frame-sender.ts` | Chromium `media/cast/sender/openscreen_frame_sender.cc`, `video_sender.cc`, `audio_sender.cc`, `media/cast/constants.h` |
+| `session-host.ts` | Chromium `components/mirroring/service/openscreen_session_host.cc`, `mirror_settings.cc`, `mirroring_features.cc`, `media/cast/openscreen/config_conversions.cc`, `media/cast/encoding/encoding_support.cc` |
+| `mirroring-activity.ts` | Chromium `mirroring_activity.cc` (`OnAppMessage`, `OnInternalMessage`, `HandleParseJsonResult`, `StartSession`, `StopMirroring`) and `cast_activity_manager.cc` (`DoLaunchSession`, `OnActivityStopped`) |
+| `mirroring-manager.ts` | Chromium `cast_activity_manager.cc` (`LaunchSession`, `TerminateSession`, `NotifyAllOnRoutesUpdated`), `media_route.cc` (`GetMediaRouteId`) |
+| `routing.ts` | Chromium `cast_media_source.cc` (`CastMediaSourceForTabMirroring`, `ForDesktopMirroring`, `ProvidesStreamingAudioCapture`, the streaming `CastAppInfo`s), `components/media_router/common/media_source.cc`, `cast_activity_manager.cc` (`ChooseAppId`), `mirroring_activity.cc` (`StartSession`, `GetRouteDescription`, `GetMirroringNamespace`, `GetScrubbedLogMessage`), `chrome/app/media_router_strings.grdp` |
+| `engine.ts` | assembles `OpenscreenSessionHost` around a backend, as the Mirroring Service does with its resource provider |
+| `transport/udp-environment.ts` | openscreen `cast/streaming/public/environment.cc` (`SendPacket`, `GetMaxPacketSize`, `OnRead`) and `SenderPacketRouter::OnReceivedPacket` (packets only from the announced endpoint) |
+| `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc`, `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate, utilization), `openscreen_session_host.cc` (`OnEncoderStatusChange`) |
+| `electron/host.ts` | Chromium `chrome/browser/media/cast_mirroring_service_host.cc` (the tab and desktop capture sources) |
+
+### Process split
+
+One mirroring route is three contexts:
+
+- **Main process**: the control plane. `MirroringManager` and `MirroringActivity` launch the streaming app (`0F5096E8`
+  audio and video, `85CDB22F` audio only; `GetCastStreamingAudioVideoAppId` and `GetCastStreamingAudioOnlyAppId` in
+  openscreen `cast/common/public/cast_streaming_app_ids.h`) over the Cast v2 channel the CastClient already speaks,
+  open the virtual connection, relay the `urn:x-cast:com.google.cast.webrtc` and `...remoting` messages to and from the
+  engine, and stop the app when the route ends. It never sees a frame.
+- **Engine, an Electron `utilityProcess`** (`electron/engine-process.ts`, one per route): the whole sender. The session
+  host (OFFER, ANSWER, bandwidth), `SenderSession`, `Sender`s, `SenderPacketRouter`, the frame sender policy, AES and
+  packetizing, and the UDP socket. Pacing is a 10 ms burst timer (`kDefaultBurstInterval`); a busy main process would
+  add jitter the receiver's 200 ms playout delay does not forgive, and a stuck page cannot stall a stream. Everything in
+  it is plain TypeScript over an injected clock and socket (`SenderEnvironment`), so the same code runs in-process in
+  tests. The frame sender policy lives here, not in the renderer: `ShouldDropNextFrame` reads the sender's in-flight
+  state, and Chrome makes that call synchronously on one thread.
+- **Capture agent, a hidden `BrowserWindow`** (`electron/agent-source.ts`) on a private in-memory partition, sandboxed,
+  with navigation and window creation denied. It captures (`getUserMedia` with `chromeMediaSource: 'tab'` and the id
+  from `webContents.getMediaSourceId`; or `getUserMedia` with `chromeMediaSource: 'desktop'` and the `desktopCapturer` id the app chose, plus loopback audio where the OS has it; `getDisplayMedia` would need a user gesture the hidden page never has, and Chrome's `CastMirroringServiceHost` asks for none), reads tracks with `MediaStreamTrackProcessor`, and encodes with WebCodecs
+  `VideoEncoder` and `AudioEncoder`. A `MessagePort` goes straight between the agent and the engine, so frame bytes
+  never pass through main. A hidden window was chosen over the source page's isolated world because the page cannot
+  disturb it (navigation, CSP, `beforeunload`) and the library needs no foothold in the app's page.
+
+The agent and the engine split the work as Chrome splits capture and the Mirroring Service. The agent announces each
+raw frame (RTP timestamp, reference time); the engine runs `VideoSender::InsertRawVideoFrame` (the drop decision) and
+answers `encode`; the agent encodes and posts the chunk; the engine assigns the frame id and calls
+`FrameSender::EnqueueFrame`. Audio works the same way per 10 ms buffer. A frame that never yields a chunk (encoder queue full, evicted, unsupported, swallowed by the encoder, encoder error) is reported as `video-drop` or `audio-drop`; the engine turns a video drop into Chrome's empty encoded frame (`VideoSender::OnFrameDroppedByEncoder`) so the sender's in-encoder count never leaks, and an audio drop becomes skipped samples on the next frame. Audio RTP and reference times follow `AudioEncoder::ImplBase::EncodeAudio` (underrun skip above `kUnderrunSkipThreshold`). A bitrate change reconfigures the running encoder in place and forces no key frame. The agent holds at most three raw frames and
+closes the oldest, so a dropped frame costs nothing. Pixels are not copied: a `VideoFrame` goes from the track
+processor into the encoder. Encoded chunks are copied once, through the port (Electron cannot transfer an
+`ArrayBuffer` over a `MessagePortMain`).
+
+### Local audio while mirroring
+
+Chrome decides whether the sender's own speakers stay on, and we match it (`CastMirroringServiceHost`,
+`chrome/browser/media/cast_mirroring_service_host.cc`):
+
+- **Desktop**: `GetDesktopAudioLoopbackDeviceId` returns `kLoopbackInputDeviceId` on Windows, so local playback keeps
+  going, when `kCastDesktopMirroringKeepLocalAudio` is enabled (on by default there, `media_router_feature.cc`;
+  muting the endpoint silences the loopback on some drivers). Every other platform gets `kLoopbackWithMuteDeviceId`,
+  which mutes local playback while mirroring. Here: Windows captures with `getUserMedia` and `chromeMediaSource:
+  'desktop'` (loopback, no mute); other platforms use `getDisplayMedia` on the capture window's private session, whose
+  `setDisplayMediaRequestHandler` answers with the app's source and `audio: 'loopbackWithMute'`. The choice is Chrome's, and like
+  `kCastDesktopMirroringKeepLocalAudio` it is an internal flag, not an app setting. The mute path was exercised on Windows (valid Opus reached the fake receiver) but not on
+  macOS or Linux, and whether the speakers really went quiet was not listened for.
+- **Tab**: `CreateAudioStream` binds a Muter on the tab's audio group when the first loopback stream is requested, so
+  the tab is silent locally for the whole session and restored when the host is destroyed (crbug.com/40708932). Here
+  `webContents.setAudioMuted(true)` on the captured page, undone at teardown only if we were the one to mute it. Measured
+  in Electron 45: a tab muted this way still delivers its audio to `getUserMedia` tab capture at full level (peak 1.0
+  with and without the mute), so the receiver keeps hearing it. An app that wants local audio from the mirrored tab during a session can call
+  `setAudioMuted(false)` on its own `webContents`; the library only restores the state it changed.
+
+### Codecs
+
+Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) and VP8 are always offered. VP9 is offered
+only when the app asks for it (`extraVideoCodecs: ["vp9"]`) and `VideoEncoder.isConfigSupported` says Electron can
+encode it, which is Chrome's software list (`encoding_support.cc`: VP8 and VP9). H.264, HEVC and AV1 are not offered:
+Chrome offers H.264 only through hardware encoders and its HEVC and AV1 features are off by default, and WebCodecs
+cannot tell us whether an encoder is hardware. The order of offered codecs is `kSupportedVideoCodecs` (HEVC, AV1, VP9,
+H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bundled.
+
+### Not checked, or different from Chromium
+
+- The fake receiver in `test/mirroring/` is ours: it implements what openscreen's receiver does for the parts we send
+  to (ANSWER, RTCP reports, ACKs, NACKs), not Chrome's receiver app. On a real device (Windows to a Chromecast Ultra,
+  with the live harness in `examples/live-mirroring/`) tab mirroring ran at 1080p30 with Opus and VP8 in software, the
+  picture smooth and the audio in sync and only on the TV; desktop mirroring sent picture and system audio, with local
+  audio kept on Windows as Chrome keeps it there. Linux and macOS have not been tried.
+- Not ported: Remoting (RPC playback), tab switching (`DidGetTabSourceId`), pause and resume, the stats analyzer and
+  UMA, the GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
+  letterboxing, `GET_CAPABILITIES` (Chrome sends it only for remoting).
+- Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the
+  session's, which reads as swapped for a message from the receiver; `MirroringActivity` here takes the transport as
+  the source and the sender's id (or `*`) as the destination.
+- Frame rate: capture is rate-limited to the requested rate, never raised to it, and a hidden page can render slower
+  than 30 fps. In the smoke test a 60 Hz test page mirrors at about 22 fps on the development machine.
+- `startCasting` is one method for Chrome's three cast modes, as `MediaRouterUI::StartCasting` takes the mode:
+  `presentation` (the default) casts the window's default request, `tab_mirror` and `desktop_mirror` start a
+  mirroring route. Each mode keeps its own argument checks; a mode that is none of the three is a `RangeError`, and a
+  mirroring mode without the `mirroring` option is `unable_to_cast`.
+- The mirroring session runs on the device's one kept-open channel, as Chrome's `MirroringActivity` sends through
+  `CastMessageHandler` on the sink's one `CastSocket`; the activity's view of the channel only detaches when the route
+  ends and never closes it. Its session on the device is a local route: the session tracker does not report it as a
+  non-local route (`CastActivityManager` adds a non-local activity only for a session no local activity holds), nor
+  while it is being launched.

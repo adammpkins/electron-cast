@@ -419,3 +419,55 @@ device that mDNS also finds is a second sink until the same-address rule removes
 | `AccessCodeRememberedSink`, `AccessCodeStore` | A remembered device, and where they are kept between runs (`load`, `save`). |
 | `AccessCodeCastDisabledError` | What `addSinkByAddress` rejects with unless access code casting is enabled. |
 | `createAccessCodeSink(device)` | Chrome's checks on a device, without opening anything: the sink it would be, or why it cannot be one. |
+
+## Tab and desktop mirroring
+
+`startCasting` also starts Chrome's other two cast modes, tab and desktop mirroring ("Cast tab" and "Cast screen"):
+the app chooses what to send. They are off unless you pass `mirroring` to `createCastManager`:
+
+<!-- no-check -->
+```ts
+import { app, BrowserWindow, MessageChannelMain, desktopCapturer, utilityProcess, webContents } from "electron";
+
+const manager = createCastManager({
+  ipcMain,
+  selectDevice,
+  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents } },
+});
+await manager.start();
+
+// Only the devices that can receive this kind of mirroring (audio-only speakers cannot take "desktop_mirror" without audio).
+manager.registerMediaSinksObserver({ onSinksUpdated: showDevices }, { castMode: "tab_mirror" });
+
+const route = await manager.startCasting(sink.id, { castMode: "tab_mirror", webContentsId: win.webContents.id });
+// route.description is "Casting tab"; route.id is Chrome's urn:x-org.chromium:media:route:... form.
+// The mirrored page is muted locally while the route runs, as in Chrome, and unmuted when it ends (an app that wants
+// local audio can call webContents.setAudioMuted(false) itself). Desktop audio follows Chrome per platform: local
+// playback keeps going on Windows and is muted elsewhere; there is no setting for it.
+await manager.terminateRoute(route.id); // stops the receiver app, as Chrome does
+```
+
+`startCasting(sinkId, options)` is one method for the three modes, as `MediaRouterUI::StartCasting` takes the cast mode;
+`options` is a `StartCastingOptions`, one shape per mode (`MediaCastMode`; the mirroring ones are `MirroringCastMode`). Note that `webContentsId` means two things:
+
+- `castMode: "presentation"` (or none) with `webContentsId`: the window whose **default presentation request** is cast
+  (above).
+- `castMode: "tab_mirror"` with `webContentsId`: the **page to mirror** (video and its audio).
+- `castMode: "desktop_mirror"` with `desktopSourceId` (an id from `desktopCapturer.getSources`) and optionally
+  `withAudio` (system loopback audio, where the OS provides it).
+- `targetPlayoutDelayMs` overrides the receiver playout delay (Chrome's default is 200 ms, `kDefaultPlayoutDelay`).
+
+A mirroring start rejects with a `MediaRouteError` (`code`: `sink_not_found`, `unable_to_cast`, `unknown_error`,
+`cancelled`); `unable_to_cast` too when the `mirroring` option was not given. A mode that is none of the three is a
+`RangeError`. The sinks query for a mode is `MediaSinksQuery.castMode` (with `withAudio` for desktop mirroring): the Cast
+sinks that can run one of its streaming apps; DIAL sinks never match. The mirroring session runs on the device's one
+kept-open channel, as Chrome's runs on its `CastSocket`, and its route is a local route, not a non-local one. A new
+route on a device ends the one already running there, as in Chrome. Mirroring routes show up in
+`registerMediaRoutesObserver` and end on `terminateRoute`, when the receiver's app closes, or on a stream error.
+
+`mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
+`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`, `webContents`), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
+`engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
+Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
+route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)
+to try it on a real device.

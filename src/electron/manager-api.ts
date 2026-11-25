@@ -8,6 +8,8 @@ import { APP_AVAILABILITY_REFRESH_MS, type DeviceSource } from "./session-servic
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
 import type { DefaultPresentationRequests, PresentationObserver, PresentationRequest } from "./default-presentation.ts";
+import type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
+import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource } from "../mirroring/routing.ts";
 
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
@@ -46,10 +48,51 @@ export interface MediaSinksQuery {
    * one of them; with no origin, only apps open to every origin match.
    */
   origin?: string;
+  /**
+   * Only sinks that can receive this kind of mirroring, as Chrome lists them for TAB_MIRROR and DESKTOP_MIRROR: a sink
+   * is listed when it can run one of the streaming apps the source names (audio and video, or audio only).
+   */
+  castMode?: MirroringCastMode;
+  /** With `castMode: "desktop_mirror"`: whether the capture includes audio (a screen without audio needs video_out). */
+  withAudio?: boolean;
 }
 
-/** Chrome: `MediaCastMode`; the Cast dialog's `PRESENTATION` mode is the one electron-cast has (no tab or desktop mirroring). */
-export type MediaCastMode = "presentation";
+/** Chrome: `MediaCastMode`, the Cast dialog's modes: `PRESENTATION`, `TAB_MIRROR` and `DESKTOP_MIRROR`. */
+export type MediaCastMode = "presentation" | MirroringCastMode;
+
+/**
+ * `startCasting` options, one shape per cast mode. `webContentsId` means different things: for `presentation` it is the
+ * window whose default presentation request is cast; for `tab_mirror` it is the page that is mirrored.
+ */
+export type StartCastingOptions =
+  | {
+      /** Default. Cast the window's default presentation request (`MediaCastMode::PRESENTATION`). */
+      castMode?: "presentation";
+      /** The window whose default request is used. */
+      webContentsId: number;
+    }
+  | StartMirroringCastingOptions;
+
+/** The mirroring shapes of {@link StartCastingOptions}. */
+export type StartMirroringCastingOptions =
+  | {
+      /** Mirror a page (`MediaCastMode::TAB_MIRROR`; `MediaSource::ForTab`). */
+      castMode: "tab_mirror";
+      /** The page to mirror. */
+      webContentsId: number;
+      /** `streamingTargetPlayoutDelayMillis`. */
+      targetPlayoutDelayMs?: number;
+    }
+  | {
+      /** Mirror a screen or window (`MediaCastMode::DESKTOP_MIRROR`). */
+      castMode: "desktop_mirror";
+      /** The `desktopCapturer` source id (`screen:0:0`, `window:...`), Chrome's desktop media id. */
+      desktopSourceId: string;
+      /** Also capture system audio where the OS allows it (`IsDesktopSourceWithAudio`). */
+      withAudio?: boolean;
+      /** `streamingTargetPlayoutDelayMillis`. */
+      targetPlayoutDelayMs?: number;
+    };
 
 /** Chrome: `MediaSinksObserver`. */
 export interface MediaSinksObserver {
@@ -150,8 +193,13 @@ export interface CastManagerApi {
    * Chrome's `RouteRequestResultCode` in lower case (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`,
    * `redundant_request`, `unknown_error`), or `unable_to_cast` where Chrome's `CreateRouteParameters` finds no
    * source for the sink (no default request, or the sink cannot run its URLs).
+   *
+   * With `castMode: "tab_mirror"` or `"desktop_mirror"` it is `StartCasting` for `TAB_MIRROR` and `DESKTOP_MIRROR`:
+   * mirror a page (`webContentsId`) or a `desktopCapturer` source (`desktopSourceId`) to the sink. Resolves with the
+   * route once the receiver's streaming app runs; end it with `terminateRoute`. Needs the `mirroring` option of
+   * `createCastManager`, else it rejects with `unable_to_cast`.
    */
-  startCasting(sinkId: string, options: { webContentsId: number; castMode?: MediaCastMode }): Promise<MediaRoute>;
+  startCasting(sinkId: string, options: StartCastingOptions): Promise<MediaRoute>;
   /** `MediaRouter::GetMediaController` /`mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
   getRouteController(routeId: string): MediaRouteController;
   /**
@@ -182,6 +230,8 @@ export interface SessionHost extends Omit<MediaControllerHost, "hasRoute"> {
   observeSessions(listener: () => void): () => void;
   terminateSession(sessionId: string): Promise<BridgeResult>;
   detachSession(sessionId: string): BridgeResult;
+  /** Mirroring routes; present when the manager was given the `mirroring` option. */
+  startCasting?(sinkId: string, options: StartMirroringCastingOptions): Promise<MediaRoute>;
 }
 
 /** A Map that reports new and removed keys, so the service needs no per-site notification. */
@@ -328,8 +378,14 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       const origin = query?.origin ?? "";
       const dial = availability?.dial;
       const dialAvailable = dial === undefined ? undefined : (d: CastDevice, app: string): boolean => dial.available(d, app, origin);
+      // Chrome's sinks query for a TAB_MIRROR or DESKTOP_MIRROR source: a Cast sink that can run one of its streaming apps
+      const mirrorSource =
+        query?.castMode === undefined
+          ? undefined
+          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(-1) : desktopMediaSource("any", query.withAudio === true));
       const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
-        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null);
+        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null)
+        && (mirrorSource === undefined || (d.dial === undefined && sinkSupportsSource(mirrorSource, d.capabilities)));
       // DialMediaRouteProvider::StartObservingMediaSinks: the DIAL sinks are asked about each cast-dial: app while the
       // observer is registered
       const dialApps = urls === undefined || dial === undefined ? [] : [...new Set(urls.map((u) => (isDialSource(u) ? appNameFromDialSource(u) : "")))].filter((a) => a !== "");
@@ -461,13 +517,20 @@ export function createManagerApi(
     hasDefaultPresentationRequest: (id) => presentation.requests.has(id),
     getDefaultPresentationRequest: (id) => presentation.requests.get(id),
     addPresentationObserver: (id, observer) => presentation.requests.observe(id, observer),
-    startCasting(sinkId, options) {
-      if (typeof sinkId !== "string") return Promise.reject(new TypeError("sinkId must be a string"));
-      if (typeof options?.webContentsId !== "number") return Promise.reject(new TypeError("options.webContentsId must be a number"));
-      if (options.castMode !== undefined && options.castMode !== "presentation") {
-        return Promise.reject(new RangeError(`unsupported cast mode: ${String(options.castMode)}`));
+    async startCasting(sinkId, options) {
+      // MediaRouterUI::StartCasting dispatches on the cast mode: PRESENTATION casts the window's default request, the
+      // mirroring modes start a mirroring route
+      const mode = (options as { castMode?: unknown } | null | undefined)?.castMode;
+      if (mode === "tab_mirror" || mode === "desktop_mirror") {
+        validateStartCasting(sinkId, options);
+        if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
+        return host.startCasting(sinkId, options as StartMirroringCastingOptions);
       }
-      return presentation.start(options.webContentsId, sinkId);
+      const o = options as { webContentsId?: unknown } | null | undefined;
+      if (typeof sinkId !== "string") throw new TypeError("sinkId must be a string");
+      if (typeof o?.webContentsId !== "number") throw new TypeError("options.webContentsId must be a number");
+      if (mode !== undefined && mode !== "presentation") throw new RangeError(`unsupported cast mode: ${String(mode)}`);
+      return presentation.start(o.webContentsId, sinkId);
     },
     getRouteController(routeId) {
       need(routeId);
@@ -494,4 +557,25 @@ export function createManagerApi(
       sinks.dispose();
     },
   };
+}
+
+/** Argument checks for `startCasting`, as the presentation `startCasting` makes them: TypeError for a wrong type, RangeError for a wrong value. */
+export function validateStartCasting(sinkId: unknown, options: unknown): void {
+  if (typeof sinkId !== "string" || sinkId === "") throw new TypeError("sinkId must be a non-empty string");
+  if (typeof options !== "object" || options === null) throw new TypeError("options must be an object");
+  const o = options as Record<string, unknown>;
+  if (o.castMode !== "tab_mirror" && o.castMode !== "desktop_mirror") throw new RangeError(`unsupported cast mode: ${String(o.castMode)}`);
+  if (o.castMode === "tab_mirror") {
+    if (typeof o.webContentsId !== "number") throw new TypeError("options.webContentsId must be a number");
+    if (!Number.isInteger(o.webContentsId) || o.webContentsId < 0) throw new RangeError("options.webContentsId must be a non-negative integer");
+  } else if (typeof o.desktopSourceId !== "string") {
+    throw new TypeError("options.desktopSourceId must be a string");
+  } else if (!/^(screen|window):/.test(o.desktopSourceId)) {
+    throw new RangeError("options.desktopSourceId must be a desktopCapturer source id (screen:... or window:...)");
+  }
+  if (o.withAudio !== undefined && typeof o.withAudio !== "boolean") throw new TypeError("options.withAudio must be a boolean");
+  if (o.targetPlayoutDelayMs !== undefined) {
+    if (typeof o.targetPlayoutDelayMs !== "number") throw new TypeError("options.targetPlayoutDelayMs must be a number");
+    if (!Number.isFinite(o.targetPlayoutDelayMs) || o.targetPlayoutDelayMs <= 0) throw new RangeError("options.targetPlayoutDelayMs must be a positive number of milliseconds");
+  }
 }

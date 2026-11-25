@@ -36,6 +36,11 @@ export interface DeviceSource {
 
 /** The subset of {@link CastClient} used by the session service. */
 export interface CastClientLike {
+  /**
+   * The id this client puts in the source of its messages (`CastClient` has it). Mirroring needs it, to address the
+   * receiver's replies; a client without it cannot mirror.
+   */
+  readonly senderId?: string;
   readonly connected: boolean;
   connect(): Promise<void>;
   close(): void;
@@ -118,6 +123,12 @@ export interface CastSessionServiceOptions {
   };
   /** Adding a device by address, as Chrome's access code casting adds one; off unless `enabled` (see {@link AccessCodeOptions}). */
   accessCode?: AccessCodeOptions;
+  /**
+   * True for a session another local activity of this app holds (a mirroring route, or a device it is launching one on),
+   * so it is not reported as a non-local route (Chrome: `CastActivityManager` adds a non-local activity only for a
+   * session no local activity has).
+   */
+  ownsSession?(sessionId: string, sinkId: string): boolean;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -402,6 +413,14 @@ export class CastSessionService {
   discoverSinksNow(): void {
     this.sinkService.discoverSinksNow();
     this.appDiscovery.refresh();
+  }
+
+  /**
+   * The client of the device's open channel, which every activity on the device shares (Chrome: one `CastSocket` per
+   * sink, used by `CastMessageHandler` for every session); undefined when the device is not a sink now.
+   */
+  channelClient(deviceId: string): CastClientLike | undefined {
+    return this.sinkService.clientOf(deviceId);
   }
 
   /** Resolves when no channel is being opened and none is scheduled to be; for tests. */
@@ -1141,7 +1160,8 @@ export class CastSessionService {
 
   /** The tracked sessions no page of this service holds (Chrome: activities with `is_local` false). */
   private nonLocalSessions(): TrackedSession[] {
-    return this.tracker.sessions().filter((s) => !this.sessions.has(s.sessionId) && !this.launching.has(s.sinkId));
+    return this.tracker.sessions().filter((s) => !this.sessions.has(s.sessionId) && !this.launching.has(s.sinkId)
+      && this.options.ownsSession?.(s.sessionId, s.sinkId) !== true);
   }
 
   /** Be told when a session starts, changes (status, volume, pages) or ends; returns the unsubscribe function. */

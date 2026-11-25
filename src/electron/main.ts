@@ -15,6 +15,9 @@ import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
 import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
+import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
+import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
+import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirroring-activity.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
@@ -39,6 +42,8 @@ export {
   type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
 export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
+export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 export type {
   AccessCodeCapabilities, AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AccessCodeStore, AddSinkResult,
   SinkCreationFailure,
@@ -47,7 +52,7 @@ export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
 export type {
-  CastManagerApi, DevicePickerContext, MediaCastMode, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
+  CastManagerApi, DevicePickerContext, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
   MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
 } from "./manager-api.ts";
 
@@ -131,6 +136,12 @@ export interface CastManagerOptions {
    * {@link CastManager.addSinkByAddress}). Off unless `enabled`, as Chrome's `AccessCodeCastEnabled` policy is.
    */
   accessCode?: AccessCodeOptions;
+  /**
+   * Enables tab and desktop mirroring (`startCasting` with `castMode: "tab_mirror"` or `"desktop_mirror"`). Pass the
+   * Electron classes it needs (`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`,
+   * `webContents`); off by default. `createService` replaces the Electron engine (tests, or a different one).
+   */
+  mirroring?: ElectronMirroringOptions | { createService: MirroringServiceFactory };
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -195,6 +206,44 @@ function originOf(frame: FrameLike | null): string | null {
  * a sender that leaves its sessions when it is destroyed or navigates. Unless
  * `presentation: false` it also serves `<channel>:presentation` (see {@link CastManagerOptions.presentation}).
  */
+/**
+ * A mirroring activity's view of the device's shared channel. Chrome runs every activity on a sink over its one
+ * `CastSocket`; here the activity's `connect()` only checks that channel is open and `close()` detaches the activity
+ * (its listeners go quiet) without closing the channel the other sessions and the session tracker use.
+ */
+function sharedChannelClient(deviceId: string, channel: CastClientLike | undefined): MirroringClient {
+  let attached = true;
+  const need = (): CastClientLike => {
+    if (channel === undefined || !channel.connected) throw new Error(`no open channel to ${deviceId}`);
+    if (channel.senderId === undefined) throw new Error("the Cast client has no senderId, which mirroring needs");
+    return channel;
+  };
+  return {
+    get senderId() {
+      return channel?.senderId ?? "";
+    },
+    async connect() {
+      need();
+    },
+    close() {
+      attached = false;
+    },
+    send: (namespace, destinationId, payload) => {
+      if (attached) need().send(namespace, destinationId, payload);
+    },
+    launch: (appId) => need().launch(appId),
+    stop: (sessionId) => need().stop(sessionId),
+    connectTransport: (transportId) => need().connectTransport(transportId),
+    closeTransport: (transportId) => need().closeTransport(transportId),
+    on(event: string, listener: (...args: any[]) => void) {
+      (channel as { on(event: string, l: (...args: any[]) => void): unknown } | undefined)?.on(event, (...args: any[]) => {
+        if (attached) listener(...args);
+      });
+      return this;
+    },
+  } as MirroringClient;
+}
+
 /** How long starting a default request on a DIAL sink waits for its app info, as a page's request does. */
 const DIAL_APP_WAIT_MS = 5000;
 
@@ -366,9 +415,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
    * of sink, as Chrome's dialog does; a display chosen in it is recorded here and the Cast flow is told the user cancelled.
    */
   const mixedStarts = new Map<number, { displays: WiredDisplaySink[]; chosen: string | null }>();
+  /** Tab and desktop mirroring, when the `mirroring` option is given (set up once the service exists). */
+  let mirroring: MirroringManager | undefined;
   const service = new CastSessionService({
     devices: discovery,
     createClient,
+    // a mirroring route's session, or one being launched on the sink, is a local activity
+    ownsSession: (sessionId, sinkId) =>
+      mirroring?.routes().some((r) => r.sinkId === sinkId && (r.sessionId === sessionId || r.sessionId === "")) ?? false,
     async selectDevice(devices, request, picker) {
       const mixed = mixedStarts.get(request.senderId);
       const choice = await options.selectDevice(devices, mixed === undefined ? request : { ...request, displays: mixed.displays }, picker);
@@ -822,6 +876,26 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The service knows frames by sender id (an iframe has a synthetic one); the API speaks of windows, so a route's
   // pages are reported as `webContents.id`s, once each however many of its frames hold the route.
   const windowIds = (ids: number[]): number[] => [...new Set(ids.map((id) => senders.get(id)?.wc.id ?? id))];
+  // Tab and desktop mirroring: MirroringActivity, a CastActivity that runs on the device's one channel
+  let disposeMirroring: (() => void) | undefined;
+  if (options.mirroring !== undefined) {
+    const m = options.mirroring;
+    let createService: MirroringServiceFactory;
+    if ("createService" in m) {
+      createService = m.createService;
+    } else {
+      const electron = createElectronMirroringServiceFactory(m);
+      createService = electron.factory;
+      disposeMirroring = () => electron.dispose();
+    }
+    mirroring = new MirroringManager({
+      // only a sink (an open, authenticated channel) can be cast to
+      findDevice: (id) => service.devices().find((d) => d.id === id),
+      createClient: (d) => sharedChannelClient(d.id, service.channelClient(d.id)),
+      createService,
+      log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
+    });
+  }
   const dialRoutes = (): MediaRoute[] =>
     (dial?.provider.routes() ?? []).map((r) => {
       const members = windowIds(handler?.dialMembers(r.id) ?? []);
@@ -842,10 +916,28 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         parked: members.length === 0,
       };
     });
+  const mirroringRoutes = (): MediaRoute[] => (mirroring?.routes() ?? []).map((r: MirroringRoute) => ({
+    id: r.id,
+    providerId: "cast" as const,
+    mediaSource: r.mediaSource,
+    sinkId: r.sinkId,
+    sinkName: service.devices().find((d) => d.id === r.sinkId)?.name ?? "",
+    isLocal: true,
+    description: r.description,
+    appId: r.appId,
+    displayName: r.displayName,
+    origin: "",
+    volume: { level: null, muted: null },
+    members: r.webContentsId === undefined ? [] : [r.webContentsId],
+    parkedSenders: [],
+    parked: false,
+  }));
   const routes = (): MediaRoute[] => [
     ...service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
     ...dialRoutes(),
+    ...mirroringRoutes(),
   ];
+  const isMirroringRoute = (id: string): boolean => mirroring?.routes().some((r) => r.id === id) ?? false;
   const isDialRoute = (id: string): boolean => dial?.provider.routes().some((r) => r.id === id) ?? false;
   const notDial = { ok: false as const, code: "invalid_parameter", description: "A DIAL route has no volume or media control" };
   const castDevices = service.deviceSource();
@@ -862,13 +954,16 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     mediaRoutes: routes,
     observeSessions: (l) => {
       const off = service.observeSessions(l);
+      const offMirroring = mirroring?.observe(l);
       routeListeners.add(l);
       return () => {
         off();
+        offMirroring?.();
         routeListeners.delete(l);
       };
     },
     async terminateSession(id) {
+      if (mirroring?.terminate(id) === true) return { ok: true, value: undefined };
       if (!isDialRoute(id)) return service.terminateSession(id);
       try {
         await dial!.provider.terminateRoute(id);
@@ -879,7 +974,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       }
     },
     setSessionVolume: async (id, v) => (isDialRoute(id) ? notDial : service.setSessionVolume(id, v)),
+    startCasting:
+      mirroring === undefined
+        ? undefined
+        : async (sinkId, o) => {
+            const m = mirroring!;
+            try {
+              const route = await m.startMirroring(sinkId, o);
+              const listed = routes().find((r) => r.id === route.id);
+              if (listed === undefined) throw new MediaRouteError("route_not_found", `no route ${route.id}`);
+              return listed;
+            } catch (err) {
+              if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+              throw err;
+            }
+          },
     detachSession(id) {
+      if (isMirroringRoute(id)) return { ok: false, code: "invalid_parameter", description: "A mirroring route cannot be detached" };
       if (!isDialRoute(id)) return service.detachSession(id);
       handler?.detachDialRoute(id);
       return { ok: true, value: undefined };
@@ -919,6 +1030,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       disposed = true;
       api.dispose();
       defaults.dispose();
+      mirroring?.dispose();
+      disposeMirroring?.();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
       if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, castChanged);

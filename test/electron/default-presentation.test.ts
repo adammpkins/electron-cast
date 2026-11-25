@@ -238,7 +238,10 @@ test("a default request with no usable sink cannot be cast (unable_to_cast), as 
   assert.equal(await codeOf(manager.startCasting("nope", { webContentsId: 5 })), "unable_to_cast", "unknown sink");
   await setDefault(wc, ["https://example.test/"]);
   assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "unable_to_cast", "not a Cast URL");
-  await assert.rejects(manager.startCasting(TV.id, { webContentsId: 5, castMode: "tab_mirror" as any }), RangeError);
+  // a cast mode Chrome's MediaCastMode does not have is an argument error; TAB_MIRROR is one, which without the
+  // mirroring option has no route to start
+  await assert.rejects(manager.startCasting(TV.id, { webContentsId: 5, castMode: "remote_playback" as any }), RangeError);
+  assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5, castMode: "tab_mirror" })), "unable_to_cast", "mirroring is off");
   await assert.rejects(manager.startCasting(TV.id, {} as any), TypeError);
   await assert.rejects(manager.startCasting(5 as any, { webContentsId: 5 }), TypeError);
   const off = setup({ presentation: false });

@@ -4,8 +4,8 @@
 
 This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
 channels, the sessions on them are followed whoever started them, the app can cast and control media from its own
-UI, DIAL devices are found and cast to next to Cast devices, and a page can present on another screen (a wired
-display) with the Presentation Receiver API on the other end. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
+UI, DIAL devices are found and cast to next to Cast devices, a page can present on another screen (a wired
+display) with the Presentation Receiver API on the other end, and the app can mirror a tab or the desktop. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
 is frozen and behaves as before for pages; it shares the device list.
 
 ### Added
@@ -97,6 +97,20 @@ is frozen and behaves as before for pages; it shares the device list.
     `ipcMain` and a folder for the generated receiver preload; calling it twice on one `ipcMain` and channel throws),
     the display rules (`isWiredDisplaySource`, `availableDisplays`, `wiredDisplaySinks`), and `manager.wiredDisplay`
     (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+- **Tab and desktop mirroring.** `createCastManager({ mirroring })` enables `startCasting(sinkId, { castMode:
+  "tab_mirror", webContentsId })` and `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })`
+  in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
+  `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
+  `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
+  (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
+  routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
+  runs on the device's one kept-open channel. A mirrored tab is muted locally while it is cast (Chrome's muter);
+  desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,
+  and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
+  software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
+  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting, tab switching and
+  the pause and resume UI, re-offering when the encoder changes, session stats, hardware codecs.
 - **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
   `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
@@ -165,8 +179,8 @@ is frozen and behaves as before for pages; it shares the device list.
 ### Documentation
 
 - A rewritten README with a Chrome parity table (including what is out of scope, such as Chrome's Global Media
-  Controls panel, and what is in progress: mirroring and
-  access-code casting), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
+  Controls panel, and what is partly done: access-code
+  casting, without the code lookup), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
   receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting
   and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING.
 - Tested-on facts: casting, rejoin after a force-kill, and stop verified end to end in an Electron 45 app on Linux
