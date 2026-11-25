@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { CastDevice } from "../discovery/index.ts";
 import { MirroringActivity, type MirroringClient, type MirroringServiceFactory } from "./mirroring-activity.ts";
 import type { MirroringStats } from "./stats/statistics.ts";
-import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringType } from "./routing.ts";
+import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringSource, type MirroringType } from "./routing.ts";
 
 /** `MediaCastMode` values this library implements besides the Presentation API. */
 export type MirroringCastMode = "tab_mirror" | "desktop_mirror";
@@ -40,6 +40,8 @@ export interface MirroringRoute {
   castMode: MirroringCastMode;
   appId: string;
   displayName: string;
+  /** `MediaRoute::presentation_id`: what the route id carries after the prefix. */
+  presentationId: string;
   /** The Cast session id once the app is launched; "" while launching. */
   sessionId: string;
   /** True while the launch is in flight (`MediaRoute::is_connecting`). */
@@ -71,6 +73,12 @@ export interface MirroringManagerOptions {
    * frame in `routes_by_frame_` for every kind of route, so a page that becomes a mirroring source loses them.
    */
   terminateRoutesOfPage?(webContentsId: number): void;
+  /**
+   * `SwitchToFlingingIfPossible` (components/media_router/browser/mirroring_to_flinging_switcher.cc): called for the page a
+   * route now mirrors after its source tab switched (`MirroringActivity::DidGetTabSourceId` posts it). It runs in a later
+   * task, as Chrome's `PostTask` does.
+   */
+  switchToFlingingIfPossible?(webContentsId: number): void;
   /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
   commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
@@ -133,11 +141,28 @@ export class MirroringManager {
    */
   async startMirroring(sinkId: string, options: StartMirroringOptions): Promise<MirroringRoute> {
     if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
-    const device = this.options.findDevice(sinkId);
-    if (device === undefined) throw new MirroringRouteError("sink_not_found", `no sink ${sinkId}`);
     const mediaSourceId = this.mediaSourceFor(options);
     const source = mirroringSourceFor(mediaSourceId)!;
     if (options.targetPlayoutDelayMs !== undefined) source.targetPlayoutDelayMs = options.targetPlayoutDelayMs;
+    return this.launchRoute(sinkId, source, options.webContentsId);
+  }
+
+  /**
+   * `CastActivityManager::DoLaunchSession` for a source a page supplied (a Cast Streaming URL of the Presentation API,
+   * `IsSiteInitiatedMirroringSource`): the activity mirrors the page's own tab and the route's source stays the URL.
+   * Whether the page's origin may do this is the caller's check (`kPresentationApiAllowlist`).
+   */
+  async startSiteInitiatedMirroring(sinkId: string, source: MirroringSource): Promise<MirroringRoute> {
+    if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
+    if (source.type !== "tab" || source.tabId === undefined) throw new TypeError("a site-initiated source mirrors a tab");
+    return this.launchRoute(sinkId, source, source.tabId);
+  }
+
+  private async launchRoute(sinkId: string, source: MirroringSource, tabId: number | undefined): Promise<MirroringRoute> {
+    const options = { webContentsId: tabId };
+    const mediaSourceId = source.id;
+    const device = this.options.findDevice(sinkId);
+    if (device === undefined) throw new MirroringRouteError("sink_not_found", `no sink ${sinkId}`);
     // A sink is offered for a source only when it can run one of its apps (the sinks query of `CastMediaSource`).
     if (!sinkSupportsSource(source, device.capabilities)) {
       throw new MirroringRouteError("unable_to_cast", `${device.name} cannot receive this mirroring source`);
@@ -194,6 +219,9 @@ export class MirroringManager {
           if (other !== entry && other.activity.webContentsId === tab) other.activity.stopMirroring();
         }
         this.options.terminateRoutesOfPage?.(tab);
+        // `DidGetTabSourceId`: once the source moved, the new page may have a default request to switch to
+        const flinging = this.options.switchToFlingingIfPossible;
+        if (flinging !== undefined) queueMicrotask(() => flinging(tab));
       },
     });
     entry.activity = activity;
@@ -329,6 +357,7 @@ export class MirroringManager {
       id: routeId,
       mediaSource: activity.source.id,
       sinkId: activity.sink.id,
+      presentationId: routeId.slice(ROUTE_ID_PREFIX.length).split("/")[0]!,
       description: activity.description,
       castMode: type === "tab" ? "tab_mirror" : "desktop_mirror",
       appId: activity.app?.appId ?? activity.source.appInfos[0]!.appId,

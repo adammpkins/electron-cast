@@ -25,6 +25,18 @@
 
 ### Added
 
+- **Mirroring to flinging.** A page whose tab is mirrored and whose Cast SDK auto-joins (`defaultActionPolicy` other than
+  `cast_this_tab`) gets its app launched on the mirroring sink, which ends the mirroring
+  (`CastActivityManager::JoinSession`, `GetSinkForMirroringActivity`); switching the mirrored tab to a window with a default
+  presentation request does the same and hands the window a `connectionavailable`
+  (`SwitchToFlingingIfPossible`). Not yet tried on a real device.
+- **Site-initiated mirroring.** With the `mirroring` option, a page of `docs.google.com`, `meet.google.com` or
+  `music.youtube.com` (or any origin with the `AllowAllSitesToInitiateMirroring` feature in `app.commandLine`) can start
+  tab mirroring with a Cast Streaming URL in a `PresentationRequest` (`kPresentationApiAllowlist`,
+  `IsSiteInitiatedMirroringSource`). Other origins still see the source unavailable. Not yet tried on a real device.
+- **The desktop capture escalation guard.** Joining a route as a desktop mirroring source is refused with Chrome's text
+  unless the route is desktop mirroring (`IsDesktopCaptureEscalation`).
+
 - `npm run live:checks` ([examples/live-checks](examples/live-checks)): unattended live checks for DIAL dedup (read-only) and
   for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, and the
   app's own UI. The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.
