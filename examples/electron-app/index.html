@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Google's SDK pulls in scripts from gstatic.com over http as well as https, so both are listed. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://www.gstatic.com http://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src * data:; connect-src *; media-src *; frame-src *"
+    />
+    <title>electron-cast example</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; margin: 2rem; }
+      google-cast-launcher { display: inline-block; width: 40px; height: 40px; vertical-align: middle; }
+    </style>
+  </head>
+  <body>
+    <h1>electron-cast example</h1>
+    <p>
+      <google-cast-launcher></google-cast-launcher>
+      <button id="play" disabled>Play sample video</button>
+    </p>
+    <p id="status">Loading the Cast SDK...</p>
+    <script src="page.js"></script>
+    <!-- Google's own Cast SDK; it calls window.__onGCastApiAvailable (set in page.js) when ready. -->
+    <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+  </body>
+</html>

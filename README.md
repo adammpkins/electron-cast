@@ -116,6 +116,21 @@ installCastBridge({ contextBridge, ipcRenderer, mode: "chromecast" });
 
 The main process serves both modes. `createCastManager({ ..., presentation: false })` serves only `"chromecast"`.
 
+## Device authentication
+
+Like Chrome, electron-cast checks that a device is a genuine Google-certified Cast device before using it (the
+`deviceauth` challenge, with Google's Cast root certificates built in and no dependencies). This happens when the
+connection opens, not at discovery, so a device that fails still shows in the picker but casting to it fails like an
+unreachable device.
+
+Receivers that are not Google-certified (open-source ones, for example) need it off:
+
+```js
+createCastManager({ ipcMain, selectDevice, verifyDevices: false });   // CastClient: { verifyDevice: false }
+```
+
+It is not yet tested against real hardware. How it works and what it leaves out: [docs/DESIGN.md](docs/DESIGN.md).
+
 ## What works
 
 - Device discovery over mDNS on every network interface, with devices coming and going live.
@@ -164,6 +179,7 @@ The package root exports every layer, if you want to use them without Electron:
 See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
 
 To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
+More docs: [API reference](docs/API.md), [security notes](SECURITY.md) and a [runnable example app](examples/electron-app).
 
 ## License
 

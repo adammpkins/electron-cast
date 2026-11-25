@@ -41,8 +41,8 @@ export class FakeReceiver {
   private sockets = new Set<tls.TLSSocket>();
   private nextSession = 1;
 
-  constructor() {
-    this.server = tls.createServer({ key: fx("key.pem"), cert: fx("cert.pem") }, (socket) => this.accept(socket));
+  constructor(credentials?: { key: string | Buffer; cert: string | Buffer }) {
+    this.server = tls.createServer(credentials ?? { key: fx("key.pem"), cert: fx("cert.pem") }, (socket) => this.accept(socket));
   }
 
   async listen(): Promise<number> {

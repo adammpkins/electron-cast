@@ -64,7 +64,40 @@ error and the connection must be closed.
 
 TLS to the device on its mDNS port (8009 for single devices; groups use their own port). Cast devices present
 self-signed certificates, so the TLS layer cannot verify them; device authenticity is the job of the
-`urn:x-cast:com.google.cast.tp.deviceauth` challenge (planned, not in v0.1).
+`urn:x-cast:com.google.cast.tp.deviceauth` challenge.
+
+### Device authentication (`src/client/auth/`)
+
+`CastClient.connect()` runs the challenge after the TLS handshake and before CONNECT, unless `verifyDevice: false`.
+It is a port of Chromium's sender side (`components/media_router/common/providers/cast/channel/cast_auth_util.cc`
+and `.../cast/certificate/`, with BoringSSL's path validator under it):
+
+1. Send an `AuthChallenge` (16-byte nonce, SHA-256) as a BINARY CastMessage from `sender-0` to `receiver-0`.
+2. The device replies with an `AuthResponse`: a signature, its certificate, its intermediates and optionally a CRL.
+3. The TLS certificate's validity window must hold now and must end within four days (the lifetime of the proof).
+4. The chain is built and validated to the embedded Cast Root CA or Eureka Root CA with RFC 5280 rules: signatures,
+   validity, names, basic constraints and path length, key usage, extended key usage (clientAuth), name constraints,
+   certificate policies, unhandled critical extensions, RSA of at least 2048 bits. Trust anchors are not checked for
+   expiry. A chain valid for more than five years that has just expired is validated as of a week before it
+   expired (Chromium's `GetValidationDate`).
+5. The device certificate must assert digitalSignature, have a common name and a usable key.
+6. Revocation uses the CRL the device sent (verified against the Cast CRL Root CA) or else the built-in fallback CRL,
+   which counts as valid for 20 weeks from `FALLBACK_CRL_BUILD_TIME`. With neither, the device is refused.
+7. The signature (RSASSA-PKCS1-v1_5, SHA-1 or SHA-256 as the reply says) must verify under the device certificate's
+   key over `sender_nonce || DER of the TLS certificate`, which ties the proof to this connection.
+
+A failure rejects `connect()` with `CastAuthError` (with a `reason`) and closes the socket. The session layer reports it
+like any unreachable device (`receiver_unavailable`). Devices are verified when connected, not when discovered, so a
+device that fails shows in the picker but cannot be cast to.
+
+Not checked, or different from Chromium:
+
+- Chromium's policy result `audio_only` is reported in `CastClient.deviceAuth.policy` but nothing acts on it.
+- The fallback CRL's window starts at a constant (`src/client/auth/trust-data.ts`) instead of the binary's build time,
+  so it has to be refreshed with each release.
+- ML-DSA and other post-quantum keys, and Merkle tree certificates, are not understood (BoringSSL's newer paths).
+- As in Chromium, the reply's `signature_algorithm` field is ignored and a missing or different echoed nonce is
+  tolerated (recorded in `deviceAuth.nonceEchoed`).
 
 Namespaces (JSON payloads, `payload_type` STRING):
 
