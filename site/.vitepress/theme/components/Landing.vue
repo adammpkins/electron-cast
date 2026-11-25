@@ -149,6 +149,10 @@ const tabs = [
           Nest Hub Max and two Cast groups. CI also loads the built package in a real Electron 35, 40 and the latest stable on Linux,
           Windows and macOS, with a fake device.
         </p>
+        <p class="side wide">
+          Mirroring, presenting to a second display, DIAL and casting from the app's own UI are new in 0.5. Until 0.5.0 they are
+          in the <code>next</code> prerelease: <code>npm i electron-cast@next</code>.
+        </p>
         <div class="tablewrap">
           <table>
             <caption class="sr">Test coverage by operating system</caption>
@@ -176,19 +180,19 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">Tab mirroring</th>
-                <td>Tested to a Chromecast Ultra: 1080p30, VP8 and Opus in software, sound only on the TV</td>
+                <td>Works on a Chromecast Ultra: 1080p30, VP8 and Opus in software, sound in sync and only on the TV. The video lags more than it should and some frames are dropped on Wi-Fi; a fix is in progress</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
               <tr>
                 <th scope="row">Desktop mirroring</th>
-                <td>Tested to a Chromecast Ultra: picture and system sound; the PC keeps playing its sound, as Chrome does on Windows</td>
+                <td>Works on a Chromecast Ultra: picture and system sound in sync; the PC keeps playing its sound, as Chrome does on Windows. The same lag and dropped frames on Wi-Fi; a fix is in progress</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
               <tr>
                 <th scope="row">Presenting to a second display</th>
-                <td>Tested on a second monitor</td>
+                <td>Tested on a second monitor (1080x1920, portrait)</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
@@ -212,6 +216,7 @@ const tabs = [
             <h3>Coming</h3>
             <ul>
               <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing</li>
+              <li>Mirroring without the lag and the dropped frames on Wi-Fi (a fix is in progress)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>
             </ul>

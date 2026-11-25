@@ -122,7 +122,9 @@ hidden.
   and authenticated, so the list fills in a few seconds after `start()`; it stays through mDNS silence and recovers
   after sleep.
 - **DIAL next to Cast**, as Chrome runs both: SSDP discovery, availability, the picker and launch over HTTP for the
-  `cast-dial:` sources Google's SDK adds for a `dialRequest`. On by default; `dial: false` turns it off.
+  `cast-dial:` sources Google's SDK adds for a `dialRequest`. On by default; `dial: false` turns it off. (0.5)
+- **Tab and desktop mirroring** to a Cast device, and **presenting to a second monitor** (a wired display), started from
+  the main process ([docs](docs/MAIN-API.md#tab-and-desktop-mirroring)). (0.5)
 - **Device authentication** as Chrome does it: a device is listed only after it proves it is a Google-certified Cast
   device, with Google's Cast roots built in ([details](docs/guides/device-authentication.md)).
 - **Sessions the Chrome way:** auto-join after a reload, rejoin after an app restart by session id, several windows,
@@ -131,25 +133,30 @@ hidden.
   ([guide](docs/guides/device-picker.md)).
 - **A main-process API** modelled on Chrome's Media Router: observe devices (sinks) and sessions (routes), including
   sessions other senders started; stop or detach a session, set its volume; play, pause and seek its media; and start
-  a cast from your own menu on the page's default presentation request ([docs](docs/MAIN-API.md)).
+  a cast from your own menu on the page's default presentation request ([docs](docs/MAIN-API.md)). The sessions of
+  other senders, media control and casting from your menu are new in 0.5.
 - **Every layer is exported** if you want them without Electron: `CastDiscovery`, `CastClient` and the protocol code
   run in plain Node ([guide](docs/guides/low-level-client.md)).
 - **Documented against Chromium.** Where electron-cast copies a rule, the code and docs name the Chromium source it
   comes from ([map](docs/CHROMIUM-MAP.md)).
 
+What is marked 0.5 is in the `next` prerelease until 0.5.0 is released: `npm i electron-cast@next`. `npm i
+electron-cast` installs 0.4.0, which does not have it.
+
 ## Chrome parity
 
 electron-cast does what Chrome does on the Presentation API path. Where it does not yet, or never will, this says so.
+Rows marked "0.5, in `next`" are in the `next` prerelease (`npm i electron-cast@next`) until 0.5.0.
 
 | Feature | Chrome | electron-cast | Notes |
 |---|---|---|---|
 | Google's Cast sender SDK on the page (`chrome.cast`, `cast.framework`) | Yes | Yes | Unmodified, over a stand-in Presentation API |
 | Device discovery (mDNS `_googlecast._tcp`) | Yes | Yes | IPv4 on every interface, IPv6 link-local per adapter. IPv6 discovery verified on real devices |
-| Devices listed once their channel is open and authenticated, kept open, retried, reopened after a failure | Yes | Yes | Chrome's delays and backoff (`CastMediaSinkServiceImpl`); the list fills in a few seconds after `start()` |
-| No channel to a publicly routable or loopback address | Yes (unless `MediaRouterCastAllowAllIPs`) | Yes (unless `sinks.allowAllIps`) | Checked on the address a channel is opened to, when it is opened |
+| Devices listed once their channel is open and authenticated, kept open, retried, reopened after a failure | Yes | Yes | **0.5, in `next`.** Chrome's delays and backoff (`CastMediaSinkServiceImpl`); the list fills in a few seconds after `start()` |
+| No channel to a publicly routable or loopback address | Yes (unless `MediaRouterCastAllowAllIPs`) | Yes (unless `sinks.allowAllIps`) | **0.5, in `next`.** Checked on the address a channel is opened to, when it is opened |
 | Device picker | Chrome's dialog | Your UI through `selectDevice` | By design: the app owns the UI |
 | Device authentication | Yes | Yes | A port of Chromium's checks, verified on real devices over IPv4, IPv6 unique-local and IPv6 link-local. One deliberate difference: a stale built-in fallback CRL skips revocation instead of refusing ([why](SECURITY.md#tls-and-device-authentication)) |
-| App availability (`GET_APP_AVAILABILITY`) for a page's `getAvailability()` and the devices its `start()` offers | Yes | Yes | Asked over the open channels, with Chrome's refresh rules. `mode: "chromecast"` still goes by capabilities |
+| App availability (`GET_APP_AVAILABILITY`) for a page's `getAvailability()` and the devices its `start()` offers | Yes | Yes | **0.5, in `next`.** Asked over the open channels, with Chrome's refresh rules. `mode: "chromecast"` still goes by capabilities |
 | Start requires a user gesture | Checked in the browser process | Checked by the preload in the renderer | Electron has no main-process API for it ([SECURITY.md](SECURITY.md#user-gesture)) |
 | Sessions: launch an app, app messages, media commands, volume, stop | Yes | Yes | |
 | Auto-join after a reload (`origin_scoped`, `tab_and_origin_scoped`) | Yes | Yes | |
@@ -158,18 +165,18 @@ electron-cast does what Chrome does on the Presentation API path. Where it does 
 | Iframes (each frame is its own sender) | Yes | Yes | Needs `nodeIntegrationInSubFrames: true`. Unit tests only so far |
 | Audio-only devices and speaker groups | Yes | Yes | Tested on a Google Home Mini and two groups |
 | Observe sinks and routes, stop a route, set volume from the app | Internal | Yes ([MAIN-API](docs/MAIN-API.md)) | Modelled on `MediaRouter` |
-| Media control of a route from the app (play, pause, seek, tracks, volume, media status) | Internal (`MediaController`) | Yes (`getMediaController`) | Fed by the session tracker, as `CastMediaController` is; works on non-local routes too |
-| Sessions started by other senders listed as routes (non-local routes), tracked live | Yes | Yes | From each device's receiver status (`CastSessionTracker`) |
-| App-initiated casting through the page's default presentation request (`connectionavailable`) | Yes | Yes (`startCasting`) | The app's menu or tray plays Chrome's Cast dialog ([MAIN-API](docs/MAIN-API.md#casting-from-the-apps-own-ui)) |
+| Media control of a route from the app (play, pause, seek, tracks, volume, media status) | Internal (`MediaController`) | Yes (`getMediaController`) | **0.5, in `next`.** Fed by the session tracker, as `CastMediaController` is; works on non-local routes too |
+| Sessions started by other senders listed as routes (non-local routes), tracked live | Yes | Yes | **0.5, in `next`.** From each device's receiver status (`CastSessionTracker`). Unit tests only; not yet tried with a session another sender started on a real device |
+| App-initiated casting through the page's default presentation request (`connectionavailable`) | Yes | Yes (`startCasting`) | **0.5, in `next`.** The app's menu or tray plays Chrome's Cast dialog ([MAIN-API](docs/MAIN-API.md#casting-from-the-apps-own-ui)). Unit tests and the smoke test only; not yet tried from an app's menu on a real device |
 | Global Media Controls (the toolbar's media and Cast panel) | Browser UI | Out of scope: the app builds its own | Chrome's panel lists the routes and controls them ([`cast_media_notification_producer.cc`](https://github.com/chromium/chromium/blob/main/chrome/browser/ui/global_media_controls/cast_media_notification_producer.cc), [`cast_media_notification_item.cc`](https://github.com/chromium/chromium/blob/main/chrome/browser/ui/global_media_controls/cast_media_notification_item.cc)); the same calls are here: `registerMediaRoutesObserver` or `getRoutes`, `getMediaController`, `terminateRoute` |
-| DIAL discovery and launch (`cast-dial:` sources from the SDK's `dialRequest`) | Yes | Yes | SSDP, availability, the picker, launch and stop over HTTP ([DESIGN](docs/DESIGN.md#dial-srcdial)). A device that is also a Cast sink is listed as Cast only, as in Chrome; a DIAL-only device gets a Cast channel opened to port 8009 and is a Cast sink if that works, as in Chrome (`TryConnectDialDiscoveredSink`), and is left a DIAL sink after ten failed attempts. `dial: false` turns it off. DIAL discovery and device descriptions tested on real Chromecasts (1st gen, Ultra); launching an app over DIAL needs a DIAL-only TV and is untested |
-| Tab and desktop mirroring | Yes | Yes (`mirroring` option, `startCasting` with `castMode`) | A port of Chrome's Cast Streaming sender: VP8 and VP9, H.264 and the others in hardware where there is an encoder, and Opus, encryption, RTCP, retransmission and bitrate adaptation, on the device's one channel. The mirrored tab is muted locally, as in Chrome. Tested on Windows to a Chromecast Ultra (tab and desktop); not tested on Linux or macOS. Switching the mirrored tab, freezing the picture, the mirroring statistics, hardware encoders, the new offer after an encoder failure and letterboxing are in (`switchMirroringSourceTab`, `freezeRoute`, `getMirroringStats`), not yet tried on a real device. Not ported: remoting (it needs a hook Electron does not have) ([MAIN-API](docs/MAIN-API.md#tab-and-desktop-mirroring)) |
+| DIAL discovery and launch (`cast-dial:` sources from the SDK's `dialRequest`) | Yes | Yes | **0.5, in `next`.** SSDP, availability, the picker, launch and stop over HTTP ([DESIGN](docs/DESIGN.md#dial-srcdial)). A device that is also a Cast sink is listed as Cast only, as in Chrome; a DIAL-only device gets a Cast channel opened to port 8009 and is a Cast sink if that works, as in Chrome (`TryConnectDialDiscoveredSink`), and is left a DIAL sink after ten failed attempts. `dial: false` turns it off. DIAL discovery and device descriptions tested on real Chromecasts (1st gen, Ultra); launching an app over DIAL needs a DIAL-only TV and is untested |
+| Tab and desktop mirroring | Yes | Yes (`mirroring` option, `startCasting` with `castMode`) | **0.5, in `next`.** A port of Chrome's Cast Streaming sender: VP8 and VP9, H.264 and the others in hardware where there is an encoder, and Opus, encryption, RTCP, retransmission and bitrate adaptation, on the device's one channel. The mirrored tab is muted locally, as in Chrome. Works on Windows to a Chromecast Ultra (tab and desktop, audio in sync), but the video lags more than it should and some frames are dropped on Wi-Fi; a fix is in progress ([known issue](#known-issue-mirroring-video-lags)). Not tested on Linux or macOS. Switching the mirrored tab, freezing the picture, the mirroring statistics, hardware encoders, the new offer after an encoder failure and letterboxing are in (`switchMirroringSourceTab`, `freezeRoute`, `getMirroringStats`), not yet tried on a real device. Not ported: remoting (it needs a hook Electron does not have) ([MAIN-API](docs/MAIN-API.md#tab-and-desktop-mirroring)) |
 | File mirroring, and mirroring sources from a page's `PresentationRequest` | Yes | No | A page's mirroring sources are reported unavailable |
 | Remote Playback API (`video.remote`) | Yes | Not done: needs Electron | Blink's `RemotePlayback` needs support in Electron; electron-cast reports `remote-playback:` sources unavailable |
-| Wired display (presenting to a second monitor) | Yes | Yes (`wiredDisplay` option) | A page's https (or localhost) `PresentationRequest` opens fullscreen in a sandboxed receiver window on the chosen screen; a request that also has a Cast URL gets one picker for both kinds ([DESIGN](docs/DESIGN.md#wired-displays)). Unit tests with fakes; tried live on one second display |
-| Presentation Receiver API (`navigator.presentation.receiver` on the presented page) | Yes | Yes | `connectionList`, `connectionavailable`, messages in both directions, `close`, `terminate` |
-| Binary messages on a presentation connection (`ArrayBuffer`, `Blob`, `binaryType`) | Yes | Yes | Carried to wired displays; dropped for Cast devices, as Chrome's Cast provider does |
-| Access-code casting | Yes | Partly: adding the device by address (`addSinkByAddress`) | Chrome's checks, open parameters, expiry and network-change handling are ported. Turning a typed code into an address is a private Google service behind Chrome's sign-in, so the app supplies the address and **must validate it**: private addresses and any port are allowed ([why](docs/DESIGN.md#access-code-casting-access-codets)). Unit tests only so far |
+| Wired display (presenting to a second monitor) | Yes | Yes (`wiredDisplay` option) | **0.5, in `next`.** A page's https (or localhost) `PresentationRequest` opens fullscreen in a sandboxed receiver window on the chosen screen; a request that also has a Cast URL gets one picker for both kinds ([DESIGN](docs/DESIGN.md#wired-displays)). Unit tests with fakes; tested on Windows on a second monitor (1080x1920, portrait) |
+| Presentation Receiver API (`navigator.presentation.receiver` on the presented page) | Yes | Yes | **0.5, in `next`.** `connectionList`, `connectionavailable`, messages in both directions, `close`, `terminate` |
+| Binary messages on a presentation connection (`ArrayBuffer`, `Blob`, `binaryType`) | Yes | Yes | **0.5, in `next`.** Carried to wired displays; dropped for Cast devices, as Chrome's Cast provider does |
+| Access-code casting | Yes | Partly: adding the device by address (`addSinkByAddress`) | **0.5, in `next`.** Chrome's checks, open parameters, expiry and network-change handling are ported. Turning a typed code into an address is a private Google service behind Chrome's sign-in, so the app supplies the address and **must validate it**: private addresses and any port are allowed ([why](docs/DESIGN.md#access-code-casting-access-codets)). Unit tests only so far |
 | `mode: "chromecast"`, a legacy `chrome.cast` polyfill | n/a | Frozen | Gets no new features; use the default mode ([notes](docs/FAQ.md#what-is-mode-chromecast)) |
 
 ## Platforms and what was tested
@@ -204,7 +211,7 @@ addresses, were verified on real devices. Iframes are covered by unit tests only
 
 ## Test a DIAL TV
 
-DIAL discovery and device descriptions have been tested on real Chromecasts (1st gen, Ultra); launching an app over DIAL
+The `dial-test` command and DIAL support are new in 0.5, so the command runs the `next` prerelease. DIAL discovery and device descriptions have been tested on real Chromecasts (1st gen, Ultra); launching an app over DIAL
 needs a DIAL-only TV and is untested. If you have a TV or stick that offers DIAL but not Chromecast
 (many Roku, Samsung, LG, Sony and Fire TV models), you can help with one command and a few y/n answers. You need Node 20 or
 later; you do not need Electron or the library installed.
@@ -238,6 +245,12 @@ The page runs Google's SDK, which Google can change per Chrome major without an 
 (also a weekly GitHub Actions job) downloads the SDK for Chrome stable, beta and dev and for the Chromium that
 Electron 45 ships, and checks as text, without running it, that it still uses the message types, fields, request
 types and presentation URLs electron-cast translates. See [CONTRIBUTING.md](CONTRIBUTING.md#the-sdk-canary).
+
+## Known issue: mirroring video lags
+
+Mirroring works on a Chromecast Ultra: tab and desktop, with the audio in sync. The video is laggier than it should be,
+and some frames are dropped on Wi-Fi. A fix is in progress. Mirroring is in the `next` prerelease
+(`npm i electron-cast@next`) until 0.5.0.
 
 ## Known issue: top-level `await app.whenReady()` on Electron 45
 
