@@ -95,7 +95,9 @@ function setup(over: Partial<CastManagerOptions> = {}, clientSetup: (c: FakeClie
   const pcall = (wc: FakeWebContents, method: string, params: any, frame: unknown = main) =>
     Promise.resolve(ipcMain.handlers.get("electron-cast:presentation")!({ sender: wc, senderFrame: frame }, method, params)) as Promise<any>;
   const setDefault = (wc: FakeWebContents, urls: string[], frame: unknown = main) => pcall(wc, "setDefaultRequest", { urls }, frame);
-  return { ipcMain, clients, picked, manager, devices, pcall, setDefault };
+  // the clients that launched something (others only asked GET_APP_AVAILABILITY)
+  const launchers = () => clients.filter((c) => c.calls.some((x) => x.startsWith("launch ")));
+  return { ipcMain, clients, launchers, picked, manager, devices, pcall, setDefault };
 }
 
 async function codeOf(p: Promise<unknown>): Promise<string> {
@@ -162,21 +164,23 @@ test("the default request goes with a navigation or a destroyed window", async (
   assert.equal(manager.hasDefaultPresentationRequest(5), false);
 });
 
-test("sinks can be asked for by presentation URL", () => {
+test("sinks can be asked for by presentation URL", async () => {
   const { manager } = setup();
-  const ids = (urls: string[]) => {
+  const ids = async (urls: string[]) => {
     let got: string[] = [];
-    manager.registerMediaSinksObserver({ onSinksUpdated: (s) => { got = s.map((x) => x.id); } }, { presentationUrls: urls })();
+    const stop = manager.registerMediaSinksObserver({ onSinksUpdated: (s) => { got = s.map((x) => x.id); } }, { presentationUrls: urls });
+    await new Promise((r) => setTimeout(r, 30));  // the devices are asked whether they have the app
+    stop();
     return got;
   };
-  assert.deepEqual(ids([URL1]), ["dev-tv", "dev-speaker", "dev-group"]);
-  assert.deepEqual(ids([URL_VIDEO]), ["dev-tv"]);
-  assert.deepEqual(ids(["https://example.test/"]), []);
-  assert.deepEqual(ids(["https://example.test/", URL_VIDEO]), ["dev-tv"]);
+  assert.deepEqual(await ids([URL1]), ["dev-tv", "dev-speaker", "dev-group"]);
+  assert.deepEqual(await ids([URL_VIDEO]), ["dev-tv"]);
+  assert.deepEqual(await ids(["https://example.test/"]), []);
+  assert.deepEqual(await ids(["https://example.test/", URL_VIDEO]), ["dev-tv"]);
 });
 
 test("startCasting starts the default request on the sink: the page gets connectionavailable, the route is listed", async () => {
-  const { manager, setDefault, clients, picked, pcall } = setup();
+  const { manager, setDefault, clients, launchers, picked, pcall } = setup();
   const wc = new FakeWebContents(5);
   await setDefault(wc, [URL1]);
   const routeLists: MediaRoute[][] = [];
@@ -184,8 +188,9 @@ test("startCasting starts the default request on the sink: the page gets connect
 
   const route = await manager.startCasting(TV.id, { webContentsId: 5 });
   assert.equal(picked.length, 0, "the app chose the sink: no selectDevice, and no user gesture was needed");
-  assert.equal(clients.length, 1);
-  assert.ok(clients[0]!.calls.includes("launch 233637DE"));
+  assert.equal(launchers().length, 1);
+  assert.ok(launchers()[0]!.calls.includes("launch 233637DE"));
+  assert.ok(clients.some((c) => c.calls.includes("availability 233637DE")), "the device was asked whether it has the app");
   assert.equal(route.sinkId, TV.id);
   assert.equal(route.appId, "233637DE");
   assert.equal(route.origin, ORIGIN);
@@ -204,7 +209,7 @@ test("startCasting starts the default request on the sink: the page gets connect
 
   // it is a normal connection: the page can terminate it, which stops the app on the device
   assert.deepEqual(await pcall(wc, "terminate", { connectionId: cid }), { ok: true, value: undefined });
-  assert.ok(clients[0]!.calls.some((c) => c === `stop ${route.id}`), String(clients[0]!.calls));
+  assert.ok(launchers()[0]!.calls.some((c) => c === `stop ${route.id}`), String(launchers()[0]!.calls));
   assert.deepEqual(wc.events().at(-1), { type: "statechange", connectionId: cid, state: "terminated" });
 });
 
@@ -234,7 +239,9 @@ test("a default request with no usable sink cannot be cast (unable_to_cast), as 
 });
 
 test("startCasting reports Chrome's RouteRequestResultCode when the start fails", async () => {
-  const unreachable = setup({}, (c) => { c.connectError = new Error("no route to host"); });
+  // reachable for the availability question, gone when the launch connects
+  let connects = 0;
+  const unreachable = setup({}, (c) => { if (connects++ > 0) c.connectError = new Error("no route to host"); });
   const wc = new FakeWebContents(5);
   await unreachable.setDefault(wc, [URL1]);
   assert.equal(await codeOf(unreachable.manager.startCasting(TV.id, { webContentsId: 5 })), "sink_not_found");
@@ -277,4 +284,65 @@ test("a navigation during the start cancels it", async () => {
   wc.emit("did-navigate");
   assert.equal(await codeOf(started), "cancelled");
   assert.ok(!wc.events().some((e) => e.type === "connectionavailable"));
+});
+
+test("a sink is offered for a presentation URL only when the device says it has the app (GET_APP_AVAILABILITY)", async () => {
+  const { manager, setDefault, clients } = setup({}, (c) => { c.availableApps = c.device.id === TV.id ? ["233637DE"] : ["CC1AD845"]; });
+  let ids: string[] = [];
+  manager.registerMediaSinksObserver({ onSinksUpdated: (s) => { ids = s.map((x) => x.id); } }, { presentationUrls: [URL1] });
+  for (let i = 0; i < 50 && ids.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(ids, ["dev-tv"], "the speaker and the group do not have 233637DE");
+  assert.ok(clients.every((c) => c.calls.filter((x) => x.startsWith("availability")).length <= 1), "each device is asked once");
+
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  assert.equal(await codeOf(manager.startCasting(SPEAKER.id, { webContentsId: 5 })), "unable_to_cast");
+  await setDefault(wc, [URL1, URL2]);
+  const route = await manager.startCasting(SPEAKER.id, { webContentsId: 5 });
+  assert.equal(route.appId, "CC1AD845", "the first URL whose app the sink has");
+});
+
+test("a device that cannot be asked has no app, and is not asked again at every change", async () => {
+  const { manager, setDefault, clients, devices } = setup({}, (c) => { c.connectError = new Error("unreachable"); });
+  let ids: string[] = ["x"];
+  manager.registerMediaSinksObserver({ onSinksUpdated: (s) => { ids = s.map((x) => x.id); } }, { presentationUrls: [URL1] });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(ids, []);
+  const asked = clients.length;
+  devices.emit("deviceChanged", TV);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(clients.length, asked);
+  await setDefault(new FakeWebContents(5), [URL1]);
+  assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "unable_to_cast");
+});
+
+test("startCasting launches anew on a sink that has a route, and stops the route its window launched before", async () => {
+  const { manager, setDefault, launchers } = setup();
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  const first = await manager.startCasting(TV.id, { webContentsId: 5 });
+  const second = await manager.startCasting(TV.id, { webContentsId: 5 });
+  assert.notEqual(second.id, first.id, "CastActivityManager::LaunchSession launches a new session, it does not reuse");
+  const calls = launchers().flatMap((c) => c.calls);
+  assert.equal(calls.filter((c) => c === "launch 233637DE").length, 2);
+  assert.ok(calls.includes(`stop ${first.id}`), "DoLaunchSession stops the frame's earlier route");
+  assert.ok(!manager.getRoutes().some((r) => r.id === first.id));
+});
+
+test("a route whose connection was never announced stays a route (OnPresentationResponse records the presentation anyway)", async () => {
+  const { manager, setDefault } = setup();
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  const started = manager.startCasting(TV.id, { webContentsId: 5 });
+  await setDefault(wc, [URL2]);
+  const route = await started;
+  assert.ok(manager.getRoutes().some((r) => r.id === route.id));
+});
+
+test("the launch time limit is the URL's __castLaunchTimeout__ (CastMediaSource), not the dialog's 20 s", async () => {
+  const slow = (c: FakeClient) => { c.launchDelayMs = 200; };
+  const { manager, setDefault } = setup({}, slow);
+  await setDefault(new FakeWebContents(5), [`${URL1}/__castLaunchTimeout__=30`]);
+  assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "timed_out");
 });

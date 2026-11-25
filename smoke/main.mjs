@@ -260,6 +260,7 @@ async function main() {
     pass("the page's default request reached main");
     let sinks = [];
     const stop = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => { sinks = s; } }, { presentationUrls: request.presentationUrls });
+    for (let i = 0; i < 200 && sinks.length === 0; i++) await new Promise((r) => setTimeout(r, 25));  // the device is asked about the app
     stop();
     assert.deepEqual(sinks.map((s) => s.id), [TV.id]);
     const routeLists = [];
@@ -267,8 +268,10 @@ async function main() {
     const requestsBefore = requests.length;
     const route = await cast.startCasting(TV.id, { webContentsId: id });
     assert.equal(requests.length, requestsBefore, "the app's own start must not open the page's picker");
-    assert.equal(clients.length, before + 1);
-    assert.ok(clients[before].calls.includes(`launch ${APP_ID}`));
+    // one client only asked the device whether it has the app (Chrome's GET_APP_AVAILABILITY), the next launched it
+    const launcher = clients.slice(before).find((c) => c.calls.includes(`launch ${APP_ID}`));
+    assert.ok(launcher, "no client launched the app");
+    assert.ok(clients.slice(before).some((c) => c.calls.includes(`availability ${APP_ID}`)), "the app's availability was not asked");
     assert.equal(route.appId, APP_ID);
     assert.deepEqual(route.members, [id]);
     assert.ok(routeLists.at(-1).some((r) => r.id === route.id), "the route is in the routes observers");

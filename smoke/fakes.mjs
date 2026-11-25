@@ -50,6 +50,10 @@ export class FakeClient extends EventEmitter {
     this.emit("close");
   }
   send() {}
+  async getAppAvailability(appIds) {
+    this.calls.push(`availability ${appIds.join(",")}`);
+    return Object.fromEntries(appIds.map((id) => [id, true]));
+  }
   async launch(appId) {
     this.calls.push(`launch ${appId}`);
     const k = ++this.#n;

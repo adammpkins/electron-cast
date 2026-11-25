@@ -108,6 +108,14 @@ export class FakeClient extends EventEmitter<{
     if (this.echoReplies) this.emit("receiverStatus", this.status());
   }
 
+  /** Apps the device reports as available; null means every one. */
+  availableApps: string[] | null = null;
+  async getAppAvailability(appIds: string[]): Promise<Record<string, boolean>> {
+    this.calls.push(`availability ${appIds.join(",")}`);
+    if (!this.connected) throw new CastConnectionError("not connected");
+    return Object.fromEntries(appIds.map((id) => [id, this.availableApps === null || this.availableApps.includes(id)]));
+  }
+
   async launch(appId: string): Promise<ReceiverApplication> {
     this.calls.push(`launch ${appId}`);
     if (!this.connected) throw new CastConnectionError("not connected");

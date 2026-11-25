@@ -178,12 +178,24 @@ export class ObservedMap<K, V> extends Map<K, V> {
 }
 
 /** The first of the presentation URLs this device can run (Chrome: `GetSourceForCastModeAndSink`), or null. */
-export function presentationUrlForDevice(device: CastDevice, urls: readonly string[]): string | null {
+export function presentationUrlForDevice(
+  device: CastDevice,
+  urls: readonly string[],
+  /** When given, the app must also be known to be available on the device (`GET_APP_AVAILABILITY`). */
+  appAvailable?: (device: CastDevice, appId: string) => boolean | undefined,
+): string | null {
   for (const url of urls) {
     const parsed = parsePresentationUrl(url);
-    if (parsed !== null && capsMatch(device, parsed.capabilities)) return url;
+    if (parsed !== null && capsMatch(device, parsed.capabilities)
+      && (appAvailable === undefined || appAvailable(device, parsed.appId) === true)) return url;
   }
   return null;
+}
+
+/** How a sinks observer learns which devices have an app (Chrome: CastAppDiscoveryService). */
+export interface AppAvailability {
+  cached(device: CastDevice, appId: string): boolean | undefined;
+  check(device: CastDevice, appId: string): Promise<boolean>;
 }
 
 /** The sink for a discovered device. */
@@ -228,7 +240,7 @@ class ObserverSet<T> {
  * Sinks observation over a device source: `registerMediaSinksObserver` plus the source subscription, which is made
  * while at least one observer is registered. A change that leaves the (filtered) list as it was is not reported.
  */
-export function createSinksObservers(source: DeviceSource): {
+export function createSinksObservers(source: DeviceSource, availability?: AppAvailability): {
   register(observer: MediaSinksObserver, query?: MediaSinksQuery, signal?: AbortSignal, eligible?: (d: CastDevice) => boolean): () => void;
   dispose(): void;
 } {
@@ -248,10 +260,25 @@ export function createSinksObservers(source: DeviceSource): {
       const caps = query?.capabilities;
       const urls = query?.presentationUrls;
       const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
-        && (urls === undefined || presentationUrlForDevice(d, urls) !== null);
+        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability)) !== null);
+      let active = true;
+      // Chrome offers a sink for a presentation source only once the device has said the app is available: ask for the
+      // ones not yet known and look again when the answer arrives
+      const ask = (): void => {
+        if (urls === undefined || availability === undefined) return;
+        for (const d of source.devices()) {
+          if ((eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
+          for (const url of urls) {
+            const parsed = parsePresentationUrl(url);
+            if (parsed === null || !capsMatch(d, parsed.capabilities) || availability.cached(d, parsed.appId) !== undefined) continue;
+            void availability.check(d, parsed.appId).then(() => { if (active) check(); });
+          }
+        }
+      };
       const current = (): MediaSink[] => source.devices().filter(matches).map(toMediaSink);
       let last = "";
       const check = (): void => {
+        ask();
         const sinks = current();
         const key = JSON.stringify(sinks);
         if (key === last) return;
@@ -263,6 +290,7 @@ export function createSinksObservers(source: DeviceSource): {
         }
       };
       const unregister = (): void => {
+        active = false;
         entries.delete(check);
         signal?.removeEventListener("abort", unregister);
         detach();
