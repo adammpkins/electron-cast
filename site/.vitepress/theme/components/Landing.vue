@@ -194,7 +194,7 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">DIAL TVs</th>
-                <td colspan="3">Unit tests only. No real DIAL TV has been through it yet: see the call below.</td>
+                <td colspan="3">Discovery and device descriptions tested on real Chromecasts (1st gen, Ultra). Launching an app over DIAL needs a DIAL-only TV and is untested: see the call below.</td>
               </tr>
               <tr>
                 <th scope="row">Casting from the app's own UI, sessions other senders started</th>
@@ -213,7 +213,7 @@ const tabs = [
             <ul>
               <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing</li>
               <li>Mirroring tested on Linux and macOS</li>
-              <li>DIAL tested on real TVs</li>
+              <li>Launching an app over DIAL, tested on a DIAL-only TV</li>
             </ul>
           </div>
           <div>
@@ -235,7 +235,7 @@ const tabs = [
             <div class="call-copy">
               <h3 id="dial-call-h">Testers wanted: DIAL TVs</h3>
               <p>
-                DIAL support is built and passes its tests, but no real DIAL device has been through it yet. DIAL is the older protocol
+                DIAL discovery and device descriptions have been tested on real Chromecasts, but launching an app over DIAL needs a DIAL-only TV and is untested. DIAL is the older protocol
                 many smart TVs use to open apps such as YouTube.
               </p>
               <p class="makes-k" id="dial-makes">Models without a built-in Chromecast, from</p>

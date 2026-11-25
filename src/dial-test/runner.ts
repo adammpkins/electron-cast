@@ -191,6 +191,8 @@ interface Candidate {
   model: string;
   /** Why the library did not accept it, when it did not. */
   rejected: string;
+  /** What the TLS knock on the Cast port found; null for a device that cannot be tested. */
+  cast: { ok: boolean; ms: number; detail: string } | null;
 }
 
 const label = (c: { manufacturer: string; model: string }): string => [c.manufacturer, c.model].filter((s) => s !== "").join(" ") || "(unnamed device)";
@@ -202,6 +204,28 @@ function rejectionReason(device: DialDeviceData, answer: Answer | undefined, sta
   if (!isValidDeviceUrl(header, device.ipAddress)) return "the Application-URL header does not name the device's own address";
   const parsed = parseDeviceDescription(answer.body, header, device.ipAddress);
   return parsed.ok ? "not accepted" : `the description is not valid (${parsed.error})`;
+}
+
+const NO_DIAL_ONLY = "No DIAL-only TV found. This test is for TVs without built-in Chromecast.";
+const CAST_NOTE = "This device accepts TLS on the Cast port, so it is a Cast device. electron-cast, like Chrome, shows it as a Cast device rather than a DIAL one"
+  + " (CreateCastSinkFromDialSink). The YouTube launch test is meant for DIAL-only TVs.";
+
+/**
+ * What a failed app-info request means. Chrome treats every non-2xx answer as `kHttpError`
+ * (`DialAppDiscoveryService::OnDialAppInfoFetchError`, dial_app_discovery_service.cc) and
+ * `DialMediaSinkServiceImpl::GetSinkAppStatusFromResponse` (dial_media_sink_service_impl.cc) then marks the app unavailable
+ * on that device, so a refusal is an answer, not a failure of the test.
+ */
+function appInfoProblem(result: DialAppInfoResult): { refused: boolean; text: string } {
+  if (result.resultCode === "http_error" && result.httpErrorCode === 403) {
+    return {
+      refused: true,
+      text: "GET 403: the device refused requests that carry Chrome's DIAL origin (Cast devices do this; Chrome treats the app as unavailable over DIAL and reaches them over Cast instead)",
+    };
+  }
+  if (result.resultCode === "http_error") return { refused: false, text: `the device answered ${result.httpErrorCode ?? "with an error"}; Chrome treats the app as unavailable on it` };
+  if (result.resultCode === "parsing_error") return { refused: false, text: "the answer is not a valid app info document" };
+  return { refused: false, text: `no answer (${result.errorMessage.replace(/Internal net::Error: -?\d+/, "network error")})` };
 }
 
 const CAUSES = [
@@ -286,6 +310,7 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
   const data: ReportData = {
     environment: { os: `${os.type()} ${os.release()} (${os.arch()})`, node: process.version, library: options.libraryVersion, interfaces: 0, browser: `Chrome/${chrome}` },
     device: null,
+    devices: [],
     steps,
     requests: records,
     answers,
@@ -350,6 +375,7 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
         manufacturer: field(xmlDevice, "manufacturer"),
         model: sink?.modelName ?? field(xmlDevice, "modelName"),
         rejected: sink === null ? rejectionReason(device, answer, status) : "",
+        cast: null,
       };
     });
     for (const c of candidates) {
@@ -362,6 +388,12 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
       }
     }
     const usable = candidates.filter((c) => c.sink !== null);
+    const castPort = options.castPort ?? 8009;
+    // One TLS connection per device, opened and closed: a device that accepts it is a Cast device.
+    await guard(Promise.all(usable.map(async (c) => {
+      c.cast = await knockOnCastPort(c.device.ipAddress, castPort, signal);
+    })));
+    const isCast = (c: Candidate): boolean => c.cast?.ok === true;
     for (const message of diagnostics) say(`  note: ${message}`);
 
     if (candidates.length === 0) {
@@ -377,7 +409,8 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
         `${candidates.length} device(s) answered the search, ${usable.length} accepted by the library; ${interfaceCount} network interface(s) searched`);
       say("");
       say("DIAL devices found:");
-      usable.forEach((c, i) => say(`  ${i + 1}. ${label(c)}`));
+      usable.forEach((c, i) => say(`  ${i + 1}. ${label(c)}${isCast(c) ? "  (also a Cast device: shown as Cast, not DIAL)" : ""}`));
+      data.devices = usable.map((c, i) => `${i + 1}. ${label(c)}${isCast(c) ? " (accepts TLS on the Cast port: a Cast device)" : ""}`);
       for (const c of candidates.filter((x) => x.sink === null)) {
         say(`  - ${label(c)} answered but cannot be tested: ${c.rejected}`);
         steps.push({ name: "Device not accepted", result: "info", detail: `${label(c)}: ${c.rejected}` });
@@ -386,7 +419,13 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
 
     // 2. Pick one
     let chosen: Candidate | null = null;
-    if (usable.length > 0) {
+    const allCast = usable.length > 0 && usable.every(isCast);
+    if (allCast) {
+      say("");
+      say(NO_DIAL_ONLY);
+      steps.push({ name: "DIAL-only TV", result: "info", detail: NO_DIAL_ONLY });
+    }
+    if (usable.length > 0 && !(allCast && options.deviceIndex === undefined)) {
       let index = options.deviceIndex;
       if (index === undefined && (usable.length === 1 || options.yes === true)) index = 1;
       for (let attempt = 0; index === undefined && attempt < 3; attempt++) {
@@ -436,22 +475,27 @@ export async function runDialTest(options: DialTestOptions, io: DialTestIo): Pro
         step(`App info: ${APP}`, "pass",
           `${describe(before)}; state ${info.state}; allowStop ${info.allowStop}; DIAL version ${info.dialVersion === "" ? "(none)" : info.dialVersion}; additionalData keys: ${keys.length === 0 ? "none" : keys.join(", ")}`);
       } else {
-        step(`App info: ${APP}`, "fail", `${describe(before)}; ${youtube.resultCode}${youtube.errorMessage === "" ? "" : ` (${youtube.errorMessage})`}`);
+        const problem = appInfoProblem(youtube);
+        step(`App info: ${APP}`, problem.refused ? "info" : "fail", problem.refused ? problem.text : `${describe(before)}; ${problem.text}`);
       }
 
       before = records.length;
       const netflix = await guard(service.sinks.fetchAppInfo(sink, OTHER_APP));
       if (netflix.appInfo !== null) step(`App info: ${OTHER_APP}`, "pass", `${describe(before)}; state ${netflix.appInfo.state}`);
-      else step(`App info: ${OTHER_APP}`, "skip", `${describe(before)}; ${netflix.resultCode}: the device does not offer it, or does not answer`);
+      else {
+        const problem = appInfoProblem(netflix);
+        step(`App info: ${OTHER_APP}`, problem.refused ? "info" : "skip", problem.refused ? problem.text : `${describe(before)}; ${problem.text}`);
+      }
 
-      const castPort = options.castPort ?? 8009;
-      const cast = await knockOnCastPort(sink.ipAddress, castPort, signal);
-      if (signal.aborted) throw new Interrupted();
+      const cast = chosen.cast ?? { ok: false, ms: 0, detail: "not tried" };
       step(`TLS connection on port ${castPort} (opened and closed, nothing sent)`, "info", `${cast.ok ? "accepted" : "not accepted"}: ${cast.detail} in ${cast.ms} ms`);
+      if (cast.ok) step("Cast device", "info", CAST_NOTE);
 
       // 4. Open YouTube, if the person agrees
       if (options.launch === false) {
         step(`Launch ${APP}`, "skip", "not requested (--read-only)");
+      } else if (cast.ok) {
+        step(`Launch ${APP}`, "skip", "this is a Cast device; the launch test is for DIAL-only TVs");
       } else if (youtube.appInfo === null) {
         step(`Launch ${APP}`, "skip", `the device did not give usable app info for ${APP}`);
       } else if (youtube.appInfo.state === "running") {

@@ -24,6 +24,8 @@ export interface ReportData {
   environment: { os: string; node: string; library: string; interfaces: number; browser: string };
   /** The device's description fields, in the order they are shown. */
   device: Array<[label: string, value: string]> | null;
+  /** The devices found that could be tested, numbered as they were listed. */
+  devices: string[];
   steps: Step[];
   requests: RequestRecord[];
   /** The questions asked and the answers given. */
@@ -53,6 +55,7 @@ export function renderReport(data: ReportData, scrubber: Scrubber): string {
   lines.push(`- electron-cast: ${data.environment.library}`);
   lines.push(`- Network interfaces searched: ${data.environment.interfaces}`);
   lines.push(`- Browser identity sent to the device (search User-Agent, Origin header): ${data.environment.browser}`, "");
+  if (data.devices.length > 0) lines.push("## Devices found", "", ...data.devices.map((d) => `- ${d}`), "");
   lines.push("## Device", "");
   if (data.device === null || data.device.length === 0) lines.push("No device was tested.");
   else for (const [label, value] of data.device) lines.push(`- ${label}: ${value === "" ? "(not given)" : value}`);
@@ -65,7 +68,7 @@ export function renderReport(data: ReportData, scrubber: Scrubber): string {
   if (data.requests.length > 0) {
     lines.push("", "## Requests", "", "| Request | Status | Time |", "|---|---|---|");
     for (const r of data.requests) {
-      const status = r.status === null ? `no answer${r.error === undefined ? "" : ` (${r.error})`}` : String(r.status);
+      const status = r.status === null ? `no answer${r.error === undefined ? "" : ` (${r.error})`}` : `${r.status}${r.error === undefined ? "" : ` (${r.error})`}`;
       lines.push(`| ${cell(`${r.method} ${r.url}`)} | ${cell(status)} | ${r.ms} ms |`);
     }
   }

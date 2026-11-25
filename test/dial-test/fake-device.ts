@@ -26,6 +26,8 @@ export class FakeDialDevice {
   allowStop = true;
   /** False serves a description without the Application-URL header, which the library rejects. */
   sendApplicationUrl = true;
+  /** True answers 403 to app requests that carry an Origin header, as Cast devices do. */
+  refuseOrigin = false;
   /** The device's description fields, to be overridden per test. */
   manufacturer = "Acme Electronics";
   modelName = "Smart TV 9000";
@@ -112,6 +114,11 @@ export class FakeDialDevice {
         contentLength: req.headers["content-length"], body: Buffer.concat(chunks).toString("utf8"),
       });
       const base = `http://127.0.0.1:${this.httpPort}`;
+      if (this.refuseOrigin && req.headers.origin !== undefined && url.startsWith("/apps/")) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
       if (req.method === "GET" && url === "/desc.xml") {
         res.writeHead(200, {
           "Content-Type": "text/xml", Server: "Acme/1.0 UPnP/1.0", ...(this.sendApplicationUrl ? { "Application-URL": `${base}/apps/` } : {}),
