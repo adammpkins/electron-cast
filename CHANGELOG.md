@@ -41,6 +41,13 @@
 
 ### Fixed
 
+- **Mirroring on Windows sends its packets on time.** The sender's delayed tasks ran on Node's timers, which on Windows
+  end on the 15.6 ms system tick: a packet burst that was due at once, or 10 ms after the last one, went out up to 15.6 ms
+  late (62 bursts a second instead of 100, a frame waiting 8.5 ms on average and up to 40 ms before its first packet
+  left). A task that is due now runs without a timer, and a delayed one is woken by the capture window's timer, which is
+  Chromium's and keeps time as Chrome's task runner does; Node's timer stays as the fallback. The engine logs how late its
+  tasks ran (`timers:`), and the feedback line now gives the round trips as measured and the number of feedback gaps over
+  100 ms.
 - A mirroring route the receiver ended itself (its app is gone from the receiver status) no longer sends a CLOSE and a STOP
   for the session the receiver dropped; it only closes its channel (`CastActivityManager::OnSessionRemoved`,
   `RemoveActivity`).
