@@ -232,6 +232,34 @@ leaves the session without stopping playback.
 
 To watch it happen, log the client's lifecycle (next section).
 
+## Mirroring is laggy or blocky, or the sound glitches
+
+Pass a `log` in the `mirroring` option to see what the sender sees. Every 5 s it writes a line for each stage of the
+pipeline and the device's feedback:
+
+```js
+mirroring: { electron: { /* ... */ }, log: (level, message) => console.log(message) }
+```
+
+Read the lines in this order:
+
+| Line | Healthy | When it is not |
+|---|---|---|
+| `video feedback: ... N over 100 ms, measured round trips: min / median / max` | No gaps over 100 ms, a median of a few ms | Feedback stops for 100 to 300 ms at a time. That comes from the network or the device: on the Ultra where this was measured, Chrome's audio glitched the same way |
+| `video frames: inserted N, dropped M (kInFlightDurationTooHigh=...)` | Few drops | Frames waited too long for their acknowledgment, the result of the gaps above. Each drop also lowers the bitrate (`bandwidth a -> b ... frames dropped`) |
+| `latency stages ... video QP` | Well under 51 | At 51 the encoder is at its coarsest. The capture should get smaller within a few seconds (`capture size -> WxH`), as Chrome's does |
+| `timers: ... late by mean / max` | A mean under 1 ms | The sender's tasks ran late; report it |
+
+What helps:
+
+- **Keep the network quiet.** With a VPN client connected on the sending PC, the idle ping to a Cast device on the same
+  network doubled (from about 9 ms to about 20 ms), even though the cast traffic stayed on the local network.
+- **A longer playout delay.** `targetPlayoutDelayMs` in `startCasting`, or the `CHROME_MIRRORING_PLAYOUT_DELAY`
+  environment variable (1 to 65535 ms), as in Chrome. With 400 ms, a laggy link drops fewer frames and keeps a higher
+  bitrate. The picture then trails the source by about 0.2 s more than at the default 200 ms.
+- **A smaller picture is expected.** Under load the tab's capture can drop well below the window's size, and it grows back
+  only after about 30 s of headroom while content moves. That is Chrome's `VideoCaptureOracle`.
+
 ## Logging
 
 electron-cast has **no logging switch**, no debug flag and no environment variable. It writes to the console only when a listener
