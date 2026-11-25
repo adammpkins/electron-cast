@@ -153,7 +153,7 @@ npm run smoke
 ## What no fake can tell you
 
 Real networks, real firewalls, and real devices. Discovery on a VPN-laden Windows PC, a speaker group that renames itself, a
-TV that drops off Wi-Fi: these need a device. When you probe one, [read-only is the rule](../../CONTRIBUTING.md#probing-real-devices):
+TV that drops off Wi-Fi: these need a device. When you probe one, [read-only is the rule](../../CONTRIBUTING.md#test-on-real-devices):
 discover, connect, authenticate and read status; do not launch apps, change volume or stop playback on a device that is
 not yours to disturb.
 

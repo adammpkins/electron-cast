@@ -88,8 +88,8 @@ Comments explain why, and cite Chromium where the behaviour is Chrome's. They do
 
 ## Set up
 
-You need Node 20 or later (the `engines` field in `package.json`). CI uses Node 24. Running TypeScript files directly, as the
-probes below do, needs a Node that strips types: 22.18 or later.
+You need Node 20 or later (the `engines` field in `package.json`). CI uses Node 24. Running TypeScript files directly, as
+`node examples/discover.ts` does, needs a Node that strips types: 22.18 or later.
 
 ```sh
 git clone https://github.com/adammpkins/electron-cast.git
@@ -124,12 +124,15 @@ node --test --test-force-exit --test-timeout=20000 test/client/cast-client.test.
 | `src/discovery/` | mDNS discovery of Cast devices, and the address policy |
 | `src/dial/` | DIAL discovery and launch |
 | `src/protocol/`, `src/client/` | The Cast v2 wire format, device authentication, and the channel client |
-| `src/electron/` | The main-process manager, sessions, routes, media control, and the preload |
+| `src/electron/` | The main-process manager, sessions, routes, media control, the network monitor, access code casting, and the preload |
+| `src/mirroring/` | Tab and desktop mirroring: the Cast Streaming sender (`sender/`, `rtp/`, `rtcp/`, `transport/`), the session host, codec choice, statistics (`stats/`), and the Electron capture and utility process (`electron/`) |
 | `src/polyfill/` | The page side: the stand-in Presentation API and the frozen `chrome.cast` polyfill |
+| `src/cli.ts`, `src/dial-test/` | The `electron-cast` command (the package's `bin`, built to `dist/cli.js`) and its `dial-test` |
+| `src/index.ts` | The package's main entry |
 | `test/` | Unit tests, with fakes for everything outside the process |
-| `smoke/` | The Electron smoke test |
-| `tools/` | Docs checks, the SDK canary, the device probes and the trace recorder |
-| `examples/` | A small app, and the live harnesses that cast to real devices |
+| `smoke/` | The Electron smoke test, mirroring included |
+| `tools/` | Docs checks, the SDK canary and the trace recorder |
+| `examples/` | A small app (`electron-app/`), a discovery script (`discover.ts`), and the live mirroring harness that casts to a real device (`live-mirroring/`) |
 | `docs/` | The documentation: API, design, the Chromium map, guides |
 | `site/` | The documentation website (VitePress) |
 
@@ -201,33 +204,9 @@ yourself, this is what it needs:
 **Logs (scrubbed):**
 ```
 
-### Probing real devices
-
-The probes are read-only. They discover devices and connect, and nothing more. They run the library's TypeScript
-directly, so they need Node 22.18 or later.
-
-```sh
-npm run probe:discovery -- --seconds 15
-node tools/probe-connect.mjs --seconds 8
-```
-
-- `probe-discovery` listens on each network interface and reports which address family each device answered on. It only
-  sends mDNS queries. It never opens a Cast connection.
-- `probe-connect` opens a Cast channel to each device, over IPv6 by default (add `--ipv4` to try IPv4 too). It does TLS,
-  device authentication and one status request, then closes. It sends no launch, stop, volume or media command.
-
-Both hide device names and addresses unless you pass `--names`. Leave that flag off when you post the output.
-
 ### Run the live harnesses
 
-These cast to a real device.
-
-```sh
-npm run live:iframe                  # iframes in presentation mode, in a real Electron with Google's Cast SDK
-npm run live:iframe -- --selftest    # the no-click check: no device is used
-```
-
-The mirroring harness lives in `examples/live-mirroring/`. Build the library first, then:
+These cast to a real device. The mirroring harness lives in `examples/live-mirroring/`. Build the library first, then:
 
 ```sh
 npm run build
@@ -258,7 +237,7 @@ Each harness has a README or header comment with its options. The rules for all 
 
 - **Use your own devices only.** Never cast to a device that is not yours to disturb.
 - The live harnesses ask before they start casting. Read what the dialog says.
-- Probes only read. Harnesses and the trace recorder play and stop media on the device you pick.
+- The harnesses and the trace recorder play and stop media on the device you pick.
 
 ### Scrub before you post
 
