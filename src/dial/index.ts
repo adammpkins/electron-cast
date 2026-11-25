@@ -79,10 +79,22 @@ export class DialService extends EventEmitter<{ change: [] }> {
     });
   }
 
-  start(): void {
+  /** Starts discovery; with `online: false` (the machine has no network) it waits for {@link networksChanged}. */
+  start(options: { online?: boolean } = {}): void {
     if (this.started) return;
     this.started = true;
-    this.registry.start();
+    this.registry.start(options);
+  }
+
+  /**
+   * The machine's networks changed; `online` is whether any network is up now. Chrome's `DialRegistry` hears of it from
+   * the `NetworkConnectionTracker`, which passes on `NetworkChangeNotifier::OnNetworkChanged`, and that is called with
+   * `CONNECTION_NONE` before every online type. So each change forgets the DIAL devices, and, when a network is up,
+   * searches again at once and restarts the refresh timer.
+   */
+  networksChanged(online: boolean): void {
+    this.registry.onConnectionChanged(false);
+    if (online) this.registry.onConnectionChanged(true);
   }
 
   stop(): void {

@@ -368,6 +368,7 @@ below are relative to the Chromium source root (read from `chromium/chromium` `m
 | SSDP discovery | `dial-registry.ts`, `ssdp-socket.ts`: one UDP socket per external IPv4 address (the set mDNS uses), bound to an ephemeral port with broadcast on; four `M-SEARCH` requests to `239.255.255.250:1900` a second apart (`MX: 1`, `ST: urn:dial-multiscreen-org:service:dial:1`, `USER-AGENT: <product>/<version> <os>`, a trailing blank line); the cycle ends 2 s after the last one and the sockets close. | `chrome/browser/media/router/discovery/dial/dial_service_impl.cc` (`DialServiceImpl::Discover`, `BuildRequest`, `SendOneRequest`, `FinishDiscovery`, `DialSocket::CreateAndBindSocket`) |
 | SSDP answers | `parse.ts` `parseSsdpResponse`: complete headers, a `LOCATION` that is an http(s) URL whose host is an IP literal that is not publicly routable and equals the sender, a `USN`; `ST` is not checked; `CACHE-CONTROL` max-age capped at 3600; `CONFIGID.UPNP.ORG` accepted when `0 < id <= (2 << 24) - 1`; a 1500-byte read buffer. | `dial_service_impl.cc` (`DialSocket::ParseResponse`), `dial_device_data.cc` (`DialDeviceData::IsValidUrl`) |
 | Registry | A discovery cycle every 120 s; a device expires after 240 s or its max-age; at most 256 devices; keyed by `USN`, labelled by a counter; the list is published only when it changed (or when `discoverNow` forced it). | `dial_registry.cc` (`DialRegistry`, `PruneExpiredDevices`, `MaybeSendDeviceList`, `DiscoverNow`) |
+| Network changes | `DialRegistry.onConnectionChanged`, from the manager's network monitor (`DialService.networksChanged`): each change first counts as offline, which reports `network_disconnected`, stops the periodic search (ending a cycle that is running), forgets every device and publishes the empty list, so the DIAL sinks go; then, when a network is up, discovery starts again: a search at once and the 120 s timer from then. With no network (`__disconnected__`) at `start()` or later, nothing is searched and `discoverNow` refuses. | `dial_registry.cc` (`OnConnectionChanged`, `StartPeriodicDiscovery`, `StopPeriodicDiscovery`, `ReadyToDiscover`, `Clear`); `net/base/network_change_notifier.h` (`OnNetworkChanged` is called with `CONNECTION_NONE` before every online type); `services/network/public/cpp/network_connection_tracker.cc` (`OnNetworkChanged` passes each one to `OnConnectionChanged`) |
 | Device description | `dial-sink-service.ts`: `GET` without an `Origin` header, the `Application-URL` header validated like a `LOCATION` and stripped of a trailing slash, the XML parsed for `UDN`, `friendlyName` (else `<model> [<last 4 of UDN>]`), `modelName` and `deviceType`; cached 12 h by label and `CONFIGID`, 256 entries. | `device_description_fetcher.cc`, `device_description_service.cc` (`ValidateParsedDeviceDescription`), `safe_dial_device_description_parser.cc` |
 | HTTP | `http.ts`: no redirects ("Redirect not allowed"), a 256 KiB body limit, a UTF-8 body, a `GET` with an empty body is an error, `GET` retried twice on 5xx, `POST` and `DELETE` not retried, `POST` as `text/plain`; an `Origin: package:Google-Chrome.<major>.<OS>` header on the app-info `GET`, `POST` and `DELETE` (not on the description `GET`), so a web page cannot make a browser do the same. | `dial_url_fetcher.cc` (`DialURLFetcher`, `GetFakeOriginForDialLaunch`) |
 | App info | `parse.ts` `parseAppInfo`, `dial-sink-service.ts` `fetchAppInfo`: `<service dialVer>` with `name`, `options@allowStop`, `link@href`, `state` (`running` or `stopped`, any case; else invalid) and `additionalData`; the result is a `network_error` (no HTTP status), `http_error` (non-2xx) or `parsing_error` (2xx, unusable body). | `dial_app_discovery_service.cc`, `safe_dial_app_info_parser.cc`, `components/media_router/common/media_source.cc` (`GetDialAppUrl`) |
@@ -384,8 +385,10 @@ below are relative to the Chromium source root (read from `chromium/chromium` `m
 Differences from Chrome, and why:
 
 - **Network changes are polled.** Chrome clears the DIAL failure counts when `DiscoveryNetworkMonitor` reports a new
-  network id; the manager's monitor does the same, by reading the interfaces (see
-  [Network changes](#network-changes-network-monitorts)).
+  network id, and its `DialRegistry` restarts discovery when `NetworkConnectionTracker` reports a connection change; the
+  manager's monitor drives both, by reading the interfaces (see
+  [Network changes](#network-changes-network-monitorts)). A change of the network id stands for Chrome's
+  `CONNECTION_NONE` then the new type; Node cannot tell a cellular connection apart, which Chrome never searches on.
 - **Timeouts.** Chrome sets none on its URL fetches (`DialActivityManager::CreateFetcher` has a TODO for it); Node
   would wait forever, so a `GET` gives up after 10 s and a `POST` or `DELETE` after 30 s.
 - **`setMulticastInterface`.** Each SSDP socket also pins its multicast sends to its interface, which Windows needs to
@@ -542,7 +545,10 @@ network id for the machine and tells its observers when it changes. electron-cas
 | The Cast sinks | the DIAL failure counts are cleared; the sinks of the network being left are kept by its id (not those added by access code); on coming back to a known network its sinks are opened again after the usual random delay. The sinks are not cleared and discovery is not restarted | `CastMediaSinkServiceImpl::OnNetworksChanged` (`dial_sink_failure_count_`, `sink_cache_`, `OpenChannelsWithRandomizedDelay` with `SinkSource::kNetworkCache`); its `Start` asks `GetNetworkId` first |
 | Devices added by address | those with no route are removed, and the remembered ones are added again 4.45 s later | `AccessCodeCastSinkService::OnNetworksChanged` (`kExpirationDelay` + `kNetworkChangeBuffer`) |
 
-These are the only two observers of the monitor in Chrome. Differences, and why:
+| DIAL discovery | each change forgets the DIAL devices and, with a network up, searches at once; no search while disconnected (the "Network changes" row of [DIAL](#dial-srcdial)) | `DialRegistry::OnConnectionChanged`, an observer of the `NetworkConnectionTracker` rather than of this monitor |
+
+These are the only two observers of the monitor in Chrome; DIAL follows the connection tracker, which the manager's
+monitor stands in for. Differences, and why:
 
 - **A poll, not an event.** Chrome recomputes when `NetworkChangeNotifier` reports a connection change; Node and
   Electron have no such event, so the monitor reads `os.networkInterfaces()` every 5 s (`NETWORK_POLL_MS`). A change is

@@ -15,7 +15,7 @@ import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
 import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
-import { DiscoveryNetworkMonitor, type NetworkMonitor } from "./network-monitor.ts";
+import { DiscoveryNetworkMonitor, NETWORK_ID_DISCONNECTED, type NetworkMonitor } from "./network-monitor.ts";
 import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
 import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirroring-activity.ts";
@@ -147,7 +147,7 @@ export interface CastManagerOptions {
   /**
    * Network changes, as Chrome's `DiscoveryNetworkMonitor` tells its media router: the DIAL devices given up on are tried
    * again, the sinks of a network the machine comes back to are reopened, and devices added by address are removed and
-   * re-added. By default the manager reads `os.networkInterfaces()` every 5 s while started (docs/DESIGN.md, "Network
+   * re-added. DIAL discovery forgets its devices and searches again at once, and stops while there is no network. By default the manager reads `os.networkInterfaces()` every 5 s while started (docs/DESIGN.md, "Network
    * changes"); a custom `discovery` turns that off unless this is given. `false` turns it off; your own
    * {@link NetworkMonitor} drives it in tests.
    */
@@ -316,6 +316,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     for (const l of [...routeListeners]) l();
   };
   dial?.provider.on("routes", notifyRoutes);
+  // DIAL discovery follows the connection itself, as Chrome's DialRegistry observes the NetworkConnectionTracker.
+  const unobserveDialNetwork = dial === undefined || networkMonitor === undefined ? () => {}
+    : networkMonitor.observe((networkId) => dial.networksChanged(networkId !== NETWORK_ID_DISCONNECTED));
   /** The DIAL sinks as a device source: their one change event stands for a changed device. */
   const dialSource: DeviceSource | undefined = dial === undefined ? undefined : {
     devices: () => dial.devices(),
@@ -1054,7 +1057,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     async start() {
       networkMonitor?.start();
       await discovery.start();
-      dial?.start();
+      dial?.start({ online: networkMonitor === undefined || networkMonitor.networkId() !== NETWORK_ID_DISCONNECTED });
     },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
@@ -1072,6 +1075,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
       if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, castChanged);
+      unobserveDialNetwork();
       dial?.stop();
       networkMonitor?.stop();
       wired?.dispose();

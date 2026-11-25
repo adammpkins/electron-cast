@@ -31,7 +31,7 @@ export interface DialRegistryEvents {
   /** The device list changed (or a forced discovery found it unchanged): `DialRegistry::MaybeSendDeviceList`. */
   deviceList: [devices: DialDeviceData[]];
   /** `DialRegistry::DialErrorCode` for what can go wrong here. */
-  error: [code: "no_interfaces" | "socket_error", detail?: Error];
+  error: [code: "no_interfaces" | "socket_error" | "network_disconnected", detail?: Error];
 }
 
 function defaultUserAgent(): string {
@@ -60,9 +60,12 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
   private labelCount = 0;
   private cycle = 0;
   private timers: NodeJS.Timeout[] = [];
+  /** Set while periodic discovery runs, as Chromium's `dial_` is. */
   private refreshTimer: NodeJS.Timeout | null = null;
   private started = false;
   private stopped = false;
+  /** False for `CONNECTION_NONE`: `ReadyToDiscover` then refuses to search. */
+  private online = true;
 
   constructor(options: DialRegistryOptions = {}) {
     super();
@@ -79,21 +82,47 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
     this.finishDelayMs = (this.maxRequests - 1) * this.requestIntervalMs + (options.responseTimeoutMs ?? 2000);
   }
 
-  /** `DialRegistry::StartPeriodicDiscovery`: one cycle now, then one every `refreshMs`. */
-  start(): void {
+  /**
+   * `DialRegistry::Start`, then `StartPeriodicDiscovery`: one cycle now, then one every `refreshMs`. With `online: false`
+   * (the machine has no network, `CONNECTION_NONE`) nothing is searched until {@link onConnectionChanged} says it has.
+   */
+  start(options: { online?: boolean } = {}): void {
     if (this.started || this.stopped) return;
     this.started = true;
-    // The timer first: a cycle that cannot start leaves the periodic search in place, which tries again.
-    this.refreshTimer = setInterval(() => this.discover(), this.refreshMs);
-    this.refreshTimer.unref?.();
-    // The current list goes out with the next request even if it is empty, as in Chromium.
+    this.online = options.online ?? true;
+    this.startPeriodicDiscovery();
+  }
+
+  /**
+   * `DialRegistry::OnConnectionChanged`. Going offline while discovering reports `network_disconnected`, stops the
+   * periodic search, forgets every device and sends the empty list. Coming online when not discovering starts it again,
+   * which searches at once and restarts the refresh timer. Coming online while discovering changes nothing.
+   */
+  onConnectionChanged(online: boolean): void {
+    this.online = online;
+    // Chromium observes the connection from Start on.
+    if (!this.started || this.stopped) return;
+    if (online) {
+      this.startPeriodicDiscovery();
+      return;
+    }
+    if (this.refreshTimer === null) return;
+    this.reportError("network_disconnected");
+    this.stopPeriodicDiscovery();
+    // `Clear`, then `MaybeSendDeviceList`
+    this.byId.clear();
     this.generation++;
-    this.discover();
+    this.maybeSendList();
   }
 
   /** `DialRegistry::DiscoverNow`: starts a cycle unless one is running; the list is then sent even if unchanged. */
   discoverNow(): boolean {
     if (!this.started || this.stopped) return false;
+    if (!this.online) {
+      this.reportError("network_disconnected");
+      return false;
+    }
+    if (this.refreshTimer === null) return false;
     const started = this.discover();
     if (started) this.generation++;
     return started;
@@ -108,10 +137,37 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.stopPeriodicDiscovery();
+    this.byId.clear();
+  }
+
+  /** `StartPeriodicDiscovery`: nothing when `ReadyToDiscover` says no or discovery already runs. */
+  private startPeriodicDiscovery(): void {
+    if (!this.online) {
+      this.reportError("network_disconnected");
+      return;
+    }
+    if (this.refreshTimer !== null) return;
+    // The timer first: a cycle that cannot start leaves the periodic search in place, which tries again.
+    this.refreshTimer = setInterval(() => this.discover(), this.refreshMs);
+    this.refreshTimer.unref?.();
+    // The current list goes out with the next request even if it is empty, as in Chromium.
+    this.generation++;
+    this.discover();
+  }
+
+  /** `StopPeriodicDiscovery`: the timer stops, and dropping the `DialService` ends a cycle that is running. */
+  private stopPeriodicDiscovery(): void {
     if (this.refreshTimer !== null) clearInterval(this.refreshTimer);
     this.refreshTimer = null;
     this.endCycle();
-    this.byId.clear();
+  }
+
+  /** An EventEmitter throws on "error" without a listener; discovery must never take the process down. */
+  private reportError(code: DialRegistryEvents["error"][0], detail?: Error): void {
+    if (this.listenerCount("error") === 0) return;
+    if (detail === undefined) this.emit("error", code);
+    else this.emit("error", code, detail);
   }
 
   /** `DialServiceImpl::Discover`. Returns false when a cycle is already running. */
@@ -187,8 +243,7 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
       this.sockets = this.sockets.filter((s) => s !== socket);
     }
     const detail = error instanceof Error ? error : new Error(String(error));
-    // An EventEmitter throws on "error" without a listener; a failed socket must never take the process down.
-    if (this.listenerCount("error") > 0) this.emit("error", this.sockets.length > 0 ? "socket_error" : "no_interfaces", detail);
+    this.reportError(this.sockets.length > 0 ? "socket_error" : "no_interfaces", detail);
   }
 
   private onPacket(packet: Buffer, from: { address: string; port: number }, cycle: number): void {

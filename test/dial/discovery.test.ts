@@ -131,6 +131,131 @@ test("with no interfaces the registry starts without throwing, publishes the emp
   }
 });
 
+/** A registry over a fake socket that answers every search at once; time is mocked, so cycles end on `mock.timers.tick`. */
+function answeringRegistry(online?: boolean) {
+  const searches: number[] = [];
+  const errors: string[] = [];
+  const lists: number[] = [];
+  let now = 0;
+  const registry = new DialRegistry({
+    interfaces: () => LOOPBACK,
+    openSocket: async (_iface, handlers) => ({
+      send() {
+        searches.push(now);
+        handlers.message(Buffer.from(ssdpAnswer({ location: "http://127.0.0.1:8008/d.xml" }), "latin1"), { address: "127.0.0.1", port: 1900 });
+      },
+      close() {},
+    }),
+    now: () => now,
+    requestIntervalMs: 5, responseTimeoutMs: 10, maxRequests: 1, refreshMs: 60_000,
+  });
+  registry.on("deviceList", (l) => lists.push(l.length));
+  registry.on("error", (code) => errors.push(code));
+  registry.start(online === undefined ? {} : { online });
+  /** Moves the clock and the mocked timers on together, letting the socket's promise and the search run. */
+  const advance = async (ms: number): Promise<void> => {
+    await flush();
+    now += ms;
+    mock.timers.tick(ms);
+    await flush();
+  };
+  return { registry, searches, errors, lists, advance };
+}
+
+test("a network change forgets the DIAL devices, searches again at once and restarts the refresh timer (DialRegistry::OnConnectionChanged)", async () => {
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    const { registry, searches, errors, lists, advance } = answeringRegistry();
+    await advance(10);
+    assert.deepEqual(searches, [0]);
+    assert.equal(registry.devices().length, 1);
+    await advance(29_990);
+
+    // NetworkChangeNotifier reports CONNECTION_NONE before the new connection type (network_change_notifier.h)
+    registry.onConnectionChanged(false);
+    assert.deepEqual(errors, ["network_disconnected"], "DIAL_NETWORK_DISCONNECTED");
+    assert.equal(registry.devices().length, 0, "Clear");
+    assert.equal(lists.at(-1), 0, "the empty list is sent (MaybeSendDeviceList)");
+    registry.onConnectionChanged(true);
+    await advance(10);
+    assert.deepEqual(searches, [0, 30_000], "StartPeriodicDiscovery searches at once");
+    assert.equal(registry.devices().length, 1);
+    assert.equal(lists.at(-1), 1);
+
+    await advance(30_000);
+    assert.equal(searches.length, 2, "the refresh that was due at 60 s went with the old timer");
+    await advance(29_980);
+    assert.equal(searches.length, 2);
+    await advance(20);
+    assert.equal(searches.length, 3, "refreshMs after the change");
+
+    registry.onConnectionChanged(true);
+    await advance(10);
+    assert.equal(searches.length, 3, "online while discovering changes nothing");
+    assert.deepEqual(errors, ["network_disconnected"]);
+    registry.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("without a network DIAL does not search, discoverNow refuses, and discovery starts when a network comes up", async () => {
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    const { registry, searches, errors, lists, advance } = answeringRegistry(false);
+    await advance(120_000);
+    assert.deepEqual(searches, [], "ReadyToDiscover is false for CONNECTION_NONE");
+    assert.deepEqual(errors, ["network_disconnected"]);
+    assert.equal(registry.discoverNow(), false);
+    assert.deepEqual(errors, ["network_disconnected", "network_disconnected"]);
+    assert.deepEqual(lists, []);
+
+    registry.onConnectionChanged(true);
+    await advance(10);
+    assert.deepEqual(searches, [120_000]);
+    assert.deepEqual(lists, [1]);
+
+    registry.onConnectionChanged(false);
+    assert.deepEqual(lists, [1, 0]);
+    await advance(240_000);
+    assert.deepEqual(searches, [120_000], "the periodic search stopped");
+    registry.onConnectionChanged(false);
+    assert.equal(errors.length, 3, "offline again while stopped reports nothing more");
+    registry.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a network change in the middle of a cycle ends that cycle; its late answers are not registered", async () => {
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    let answer: ((packet: Buffer, from: { address: string; port: number }) => void) | undefined;
+    const lists: number[] = [];
+    const registry = new DialRegistry({
+      interfaces: () => LOOPBACK,
+      openSocket: async (_iface, handlers) => {
+        answer = handlers.message;
+        return { send() {}, close() {} };
+      },
+      requestIntervalMs: 5, responseTimeoutMs: 10, maxRequests: 1, refreshMs: 60_000,
+    });
+    registry.on("deviceList", (l) => lists.push(l.length));
+    registry.start();
+    await flush();
+    const late = answer;
+    registry.onConnectionChanged(false);
+    late?.(Buffer.from(ssdpAnswer({ location: "http://127.0.0.1:8008/d.xml" }), "latin1"), { address: "127.0.0.1", port: 1900 });
+    mock.timers.tick(10);
+    await flush();
+    assert.equal(registry.devices().length, 0);
+    assert.deepEqual(lists, [0, 0], "the list sent with the first search, then the one sent by Clear");
+    registry.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("a socket that fails is closed and reported, and the registry never throws for it", async () => {
   // DialSocket::CheckResult closes the socket and DialServiceImpl::NotifyOnError reports socket_error while another
   // socket is open and no_interfaces when none is.

@@ -199,3 +199,31 @@ test("the manager starts and stops its monitor, and has no method for the app to
   assert.equal(monitor.stopped, 1);
   assert.equal(monitor.listeners.size, 0);
 });
+
+test("the manager passes network changes to DIAL discovery, and starts it only when a network is up", async () => {
+  const monitor = new FakeMonitor();
+  monitor.id = NETWORK_ID_DISCONNECTED;
+  let looked = 0;
+  const manager = createCastManager({
+    ipcMain: new Ipc(),
+    discovery: Object.assign(new FakeDevices([]), { async start() {}, stop() {} }),
+    sinks: FAST_SINKS,
+    createClient: (d) => new FakeClient(d),
+    selectDevice: async () => null,
+    presentation: false,
+    networkMonitor: monitor,
+    dial: { registry: { interfaces: () => { looked++; return []; }, refreshMs: 3_600_000 } },
+  });
+  assert.equal(monitor.listeners.size, 2, "the sink services and DIAL discovery");
+  await manager.start();
+  assert.equal(looked, 0, "no search without a network");
+  monitor.change("network-a");
+  assert.equal(looked, 1, "a network came up: DIAL searches at once");
+  monitor.change("network-b");
+  assert.equal(looked, 2, "another network: forgotten and searched again");
+  monitor.change(NETWORK_ID_DISCONNECTED);
+  monitor.change("network-b");
+  assert.equal(looked, 3);
+  await manager.dispose();
+  assert.equal(monitor.listeners.size, 0);
+});

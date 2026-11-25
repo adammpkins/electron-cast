@@ -173,7 +173,9 @@ is frozen and behaves as before for pages; it shares the device list.
   computes Chrome's network id from the connected interfaces and, when it changes, does what Chrome's two observers do:
   DIAL devices given up on as non-Cast are tried again, the sinks of the network being left are remembered and reopened
   on coming back to it (`CastMediaSinkServiceImpl::OnNetworksChanged`), and devices added by address with no route are
-  removed and the remembered ones added back 4.45 s later (`AccessCodeCastSinkService::OnNetworksChanged`). Node has no
+  removed and the remembered ones added back 4.45 s later (`AccessCodeCastSinkService::OnNetworksChanged`). DIAL
+  discovery forgets its devices and searches again at once instead of waiting up to 120 s, and does not search while
+  there is no network (`DialRegistry::OnConnectionChanged`). Node has no
   network-change event, so it reads `os.networkInterfaces()` every 5 s while started; Node has no Wi-Fi SSID either, so
   an interface is identified by its MAC and IPv4 network. A custom `discovery` turns it off unless the new
   `networkMonitor` option is given, and `networkMonitor: false` turns it off; a `NetworkMonitor` of your own drives it in
