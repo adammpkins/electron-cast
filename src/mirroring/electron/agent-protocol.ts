@@ -38,6 +38,9 @@ export type AgentToEngine =
   | { t: "error"; where: "video" | "audio" | "encoder"; message: string }
   | { t: "frame"; rtp: number; refMs: number; width: number; height: number }
   | { t: "video-chunk"; rtp: number; key: boolean; data: ArrayBuffer; encodeMs: number }
+  /** The frame never produced a chunk (encoder queue full, evicted, unsupported, or swallowed by the encoder). */
+  | { t: "video-drop"; rtp: number }
+  | { t: "audio-drop"; seq: number }
   | { t: "audio-buffer"; seq: number; frames: number; recMs: number }
   | { t: "audio-chunk"; seq: number; data: ArrayBuffer }
   | { t: "encoder-status"; kind: "video" | "audio"; status: "initialized" | "unsupported_codec" | "codec_init_failed" | "codec_runtime_error" };

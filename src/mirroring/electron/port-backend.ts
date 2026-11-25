@@ -13,6 +13,16 @@ import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.t
 
 const toLocalMs = (epochMs: number): number => epochMs - performance.timeOrigin;
 
+/** media/cast/encoding/audio_encoder.cc `kUnderrunSkipThreshold`. */
+export const UNDERRUN_SKIP_THRESHOLD = 3;
+
+/** What `ImplBase::EncodeAudio` decided for one buffer: the frame's timestamps and the samples skipped before it. */
+interface AudioMeta {
+  frameId: number;
+  rtp: number;
+  referenceTimeMs: number;
+}
+
 export class PortBackend implements MirroringBackend {
   private readonly port: AgentPort;
   private readonly source: CaptureSource;
@@ -25,7 +35,10 @@ export class PortBackend implements MirroringBackend {
   private nextVideoFrameId = 0;
   private lastVideoFrameId = -1;
   private nextAudioFrameId = 0;
-  private audioSamples = 0;
+  private audioRtp = 0;
+  private audioCaptureTimeMs: number | undefined;
+  private samplesDroppedFromBuffer = 0;
+  private audioMeta = new Map<number, AudioMeta>();
   private currentAudioSeq = 0;
   private frameInterval = 1000 / 30;
   private audioConfig: { sampleRate: number; channels: number } | undefined;
@@ -71,6 +84,33 @@ export class PortBackend implements MirroringBackend {
         });
         break;
       }
+      case "video-drop": {
+        // The agent could not produce a chunk. Chrome's encoder reports that as a frame with no data
+        // (VideoSender::OnFrameDroppedByEncoder), which also frees the frame's slot in `framesInEncoder`.
+        const ref = this.pendingVideo.get(m.rtp);
+        if (ref === undefined) return;
+        this.pendingVideo.delete(m.rtp);
+        this.videoCallbacks?.onEncoded(ref, {
+          isKeyFrame: false,
+          frameId: this.nextVideoFrameId,
+          referencedFrameId: this.lastVideoFrameId,
+          rtpTimestamp: m.rtp,
+          referenceTimeMs: ref,
+          newPlayoutDelayMs: 0,
+          data: new Uint8Array(0),
+          encoderUtilization: -1,
+        });
+        break;
+      }
+      case "audio-drop": {
+        // A buffer that never became a frame: its samples are reported as skipped with the next frame, which is how
+        // AudioSender::OnEncodedAudioFrame learns they left the encoder.
+        const meta = this.audioMeta.get(m.seq);
+        if (meta === undefined) return;
+        this.audioMeta.delete(m.seq);
+        this.samplesDroppedFromBuffer += this.samplesPerAudioFrame();
+        break;
+      }
       case "audio-buffer": {
         this.currentAudioSeq = m.seq;
         const accepted = this.audioSink?.insertAudio(m.frames, toLocalMs(m.recMs)) ?? false;
@@ -78,21 +118,23 @@ export class PortBackend implements MirroringBackend {
         break;
       }
       case "audio-chunk": {
-        const frameId = this.nextAudioFrameId++;
-        const rtp = this.audioSamples;
-        this.audioSamples += this.audioSenderConfig !== undefined ? this.audioSenderConfig.rtpTimebase / 100 : 480;
+        const meta = this.audioMeta.get(m.seq);
+        if (meta === undefined) return;
+        this.audioMeta.delete(m.seq);
+        const skipped = this.samplesDroppedFromBuffer;
+        this.samplesDroppedFromBuffer = 0;
         this.audioCallbacks?.onEncoded(
           {
             isKeyFrame: true,
-            frameId,
-            referencedFrameId: frameId,
-            rtpTimestamp: rtp,
-            referenceTimeMs: performance.now(),
+            frameId: meta.frameId,
+            referencedFrameId: meta.frameId,
+            rtpTimestamp: meta.rtp,
+            referenceTimeMs: meta.referenceTimeMs,
             newPlayoutDelayMs: 0,
             data: Buffer.from(m.data),
             encoderUtilization: -1,
           },
-          0,
+          skipped,
         );
         break;
       }
@@ -133,8 +175,38 @@ export class PortBackend implements MirroringBackend {
     return {
       samplesPerFrame: config.rtpTimebase / 100,
       bitrate: config.maxBitrate,
-      encode: () => this.port.postMessage({ t: "encode-audio", seq: this.currentAudioSeq }),
+      encode: (_frames, recordedTimeMs) => this.encodeAudio(recordedTimeMs),
     };
+  }
+
+  private samplesPerAudioFrame(): number {
+    return this.audioSenderConfig !== undefined ? this.audioSenderConfig.rtpTimebase / 100 : 480;
+  }
+
+  /**
+   * The timeline of `ImplBase::EncodeAudio` (media/cast/encoding/audio_encoder.cc). The agent hands over whole 10 ms
+   * buffers, so the encoder's partial-buffer fill is always empty here. A recorded time more than
+   * `kUnderrunSkipThreshold` frames ahead of the audio processed so far is an underrun: the RTP timestamp skips
+   * ahead by the frames missed. An overrun (time behind) is not resolved. The frame id advances for every buffer, as
+   * `++frame_id_` does even when the encoder produced nothing.
+   */
+  private encodeAudio(recordedTimeMs: number): void {
+    const samplesPerFrame = this.samplesPerAudioFrame();
+    const frameDurationMs = (samplesPerFrame * 1000) / (this.audioSenderConfig?.rtpTimebase ?? 48000);
+    if (this.audioCaptureTimeMs !== undefined) {
+      const missed = Math.trunc((recordedTimeMs - this.audioCaptureTimeMs) / frameDurationMs);
+      if (missed > UNDERRUN_SKIP_THRESHOLD) {
+        // samples_dropped_from_buffer_ gains only the partial buffer's fill, which is empty here.
+        this.audioRtp += missed * samplesPerFrame;
+      }
+    }
+    // frame_capture_time_ = recorded_time - buffer_fill_duration (always empty here).
+    const referenceTimeMs = recordedTimeMs;
+    const meta: AudioMeta = { frameId: this.nextAudioFrameId++, rtp: this.audioRtp, referenceTimeMs };
+    this.audioMeta.set(this.currentAudioSeq, meta);
+    this.audioRtp += samplesPerFrame;
+    this.audioCaptureTimeMs = referenceTimeMs + frameDurationMs;
+    this.port.postMessage({ t: "encode-audio", seq: this.currentAudioSeq });
   }
 
   startAudioCapture(params: { sampleRate: number; channels: number; framesPerBuffer: number }, sink: AudioCaptureSink): void {

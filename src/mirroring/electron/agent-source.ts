@@ -39,9 +39,10 @@ export const AGENT_SOURCE = String.raw`
   let audioReader = null;
   let videoInfo = null;
   let encoderSize = null;
+  let videoConfig = null;
   const pendingFrames = new Map();     // rtp -> VideoFrame, a few frames the engine may ask to encode
   const MAX_PENDING = 3;
-  const inFlight = [];                 // { rtp, startedAt } in encoder order
+  const inFlight = [];                 // { rtp, ts, key, startedAt } in encoder order
   let lastFrameClone = null;
   let lastRtp = 0;
   let firstTimestamp = null;
@@ -50,6 +51,13 @@ export const AGENT_SOURCE = String.raw`
   let audioSeq = 0;
 
   const send = (message, transfer) => port.postMessage(message, transfer || []);
+  const dropVideo = (rtp) => send({ t: "video-drop", rtp });
+  const dropAudio = (seq) => send({ t: "audio-drop", seq });
+  // Everything still inside a VideoEncoder that is going away produced no output: tell the engine, which would otherwise
+  // count those frames as in the encoder for ever. A lost key frame means the next frame has to be one.
+  const abandonInFlight = () => {
+    for (const e of inFlight.splice(0)) { if (e.key) keyNext = true; dropVideo(e.rtp); }
+  };
   const fail = (where, error) => send({ t: "error", where, message: String((error && error.message) || error) });
 
   window.addEventListener("message", (event) => {
@@ -66,7 +74,12 @@ export const AGENT_SOURCE = String.raw`
       case "set-codec": videoCodec = { codec: m.codec, string: m.codecString || m.codec }; return;
       case "set-bitrate":
         videoBitrate = m.bps;
-        if (videoEncoder && videoEncoder.state === "configured" && encoderSize) configureVideo(encoderSize.width, encoderSize.height);
+        // Chrome only adjusts the bitrate of the running encoder (media_video_encoder_wrapper.cc ChangeOptions): no new
+        // encoder, no forced key frame, and frames already inside it keep their place in the queue.
+        if (videoEncoder && videoEncoder.state === "configured" && videoConfig) {
+          videoConfig = { ...videoConfig, bitrate: videoBitrate };
+          videoEncoder.configure(videoConfig);
+        }
         return;
       case "set-audio": audioBitrate = m.bps; return;
       case "key-frame": keyNext = true; return;
@@ -150,17 +163,24 @@ export const AGENT_SOURCE = String.raw`
 
   function configureVideo(width, height) {
     if (videoEncoder && videoEncoder.state !== "closed") videoEncoder.close();
+    abandonInFlight();
     encoderSize = { width, height };
     videoEncoder = new VideoEncoder({
       output: (chunk) => {
+        // A software VP8 encoder may swallow a frame without output. The chunk's timestamp is the frame's, so frames
+        // queued ahead of the matching one were dropped inside the encoder.
+        let i = inFlight.findIndex((e) => e.ts === chunk.timestamp);
+        if (i < 0) i = 0;
+        for (const gone of inFlight.splice(0, i)) { if (gone.key) keyNext = true; dropVideo(gone.rtp); }
         const info = inFlight.shift();
+        if (!info) return;
         const data = new ArrayBuffer(chunk.byteLength);
         chunk.copyTo(data);
-        send({ t: "video-chunk", rtp: info ? info.rtp : 0, key: chunk.type === "key", data, encodeMs: info ? performance.now() - info.startedAt : 0 });
+        send({ t: "video-chunk", rtp: info.rtp, key: chunk.type === "key", data, encodeMs: performance.now() - info.startedAt });
       },
-      error: (err) => send({ t: "encoder-status", kind: "video", status: "codec_runtime_error" }) || fail("encoder", err),
+      error: (err) => { abandonInFlight(); send({ t: "encoder-status", kind: "video", status: "codec_runtime_error" }); fail("encoder", err); },
     });
-    videoEncoder.configure({
+    videoConfig = {
       codec: videoCodec.string,
       width, height,
       bitrate: videoBitrate,
@@ -168,28 +188,30 @@ export const AGENT_SOURCE = String.raw`
       latencyMode: "realtime",
       bitrateMode: "variable",
       hardwareAcceleration: "no-preference",
-    });
+    };
+    videoEncoder.configure(videoConfig);
     keyNext = true;
   }
 
   async function encodeFrame(rtp) {
     const frame = pendingFrames.get(rtp);
-    if (!frame) return;
+    if (!frame) { dropVideo(rtp); return; }
     pendingFrames.delete(rtp);
     try {
       const w = frame.displayWidth, h = frame.displayHeight;
       if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize || encoderSize.width !== w || encoderSize.height !== h) {
         const support = await VideoEncoder.isConfigSupported({ codec: videoCodec.string, width: w, height: h, bitrate: videoBitrate, latencyMode: "realtime" });
-        if (!support.supported) { send({ t: "encoder-status", kind: "video", status: "unsupported_codec" }); return; }
+        if (!support.supported) { dropVideo(rtp); send({ t: "encoder-status", kind: "video", status: "unsupported_codec" }); return; }
         configureVideo(w, h);
       }
       // A queue that grows means the encoder cannot keep up: skip, the engine sees the missing chunk as a drop.
-      if (videoEncoder.encodeQueueSize > 4) return;
+      if (videoEncoder.encodeQueueSize > 4) { dropVideo(rtp); return; }
       const key = keyNext;
       keyNext = false;
-      inFlight.push({ rtp, startedAt: performance.now() });
+      inFlight.push({ rtp, ts: frame.timestamp, key, startedAt: performance.now() });
       videoEncoder.encode(frame, { keyFrame: key });
     } catch (err) {
+      dropVideo(rtp);
       send({ t: "encoder-status", kind: "video", status: "codec_init_failed" });
       fail("encoder", err);
     } finally {
@@ -205,11 +227,12 @@ export const AGENT_SOURCE = String.raw`
     audioEncoder = new AudioEncoder({
       output: (chunk) => {
         const seq = audioInFlight.shift();
+        if (seq === undefined) return;
         const data = new ArrayBuffer(chunk.byteLength);
         chunk.copyTo(data);
-        send({ t: "audio-chunk", seq: seq === undefined ? 0 : seq, data });
+        send({ t: "audio-chunk", seq, data });
       },
-      error: (err) => { send({ t: "encoder-status", kind: "audio", status: "codec_runtime_error" }); fail("encoder", err); },
+      error: (err) => { for (const q of audioInFlight.splice(0)) dropAudio(q); send({ t: "encoder-status", kind: "audio", status: "codec_runtime_error" }); fail("encoder", err); },
     });
     try {
       const support = await AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: rate, numberOfChannels: channels, bitrate: audioBitrate });
@@ -217,9 +240,14 @@ export const AGENT_SOURCE = String.raw`
       audioEncoder.configure({ codec: "opus", sampleRate: rate, numberOfChannels: channels, bitrate: audioBitrate, opus: { frameDuration: 10000, application: "lowdelay" } });
     } catch (err) { fail("encoder", err); return; }
     let timestamp = 0;
+    let audioClock = null;               // epoch ms of the first sample of the next 10 ms buffer
     for (;;) {
       const { value: data, done } = await audioReader.read();
       if (done || stopped) { if (data) data.close(); return; }
+      // The time of the oldest sample we hold. A capture gap (underrun) moves the clock forward, a burst (overrun) does
+      // not move it back, so buffer times keep increasing by 10 ms; the engine's EncodeAudio port resolves gaps.
+      const startOfHeld = epochNow() - (data.numberOfFrames + planes[0].length) * 1000 / rate;
+      if (audioClock === null || startOfHeld > audioClock) audioClock = startOfHeld;
       // Re-block into 10 ms buffers: the sender counts and encodes audio in those.
       for (let c = 0; c < channels; c++) {
         const add = new Float32Array(data.numberOfFrames);
@@ -235,17 +263,20 @@ export const AGENT_SOURCE = String.raw`
         const seq = audioSeq++;
         pendingAudio.set(seq, new AudioData({ format: "f32-planar", sampleRate: rate, numberOfFrames: block, numberOfChannels: channels, timestamp, data: buffer }));
         timestamp += 10000;
-        send({ t: "audio-buffer", seq, frames: block, recMs: epochNow() });
-        if (pendingAudio.size > 50) { const first = pendingAudio.keys().next().value; pendingAudio.get(first).close(); pendingAudio.delete(first); }
+        send({ t: "audio-buffer", seq, frames: block, recMs: audioClock });
+        audioClock += 10;
+        if (pendingAudio.size > 50) { const first = pendingAudio.keys().next().value; pendingAudio.get(first).close(); pendingAudio.delete(first); dropAudio(first); }
       }
     }
   }
 
   function encodeAudio(seq) {
     const data = pendingAudio.get(seq);
-    if (!data) return;
+    if (!data) { dropAudio(seq); return; }
     pendingAudio.delete(seq);
-    try { audioInFlight.push(seq); audioEncoder.encode(data); } finally { data.close(); }
+    try { audioInFlight.push(seq); audioEncoder.encode(data); }
+    catch (err) { audioInFlight.pop(); dropAudio(seq); fail("encoder", err); }
+    finally { data.close(); }
   }
 
   function stop() {
