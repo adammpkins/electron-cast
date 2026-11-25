@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { H264QuantizerReader, normalizedH264Quantizer } from "../../src/mirroring/sender/h264-quantizer.ts";
+import { BitWriter } from "./bit-writer.ts";
 
 const hex = (s: string) => Uint8Array.from(Buffer.from(s, "hex"));
 
@@ -39,40 +40,6 @@ test("H.264 quantizer: data that is not an Annex B frame has no quantizer", () =
   // A slice cut off inside its header.
   assert.equal(r.read(REAL_DELTA_33.subarray(0, 13)), undefined);
 });
-
-/** Writes the bits of a NAL unit and adds the emulation prevention bytes. */
-class BitWriter {
-  private readonly bitsOut: number[] = [];
-  u(count: number, value: number): this {
-    for (let i = count - 1; i >= 0; i--) this.bitsOut.push(Math.floor(value / 2 ** i) % 2);
-    return this;
-  }
-  ue(value: number): this {
-    const code = value + 1;
-    const length = Math.floor(Math.log2(code)) + 1;
-    return this.u(length - 1, 0).u(length, code);
-  }
-  se(value: number): this {
-    return this.ue(value > 0 ? 2 * value - 1 : -2 * value);
-  }
-  /** A NAL unit with a three byte start code; the payload ends with the RBSP stop bit. */
-  nal(refIdc: number, type: number): number[] {
-    const bits = [...this.bitsOut, 1];
-    while (bits.length % 8 !== 0) bits.push(0);
-    const out = [0, 0, 1, (refIdc << 5) | type];
-    let zeros = 0;
-    for (let i = 0; i < bits.length; i += 8) {
-      const byte = bits.slice(i, i + 8).reduce((a, b) => a * 2 + b, 0);
-      if (zeros >= 2 && byte <= 3) {
-        out.push(3);
-        zeros = 0;
-      }
-      out.push(byte);
-      zeros = byte === 0 ? zeros + 1 : 0;
-    }
-    return out;
-  }
-}
 
 /** A Baseline SPS (no chroma format fields): picture order count type 2, frames only. */
 const baselineSps = (id: number) =>
