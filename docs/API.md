@@ -73,6 +73,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
 | `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is never listed (see [sinks](MAIN-API.md#sinks)). |
 | `sinks` | `CastSinkOptions` | Chrome's values | When and how channels to devices open and the list is reported: `openDelayMaxMs` (5000), `reportDelayMs` (3000), `retry` (`initialDelayMs` 15000, `maxAttempts` 3, `multiplyFactor` 1, `jitter` 0.5, `maxDelayMs` 30000), `dynamicTimeoutDeltaMs` (0, as in Chrome: added to the 10 s connect and liveness timeouts per failed attempt, up to 30 s and 60 s) and `allowAllIps` (false: public and loopback addresses are skipped, as Chrome does). Channels are opened to IP addresses only; a device whose `host` is a name is skipped with one `console.warn`. Each is Chrome's own setting (see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts)); mostly for tests. |
+| `allowAllIPs` | `boolean` | `false` | Connect to devices at any address. Chrome opens no Cast channel to a publicly routable or loopback address unless its `MediaRouterCastAllowAllIPs` policy is set, so by default such a device is not listed, offered or connected to (see [SECURITY.md](../SECURITY.md#device-addresses)). Applies to a `discovery` you pass too. |
 
 #### `CastManager`
 
@@ -83,7 +84,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `discoverSinksNow(): void` | Opens channels at once to every discovered device that has none, with no random delay (Chrome: `DiscoverSinksNow`). A device that gave up after its retries is only tried again by this or when discovery reports it again. |
 | `settled(options?: { retries?: boolean }): Promise<void>` | Resolves when no channel is being opened or waiting to be, and the list is reported. A retry waiting out its backoff counts only with `retries: true`. For tests and start-up. |
 | `dispose(): Promise<void>` | Removes the IPC handlers, stops discovery, closes every device connection and ends all sessions. Idempotent. A disposed manager cannot be restarted; create a new one. |
-| `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
+| `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)`, `getMediaController(id, observer?)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `MediaController`, `MediaStatus`, `MediaStatusObserver`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
 | `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`, `addPresentationObserver(webContentsId, observer)`, `startCasting(sinkId, { webContentsId, castMode? })` | Casting from the app's own UI on the page's `navigator.presentation.defaultRequest`, as Chrome's Cast dialog does: read and observe the window's default request (`PresentationRequest`: `{ webContentsId, presentationUrls, frameOrigin }`; `PresentationObserver`: `onDefaultPresentationChanged(request \| null)`), and start it on a sink. `startCasting` resolves with the `MediaRoute`, hands the page `connectionavailable` with a connection, needs no user gesture, and rejects with `MediaRouteError` (`unable_to_cast`, `timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`, `unknown_error`). `MediaSinksQuery.presentationUrls` lists the sinks that can run those URLs. See [MAIN-API.md](MAIN-API.md#casting-from-the-apps-own-ui). |
 
 #### `selectDevice`
@@ -132,6 +133,19 @@ gesture.", what Chromium's `PresentationServiceImpl::StartPresentation` reports 
 The page-side stand-in rejects with `InvalidAccessError` first, as Blink's `PresentationRequest::start()` does.
 `mode: "chromecast"` has no gesture check. See [SECURITY.md](../SECURITY.md#user-gesture) for what this does and does
 not protect against.
+
+#### Sources electron-cast does not serve
+
+electron-cast launches receiver apps; it does not mirror or remote. A presentation URL that names a Cast Streaming app
+(`0F5096E8` or `85CDB22F`, in `cast:` or the legacy `https://google.com/cast#__castAppId__=` form, also when
+listed beside ordinary apps in one legacy URL) is a mirroring source in Chrome, and a `remote-playback:` source (made
+by `HTMLMediaElement.remote`) is served by media remoting. Neither is launched here: the request reads as having no
+screen, so `getAvailability()` resolves `false` and `start()` rejects with `NotFoundError` ("No screens found.").
+When a request lists several URLs, the first ordinary Cast app URL is served, so a normal app next to a mirroring one
+still casts. The stand-in's `PresentationRequest` keeps only `http`, `https`, `cast` and `cast-dial` URLs and throws
+`NotSupportedError` ("An empty sequence of URLs is not supported.") when none is left, as Blink does, so a page cannot
+make a `remote-playback:` request. `video.remote` is not touched and never reports a device. See
+[DESIGN.md](DESIGN.md#presentation-sources).
 
 #### Rejoining after a reload or restart
 

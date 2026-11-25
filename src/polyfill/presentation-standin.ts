@@ -160,14 +160,22 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       if (list.length === 0) {
         throw new DE("PresentationRequest requires at least one url.", "NotSupportedError");
       }
+      // Blink keeps only URLs of a known protocol (PresentationRequest::Create, IsKnownProtocolForPresentationUrl), so a
+      // remote-playback: URL, which only HTMLMediaElement.remote may use, never reaches the browser from a page.
+      const known: string[] = [];
       for (const u of list) {
+        let parsed: any;
         try {
-          new URLC(String(u));
+          parsed = new URLC(String(u));
         } catch {
           throw new DE("Invalid URL: " + String(u), "SyntaxError");
         }
+        if (/^(https?|cast|cast-dial):$/.test(parsed.protocol)) known.push(String(u));
       }
-      this.urls = Object.freeze(list) as string[];
+      if (known.length === 0) {
+        throw new DE("An empty sequence of URLs is not supported.", "NotSupportedError");
+      }
+      this.urls = Object.freeze(known) as string[];
     }
     start(): Promise<any> {
       const nav = g.navigator;

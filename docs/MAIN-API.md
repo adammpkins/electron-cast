@@ -24,6 +24,7 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController` binds a `mojom::MediaController` (`SetVolume`, `SetMute`); on a Cast route `CastMediaController` sends a receiver `SET_VOLUME` request. Used by the global media controls (`CastMediaNotificationItem::SetVolume / SetMute`, controller bound in `cast_media_notification_producer.cc`), not by the Cast dialog. There is no class named `MediaRouteController` in current Chromium | `components/media_router/common/mojom/media_controller.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `chrome/browser/ui/global_media_controls/` |
 | `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`, `addPresentationObserver(webContentsId, observer)` | `WebContentsPresentationManager` (`HasDefaultPresentationRequest`, `GetDefaultPresentationRequest`, `AddObserver`; implemented by `ControllerPresentationServiceDelegateImpl`, one per `WebContents`), `content::PresentationObserver::OnDefaultPresentationChanged`, `content::PresentationRequest` (`render_frame_host_id`, `presentation_urls`, `frame_origin`) | `components/media_router/browser/presentation/web_contents_presentation_manager.h`, `controller_presentation_service_delegate_impl.cc`, `content/public/browser/presentation_request.h` |
 | `startCasting(sinkId, { webContentsId, castMode: "presentation" })` | `MediaRouterUI::StartCasting(sink_id, MediaCastMode::PRESENTATION)`, then `MediaRouteStarter::CreateRouteParameters` (the source for the sink comes from the default request's URLs; none gives an "unable to cast" issue), `StartRoute` (`MediaRouter::CreateRoute`, with `WebContentsPresentationManager::OnPresentationResponse` as the response callback) and `OnPresentationResponse`, which adds the presentation and runs the default-presentation callback; `RouteRequestResultCode` is the error set | `chrome/browser/ui/media_router/media_router_ui.cc`, `media_route_starter.cc`, `components/media_router/common/mojom/route_request_result_code.mojom` |
+| `getMediaController(id, observer?)` | `MediaRouter::GetMediaController`: binds a `mojom::MediaController` (`Play`, `Pause`, `SetMute`, `SetVolume`, `Seek`, `NextTrack`, `PreviousTrack`) and a `mojom::MediaStatusObserver` (`OnMediaStatusUpdated(MediaStatus)`). `CastMediaController` builds the status from the receiver volume (`SetSession`) and MEDIA_STATUS messages (`SetMediaStatus`, `UpdateMediaStatus`), which `CastSessionTracker::HandleMediaStatusMessage` first completes from the media it saved | `components/media_router/common/mojom/media_controller.mojom`, `media_status.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `cast_session_tracker.cc` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
 | Sinks listed only once a channel is open and authenticated, with retry and removal; the session tracker; non-local routes | `CastMediaSinkServiceImpl`, `MediaSinkServiceBase`, `CastSessionTracker`, `CastActivityManager::AddNonLocalActivity` | see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts) for each rule and its source |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
@@ -49,8 +50,8 @@ Where electron-cast differs from Chrome:
 - `detachRoute` has no Chrome counterpart (see the table). It is electron-cast's own.
 - Volume matches Chrome: both send the receiver's `SET_VOLUME` (`level` or `muted`), the volume of the device, not of
   a media session; the route's `volume` shows what the device last reported. Chrome additionally ignores the call
-  when the route has no session yet. Chrome's controller also plays, pauses and seeks and reports media status; there is
-  none of that here.
+  when the route has no session yet (every route here has one). The rest of Chrome's controller is
+  [`getMediaController`](#media-control).
 
 ## Sinks
 
@@ -114,6 +115,44 @@ the change came from the device:
 
 `dispose()` stops the observers (they are not called again) and closes the device connections; it does not stop the
 apps running on the devices.
+
+## Media control
+
+```ts
+const controller = manager.getMediaController(routeId, {
+  onMediaStatusUpdated(status) {
+    // title, secondaryTitle, playState ("playing" | "paused" | "buffering"), currentTime, duration (seconds),
+    // volume, isMuted, canPlayPause, canSeek, canMute, canSetVolume, canSkipToNextTrack, canSkipToPreviousTrack, images
+  },
+});
+await controller.play();
+await controller.pause();
+await controller.seek(90);          // seconds
+await controller.nextTrack();       // QUEUE_UPDATE with jump 1, as Chrome does
+await controller.setVolume(0.4);    // the receiver's volume, as getRouteController
+controller.close();                 // stop the reports
+```
+
+It is what Chrome offers for a Cast route (`CastMediaController`), sent over the route's own connection, so it is
+available on every route electron-cast has (all are app routes; Chrome's mirroring routes have a controller of their own,
+and there is no mirroring here). Messages go out as Chrome writes them (`CreateMediaRequest`): `PLAY`, `PAUSE`,
+`SEEK` with `currentTime`, `QUEUE_UPDATE` with `jump` 1 or -1, each with the `mediaSessionId` last seen in a
+MEDIA_STATUS (-1 before any, which the receiver refuses, as for Chrome) and the `sessionId`. Binding asks the receiver
+for its media status (`GET_STATUS`).
+
+Where it differs from Chrome:
+
+- Commands return promises, resolved when the message is written, not when the receiver has acted. They reject with
+  `MediaRouteError` `route_not_found` once the route is gone. `seek` rejects with `RangeError` for a time that is not a
+  number of seconds from 0 up. `getMediaController` throws `MediaRouteError` for an unknown route.
+- An observer is not called again with a status identical to the last one it got (Chrome calls it on every receiver
+  status). It is called at once when the receiver volume is known, as Chrome does on binding.
+- Times are seconds, not `TimeDelta`. `MediaStatus.images` keeps only `https` URLs, as Chrome does.
+- electron-cast has one Cast sender id per device connection where Chrome gives the controller its own, so the
+  receiver's replies to a command also reach the route's pages. Request ids start at 2^30 so they cannot be mistaken
+  for the page SDK's.
+- Chrome's controller is a mojo pipe that closes with its route; here, after the route ends the commands reject and the
+  observer is not called again.
 
 ## A live device picker
 

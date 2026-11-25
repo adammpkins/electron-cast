@@ -12,6 +12,7 @@ import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
+import { withAddressPolicy } from "./address-filter.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -26,6 +27,9 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type { CastSinkOptions, ChannelParams, SinkRetryOptions } from "./sink-service.ts";
+export type {
+  MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
+} from "./media-controller.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaCastMode, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
   MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
@@ -90,6 +94,12 @@ export interface CastManagerOptions {
    * devices. The defaults are Chrome's, and there is no way to turn the tracking off: Chrome has none.
    */
   sinks?: CastSinkOptions;
+  /**
+   * Connect to devices at any address. Chrome does not open a Cast channel to a publicly routable or loopback address
+   * unless the MediaRouterCastAllowAllIPs policy is set, and neither does this manager: such a device is not listed or
+   * offered. Default false (as Chrome). Applies to the discovery used, including one passed as `discovery`.
+   */
+  allowAllIPs?: boolean;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -138,7 +148,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
-  const discovery = options.discovery ?? new CastDiscovery();
+  const discovery = withAddressPolicy(options.discovery ?? new CastDiscovery(), options.allowAllIPs === true);
   const createClient = options.createClient ?? ((d: CastDevice, params: ChannelParams) =>
     new CastClient({
       host: d.host,
@@ -246,7 +256,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     createClient,
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
-    sinks: options.sinks,
+    // Until the two address options are one (see the integration commit after this merge), either turns the check off
+    sinks: options.allowAllIPs === true ? { ...options.sinks, allowAllIps: true } : options.sinks,
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -569,6 +580,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     terminateSession: (id) => service.terminateSession(id),
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
+    sendSessionMessage: (id, ns, m) => service.sendSessionMessage(id, ns, m),
+    observeSessionMessages: (l) => service.observeSessionMessages(l),
+    sessionVolume: (id) => service.sessionVolume(id),
   }, {
     requests: defaults,
     start: (webContentsId, sinkId) => {

@@ -128,6 +128,29 @@ const DEFAULT_REQUEST_RESULT = `
   return out;
 `;
 
+// remote-playback: sources (HTMLMediaElement.remote) are served by media remoting in Chrome, which electron-cast cannot
+// do: nothing may report a device for them, and a page cannot make a PresentationRequest for one (Blink drops the URL).
+const REMOTE_PLAYBACK_PAGE = `
+  const out = { values: [] };
+  const video = document.createElement("video");
+  video.src = "https://example.test/clip.mp4";
+  document.body.appendChild(video);
+  try {
+    await video.remote.watchAvailability((available) => out.values.push(available));
+    out.watch = "resolved";
+  } catch (e) { out.watch = e.name; }
+  await new Promise((r) => setTimeout(r, 500));
+  try {
+    await video.remote.prompt();
+    out.prompt = "resolved";
+  } catch (e) { out.prompt = e.name; }
+  try {
+    new PresentationRequest("remote-playback:media-element?source=aHR0cHM6Ly9leGFtcGxlLnRlc3QvY2xpcC5tcDQ=");
+    out.request = "constructed";
+  } catch (e) { out.request = e.name + ": " + e.message; }
+  return out;
+`;
+
 const CHROMECAST_PAGE = `
   const cast = chrome.cast;
   const out = { hasChromeCast: typeof cast === "object" && cast !== null, hasPresentationBridge: "__electronCastPresentationBridge" in window };
@@ -225,6 +248,12 @@ async function main() {
     assert.equal(out.stateAfterTerminate, "terminated");
     assert.ok(clients[0].calls.some((c) => c.startsWith("stop ")), `terminate() did not stop the session: ${clients[0].calls}`);
     pass("terminate() stopped the session");
+    const remote = await runInPage(win, REMOTE_PLAYBACK_PAGE);
+    assert.ok(!remote.values.includes(true), `video.remote reported a device: ${JSON.stringify(remote)}`);
+    assert.notEqual(remote.prompt, "resolved", "video.remote.prompt() resolved");
+    assert.equal(remote.request, "NotSupportedError: An empty sequence of URLs is not supported.");
+    console.log("smoke: info video.remote " + JSON.stringify(remote));
+    pass("video.remote never lights up and a remote-playback: PresentationRequest is refused");
     win.destroy();
   }
 
