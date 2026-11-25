@@ -5,6 +5,8 @@ name: Publish
 #
 # Release: bump "version" in package.json, commit, then push a matching tag:
 #   git tag v0.2.0 && git push origin v0.2.0
+# A prerelease is the same with a version that has a "-": version 0.5.0-next.1, tag v0.5.0-next.1 -> npm dist-tag next;
+# latest stays put.
 
 on:
   push:
@@ -44,5 +46,12 @@ jobs:
           fi
       - run: npm ci
       - run: npm run check
+      # A version with a "-" (0.5.0-next.1) is a prerelease: it goes to the "next" dist-tag, so `npm i electron-cast`
+      # keeps installing the last release and `npm i electron-cast@next` gets this one. Without --tag npm would move
+      # "latest" to it (npm 11 refuses to publish a prerelease without a tag).
       - if: steps.published.outputs.skip != 'true'
-        run: npm publish --access public
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) npm publish --access public --tag next ;;
+            *) npm publish --access public ;;
+          esac
