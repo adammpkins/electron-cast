@@ -1,31 +1,29 @@
 # electron-cast
 
-Chromecast for Electron. Web pages that use Google's Cast SDK (`chrome.cast`, `cast.framework`) can cast, running
-Google's own SDK, while your main process handles device discovery and the Cast v2 protocol. No native modules, no
-runtime dependencies, and it works with `sandbox: true` and `contextIsolation: true`.
+Chrome's Cast support for Electron: pages run Google's own, unmodified Cast SDK, and your main process supplies the
+Media Router that Electron lacks.
 
-Electron has the Presentation API but no Media Router behind it, and electron/electron#869 was closed in 2025 with no
-plans to add one. This library fills that gap: a page's own cast button (YouTube Music's, for example) works
-unchanged.
-
-## Install
+Electron has the Presentation API but nothing behind it, and electron/electron#869 (a Media Router for Electron) was
+closed in 2025 with no plans to add one. electron-cast fills that gap from scratch: a stand-in Presentation API in the
+page, and in the main process mDNS discovery, a device picker hook, the Cast v2 channel, device authentication with
+Chrome's certificate checks, and the message envelope Chrome's Media Router speaks to the SDK. A site's own cast
+button (YouTube Music's, for example) works unchanged. No native modules, no runtime dependencies, and it works with
+`sandbox: true` and `contextIsolation: true`.
 
 ```sh
 npm install electron-cast
 ```
 
-Requires Electron 35 or later (for `contextBridge.executeInMainWorld`; the preload fails on 34). Electron is an
-optional peer dependency (`electron >=35`): the library never imports it, you pass `ipcMain`, `contextBridge` and
-`ipcRenderer` in. Node 20 or later. The package ships ES modules and a CommonJS build, so `import` and `require` both
-work. CI loads the built package in a real Electron 35, 40 and the latest stable on Linux, Windows and macOS
-(`npm run smoke` runs it locally once you have installed Electron).
+- [Getting started](docs/GETTING-STARTED.md): from zero to casting, with packaging notes for each OS.
+- [Guides](docs/guides/index.md): a device picker, restart rejoin, iframes, custom receivers, testing.
+- [API reference](docs/API.md), [main-process API](docs/MAIN-API.md), [architecture](docs/ARCHITECTURE.md),
+  [troubleshooting](docs/TROUBLESHOOTING.md), [FAQ](docs/FAQ.md), [security](SECURITY.md), [changelog](CHANGELOG.md).
 
-electron-cast behaves as Chrome does on the Presentation API path, which is the default; `mode: "chromecast"` is a
-frozen fallback (see below).
+## Quick start
 
-## Use
+Four small pieces. Needs Electron 35 or later and Node 20 or later.
 
-**Main process.** Create one manager, start discovery, and decide how the user picks a device:
+**1. Main process.** Create one manager, say which pages may cast, and show a picker when the page asks:
 
 ```ts
 import { app, ipcMain, Menu } from "electron";
@@ -45,11 +43,15 @@ const cast = createCastManager({
     }),
 });
 
-await cast.start();
+// Not a top-level `await app.whenReady()`: see the Electron 45 note in docs/TROUBLESHOOTING.md.
+app.whenReady().then(async () => {
+  await cast.start();
+  // create your windows here
+});
 app.on("will-quit", () => void cast.dispose());
 ```
 
-**Preload script** of the window or view that shows the page:
+**2. Preload** of the window or view that shows the page:
 
 ```ts
 import { contextBridge, ipcRenderer } from "electron";
@@ -58,173 +60,123 @@ import { installCastBridge } from "electron-cast/preload";
 installCastBridge({ contextBridge, ipcRenderer });
 ```
 
-Import from `electron-cast/preload`, not the package root: the root also exports the main-process code, which needs
-Node's `tls` and `dgram` and cannot load in a sandboxed preload. The preload entry imports nothing Node-only, but a
-sandboxed preload cannot load other files either, so bundle it into your preload (esbuild, for example, as
-`smoke/build-preloads.mjs` does). A non-sandboxed CommonJS preload can `require("electron-cast/preload")` directly:
-the package ships a CommonJS build next to the ESM one.
+A sandboxed preload cannot load other files, so bundle it (esbuild, for example). Import from `electron-cast/preload`,
+not the package root, which needs Node's `tls` and `dgram`. Why and how: [Getting started](docs/GETTING-STARTED.md#2-the-preload).
 
-That's all. The page loads Google's Cast SDK as usual, and its cast button drives sessions through IPC to the main
-process.
+**3. The page** loads Google's Cast SDK as it would in Chrome. Nothing electron-cast specific:
 
-### How the page gets its Cast SDK
-
-Electron has the Presentation API (`navigator.presentation`, `PresentationRequest`) but nothing behind it, so in
-Electron Google's Cast SDK finds no devices. By default electron-cast fills in that missing piece: the page gets a
-stand-in Presentation API backed by the main process, and **Google's own `cast_sender.js` and `cast.framework` load
-and run unmodified**, as they do in Chrome. electron-cast never replaces Google's SDK.
-
-A cast has to start from a user gesture (a click on the page's cast button), as in Chrome. Chrome checks that in the
-browser process; Electron has no main-process API for it, so the preload reads `navigator.userActivation.isActive` in
-its own isolated world when the page asks to start, and the main process refuses a start without it. A page's scripts
-cannot forge that, a compromised renderer could (see [SECURITY.md](SECURITY.md#user-gesture)). `mode: "chromecast"` has
-no gesture check.
-
-**Reloads and restarts.** As in Chrome, a session belongs to the app rather than the page, so a page that reloads gets
-its session back through auto-join.
-
-After the Electron app itself restarts, a session may still be playing on the device. electron-cast saves nothing for
-that, and auto-join does not find it (Chrome's auto-join only joins sessions started by that browser run). The app
-persists the session id and the page reconnects with it: Google's SDK exposes the id as `session.sessionId`, so the page
-keeps it (in `localStorage`, say) and calls `chrome.cast.requestSessionById(id)` (or `cast.framework`'s equivalent) at
-startup. The SDK turns that into `PresentationRequest.reconnect("cast-session_<id>")`, which reaches electron-cast's
-`joinRunningSession`: it asks the known devices which one runs that session and joins it if the app matches, with no
-origin check (Chrome's `AppActivity::CanJoinSession` checks only the app id and that the client is not already
-connected), also when this run already holds the session; `allowOrigin` still applies first. If the device no longer
-runs the session, the call fails like in Chrome. Discovery has to have found the device by then, so the page may need
-to retry for a few seconds after startup. `mode: "chromecast"` does not do this.
-
-**Iframes (presentation mode only).** Google's SDK also works inside an iframe (an embedded player, say). As in Chrome,
-each frame is its own controlling context: its availability watches, connections and sessions belong to that frame, its
-events reach only that frame, and it can't read, close or message another frame's connections. The origin electron-cast
-uses (for `allowOrigin`, the device picker and origin-scoped auto-join) is the sending frame's own, so a cross-origin
-iframe is its own origin. An iframe that navigates parks its sessions as a reloading page does, and is left for good when
-it is removed or its page navigates. Electron only runs a preload in subframes if the app opts in:
-
-```js
-new BrowserWindow({
-  webPreferences: {
-    preload: path.join(__dirname, "preload.js"),
-    sandbox: true,
-    contextIsolation: true,
-    nodeIntegrationInSubFrames: true,  // run the preload in iframes too
-  },
-});
+```html
+<google-cast-launcher></google-cast-launcher>
+<script>
+  window.__onGCastApiAvailable = (available) => {
+    if (!available) return;
+    cast.framework.CastContext.getInstance().setOptions({
+      receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+    });
+  };
+</script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
 ```
 
-Without `nodeIntegrationInSubFrames`, nothing changes: the preload runs only in the main frame, an iframe has no stand-in
-and no cast, and its SDK finds no devices. With it, the preload (and so the cast bridge) runs in every iframe of every
-origin, so keep `allowOrigin` strict. `nodeIntegration` stays `false`, so an iframe's page still gets no Node. The
-frame handling is covered by unit tests against fake frames; the real-Electron smoke test does not load an iframe.
-`mode: "chromecast"` stays main-frame only: a call from an iframe is refused.
+**4. Run it.** The [example app](examples/electron-app) is exactly this, runnable: clone the repository, then
 
-**Fallback: `mode: "chromecast"`.** This installs electron-cast's own implementation of `chrome.cast` and
-`chrome.cast.media` and blocks Google's loader scripts. Use it for pages that call `chrome.cast` without loading
-Google's script, or if Google's script ever stops working on the stand-in:
-
-```ts
-installCastBridge({ contextBridge, ipcRenderer, mode: "chromecast" });
+```sh
+npm install && npm run build
+cd examples/electron-app && npm install && npm start
 ```
 
-The main process serves both modes. `createCastManager({ ..., presentation: false })` serves only `"chromecast"`.
+Click the cast button, pick a device, then "Play sample video". With no Cast device on the network the button stays
+hidden.
 
-## Device authentication
+## What you get
 
-Like Chrome, electron-cast checks that a device is a genuine Google-certified Cast device before using it (the
-`deviceauth` challenge, with Google's Cast root certificates built in and no dependencies). This happens when the
-connection opens, not at discovery, so a device that fails still shows in the picker but casting to it fails like an
-unreachable device.
+- **Google's own SDK, unmodified.** The page's `cast_sender.js` and `cast.framework` run as in Chrome. electron-cast
+  never replaces them.
+- **Discovery** over mDNS (`_googlecast._tcp`) on every network interface, IPv4 and IPv6 link-local, with devices
+  coming and going live and recovery after sleep.
+- **Device authentication** as Chrome does it: a device is used only after it proves it is a Google-certified Cast
+  device, with Google's Cast roots built in ([details](docs/guides/device-authentication.md)).
+- **Sessions the Chrome way:** auto-join after a reload, rejoin after an app restart by session id, several windows,
+  and iframes.
+- **A picker hook, not a picker.** You decide which pages may cast and show whatever UI you like
+  ([guide](docs/guides/device-picker.md)).
+- **A main-process API** modelled on Chrome's Media Router: observe devices (sinks) and sessions (routes), stop or
+  detach a session, set its volume ([docs](docs/MAIN-API.md)).
+- **Every layer is exported** if you want them without Electron: `CastDiscovery`, `CastClient` and the protocol code
+  run in plain Node ([guide](docs/guides/low-level-client.md)).
+- **Documented against Chromium.** Where electron-cast copies a rule, the code and docs name the Chromium source it
+  comes from ([map](docs/CHROMIUM-MAP.md)).
 
-On by default; receivers that are not Google-certified (open-source ones, for example) need it off:
+## Chrome parity
 
-```js
-createCastManager({ ipcMain, selectDevice, verifyDevices: false });   // CastClient: { verifyDevice: false }
-```
+electron-cast does what Chrome does on the Presentation API path. Where it does not yet, or never will, this says so.
 
-A device that fails makes `CastClient.connect()` reject with a `CastAuthError` whose `reason` says why (for example
-`untrusted_chain` or `revoked`). With the default client, `client.deviceAuth` holds what was established.
+| Feature | Chrome | electron-cast | Notes |
+|---|---|---|---|
+| Google's Cast sender SDK on the page (`chrome.cast`, `cast.framework`) | Yes | Yes | Unmodified, over a stand-in Presentation API |
+| Device discovery (mDNS `_googlecast._tcp`) | Yes | Yes | IPv4 on every interface, IPv6 link-local per adapter. IPv6 is covered by unit tests only so far |
+| Device picker | Chrome's dialog | Your UI through `selectDevice` | By design: the app owns the UI |
+| Device authentication | Yes | Yes | A port of Chromium's checks. One deliberate difference: a stale built-in fallback CRL skips revocation instead of refusing ([why](SECURITY.md#tls-and-device-authentication)) |
+| Start requires a user gesture | Checked in the browser process | Checked by the preload in the renderer | Electron has no main-process API for it ([SECURITY.md](SECURITY.md#user-gesture)) |
+| Sessions: launch an app, app messages, media commands, volume, stop | Yes | Yes | |
+| Auto-join after a reload (`origin_scoped`, `tab_and_origin_scoped`) | Yes | Yes | |
+| Rejoin a session after the browser or app restarts, by id | Yes (`reconnect("cast-session_<id>")`) | Yes | The app stores the session id ([guide](docs/guides/restart-rejoin.md)). The lookup runs on request; Chrome tracks continuously |
+| Several windows | Yes | Yes | |
+| Iframes (each frame is its own sender) | Yes | Yes | Needs `nodeIntegrationInSubFrames: true`. Unit tests only so far |
+| Audio-only devices and speaker groups | Yes | Yes | Tested on a Google Home Mini and two groups |
+| Observe sinks and routes, stop a route, set volume from the app | Internal | Yes ([MAIN-API](docs/MAIN-API.md)) | Modelled on `MediaRouter`; no play, pause or seek from main |
+| Sessions started by other senders listed as routes (non-local routes) | Yes | In progress | |
+| App-initiated casting through the page's default presentation request (`connectionavailable`) | Yes | In progress | |
+| DIAL discovery and launch | Yes | In progress | |
+| Tab, desktop and file mirroring | Yes | No | Not implemented |
+| Remote Playback API (`video.remote`) | Yes | No | Not implemented |
+| Cast from Chrome's media controls UI | Yes | No | The app has its own UI |
+| `mode: "chromecast"`, a legacy `chrome.cast` polyfill | n/a | Frozen | Gets no new features; use the default mode ([notes](docs/FAQ.md#what-is-mode-chromecast)) |
 
-Like Chrome's own built-in security data, the built-in fallback CRL goes stale: it counts for 20 weeks from the build
-time stamped by `npm run build`. A device that sends no CRL of its own is then accepted without a revocation check
-(`deviceAuth.revocationChecked` is `false`) instead of refused. Everything else is still checked; update the package
-to get a fresh fallback CRL. Details: [docs/DESIGN.md](docs/DESIGN.md) and [SECURITY.md](SECURITY.md).
+## Platforms and what was tested
 
-Tested on 8 real devices on a home network, which all passed (an audio-only Google Home Mini got the `audio_only`
-policy). How it works and what it leaves out: [docs/DESIGN.md](docs/DESIGN.md).
+Say what was run, not what should work.
 
-## Known issue: top-level `await app.whenReady()` in an ESM main process
+| | Discovery and device authentication | Casting end to end | Notes |
+|---|---|---|---|
+| Windows 11 | 8 real devices, all passed | Session, playback, restart rejoin and stop, on real devices, in YouTube Music Desktop (dev and packaged builds, Electron 45) | The devices: Chromecast, Chromecast Ultra, Google Home Mini (audio-only), Nest Hub, Nest Hub Max and two Cast groups |
+| Linux | All 8 devices passed on 2026-11-25 (Ubuntu under WSL2 with mirrored networking) | Not tested | |
+| macOS | Not tested | Not tested | CI loads the package in a real Electron on macOS with a fake device and no real network |
 
-In an ES module main process (`"type": "module"`, or an `.mjs` main), a top-level `await app.whenReady()` never
-resolves on Electron 45 (reproduced on 45.5.0 on Windows): the app logs the line before it and then hangs. It is
-Electron's ESM startup, not electron-cast. Use `app.whenReady().then(...)` or put the work in a function that is not
-awaited at the top level:
+The end-to-end runs were YouTube Music (YouTube Music Desktop) casting to speaker groups, a Nest Hub and several
+Chromecasts, and `cast.framework` on a Nest Hub: session start, volume, HLS load, play, pause, seek, resume and stop.
 
-```js
-app.whenReady().then(async () => {
-  await cast.start();
-  // create windows
-});
-```
+Electron: the CI smoke test loads the built package in a real Electron 35, 40 and the latest stable on Linux, Windows
+and macOS. Its network is faked: no real device. Real-device runs used Electron 45. Electron 35 is the oldest supported
+(the preload needs `contextBridge.executeInMainWorld`). Node 20 or later.
 
-Related report: [electron/electron#40719](https://github.com/electron/electron/issues/40719) (closed; a comment
-there describes the top-level await form of the same hang).
-
-## What works
-
-- Device discovery over mDNS on every IPv4 network interface and over IPv6 link-local on each adapter, with devices
-  coming and going live. A network that goes away takes its devices with it, and discovery recovers after the machine
-  wakes from sleep.
-- Devices are verified as genuine Google-certified Cast devices, as Chrome does (on by default, see above).
-- Several pages or windows at once, and iframes (with `nodeIntegrationInSubFrames`). A page that reloads keeps its
-  sessions open on the device and rejoins them (auto-join, `origin_scoped` or `tab_and_origin_scoped`). A page that
-  closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
-- A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
-  its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
-
-**Default mode (Google's SDK):**
-
-- Google's SDK gets what Chrome would give it: receiver availability, the device picker, sessions and joining them
-  (including by id after a restart), messages on any namespace, volume, and media commands with their status replies.
-- Tested end to end with YouTube Music (YouTube Music Desktop, Electron 45) casting to speaker groups, a Nest Hub
-  and several Chromecasts, and with `cast.framework` on a Nest Hub: session start, volume, HLS load, play, pause,
-  seek, resume and stop.
-
-**`mode: "chromecast"`:**
-
-- `chrome.cast.initialize`, `requestSession`, `session.stop`, `session.leave`, receiver availability, volume and
-  mute, and messages on custom namespaces (`sendMessage` and `addMessageListener`).
-- `chrome.cast.media`: load and queue media (`loadMedia`, `queueLoad`), control playback (play, pause, seek, stop,
-  volume, tracks, queue operations), receive media status updates, and watch for media with media listeners.
-- `cast.framework` (`CastContext`, `RemotePlayer`, `RemotePlayerController`) on top of the polyfill. Google's
-  loader scripts are blocked so they can't overwrite it.
-- Tested end to end with a Chromecast (YouTube Music), and with `cast.framework` media on a Nest Hub (load, play,
-  pause, seek, volume, and stopping from the picker).
-
-Discovery and connections are tested with Chromecast Ultra, Google Home Mini, Nest Hub, Nest Hub Max and speaker groups.
+Iframes and IPv6 are covered by unit tests only. The smoke test does not load an iframe.
 
 ## Staying compatible with Google's SDK
 
-In the default mode the page runs Google's SDK, which Google can change per Chrome major without an electron-cast
-release. `npm run canary` (also a weekly GitHub Actions job) downloads the SDK for Chrome stable, beta and dev and for
-the Chromium that Electron 45 ships, and checks as text, without running it, that it still uses the message types,
-fields, request types and presentation URLs electron-cast translates. A missing one fails; a new message type is a
-warning. `tools/sdk-canary-baseline.json` records what the SDK looked like when it last worked; refresh it with
-`node tools/sdk-canary.mjs --update-baseline`. Options: `--majors 158,159`, `--electron <major>|none`.
+The page runs Google's SDK, which Google can change per Chrome major without an electron-cast release. `npm run canary`
+(also a weekly GitHub Actions job) downloads the SDK for Chrome stable, beta and dev and for the Chromium that
+Electron 45 ships, and checks as text, without running it, that it still uses the message types, fields, request
+types and presentation URLs electron-cast translates. See [CONTRIBUTING.md](CONTRIBUTING.md#the-sdk-canary).
 
-## Lower layers
+## Known issue: top-level `await app.whenReady()` on Electron 45
 
-The package root exports every layer, if you want to use them without Electron:
+In an ES module main process, a top-level `await app.whenReady()` never resolves on Electron 45 (reproduced on 45.5.0
+on Windows). It is Electron's ESM startup, not electron-cast. Use `app.whenReady().then(...)`, as above.
+[Details](docs/TROUBLESHOOTING.md#the-app-hangs-at-top-level-await-appwhenready-electron-45).
 
-- `CastDiscovery`: mDNS discovery of Cast devices (IPv4 and IPv6).
-- `CastClient`: a Cast v2 connection over TLS (device authentication, connect, heartbeat, launch, stop, volume, app
-  messages).
-- `CastSessionService`: the session logic behind the Electron layer, with no Electron dependency.
+## Documentation
 
-See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
-
-To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
-More docs: [API reference](docs/API.md), [security notes](SECURITY.md), [changelog](CHANGELOG.md) and a
-[runnable example app](examples/electron-app).
+| | |
+|---|---|
+| [Getting started](docs/GETTING-STARTED.md) | Main, preload, sandboxing, CSP, iframes, packaging per OS |
+| [Guides](docs/guides/index.md) | Recipes: picker, restart rejoin, windows and iframes, custom receivers, audio devices, device authentication, low-level client, testing |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) and [FAQ](docs/FAQ.md) | No devices, auth failures, hangs, dropped sessions, with commands |
+| [API reference](docs/API.md) and [main-process API](docs/MAIN-API.md) | Every export |
+| [Architecture](docs/ARCHITECTURE.md), [design](docs/DESIGN.md), [Chromium map](docs/CHROMIUM-MAP.md) | How it works and which Chromium code it mirrors |
+| [Security](SECURITY.md) | Threat model, what crosses IPC, how to report a vulnerability |
+| [Contributing](CONTRIBUTING.md) | Setup, tests, the Chrome rule, releases |
 
 ## License
 
