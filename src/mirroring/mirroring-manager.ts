@@ -9,7 +9,10 @@ import type { CastDevice } from "../discovery/index.ts";
 import { MirroringActivity, type MirroringClient, type MirroringServiceFactory } from "./mirroring-activity.ts";
 import type { MirroringStats } from "./stats/statistics.ts";
 import { classifyLaunchFailure, type RouterIssues } from "../electron/issues.ts";
-import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringSource, type MirroringType } from "./routing.ts";
+import {
+  desktopMediaSource, mirroringSourceFor, offscreenTabSourceFor, sinkSupportsSource, tabMediaSource, type MirroringSource, type MirroringType,
+} from "./routing.ts";
+import type { OffscreenTabHandle, OffscreenTabOpener } from "./offscreen-tab.ts";
 
 /** `MediaCastMode` values this library implements besides the Presentation API. */
 export type MirroringCastMode = "tab_mirror" | "desktop_mirror";
@@ -36,9 +39,13 @@ export interface MirroringRoute {
   /** The source URN (`media_source`). */
   mediaSource: string;
   sinkId: string;
-  /** "Casting tab" or "Casting screen". */
+  /** "Casting tab", "Casting screen", or `Presenting (<host>)` for a presentation URL in an offscreen tab. */
   description: string;
-  castMode: MirroringCastMode;
+  /**
+   * `presentation` is a presentation URL rendered in an offscreen tab and mirrored (`MirroringType::kOffscreenTab`): the
+   * route a page's `PresentationRequest` made, which Chrome's dialog files under `MediaCastMode::PRESENTATION`.
+   */
+  castMode: MirroringCastMode | "presentation";
   appId: string;
   displayName: string;
   /** `MediaRoute::presentation_id`: what the route id carries after the prefix. */
@@ -47,6 +54,10 @@ export interface MirroringRoute {
   sessionId: string;
   /** True while the launch is in flight (`MediaRoute::is_connecting`). */
   isConnecting: boolean;
+  /**
+   * The page of the route (`frame_tree_node_id` of the activity): the page a tab route mirrors, or the page that started
+   * a presentation in an offscreen tab (not the offscreen tab).
+   */
   webContentsId?: number;
   /**
    * `MirroringMediaControllerHost::CanFreeze` / `IsFrozen` (`UIMediaSink::freeze_info`): whether the route can be
@@ -90,6 +101,11 @@ export interface MirroringManagerOptions {
   log?(level: "info" | "error", message: string): void;
   /** Where Chrome raises its issues for a mirroring route (`CastActivityManager`, `MediaRouterUI`); none without it. */
   issues?: RouterIssues;
+  /**
+   * `CastMirroringServiceHostFactory::GetForOffscreenTab`: opens the offscreen tab of a presentation URL. Without it a
+   * presentation URL cannot be cast (`startOffscreenPresentation` rejects).
+   */
+  openOffscreenTab?: OffscreenTabOpener;
   /**
    * `GetCastMirroringPlayoutDelay`: the `--cast-mirroring-target-playout-delay` switch, used for a route that does not
    * ask for a delay of its own (`MirroringActivity::StartSession`).
@@ -176,6 +192,28 @@ export class MirroringManager {
     return this.launchRoute(sinkId, source, source.tabId);
   }
 
+  /** Whether presentation URLs can be cast (an offscreen tab can be opened). */
+  get supportsOffscreenPresentations(): boolean {
+    return this.options.openOffscreenTab !== undefined;
+  }
+
+  /**
+   * `CastMediaRouteProvider::CreateRoute` for an ordinary presentation URL, Chrome's 1-UA mode: `CastMediaSource::
+   * FromMediaSource` makes it a tab mirroring source, `CastActivityManager::DoLaunchSession` adds a `MirroringActivity`
+   * for it (`MirroringType::kOffscreenTab`) whose host opens an offscreen tab on the URL (`CastMirroringServiceHostFactory::
+   * GetForOffscreenTab`, `OpenOffscreenTab`) and mirrors that tab. `frameWebContentsId` is the page that asked
+   * (`frame_tree_node_id`): a route it already has is ended, as for any launch. The route's `presentationId` is the id the
+   * tab's receiver registers under, which is the id of the page's `PresentationConnection`.
+   */
+  async startOffscreenPresentation(sinkId: string, request: { url: string; frameWebContentsId: number }): Promise<MirroringRoute> {
+    if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
+    const source = offscreenTabSourceFor(request.url);
+    // CreateRoute: "Invalid source" (NO_SUPPORTED_PROVIDER)
+    if (source === undefined) throw new MirroringRouteError("no_supported_provider", "Invalid source");
+    if (this.options.openOffscreenTab === undefined) throw new MirroringRouteError("unable_to_cast", "no offscreen tab can be opened");
+    return this.launchRoute(sinkId, source, request.frameWebContentsId);
+  }
+
   /** `ui` is set when the route was requested from the dialog (`MediaRouterUI::CreateRoute`), as the app's own UI does. */
   private async launchRoute(sinkId: string, source: MirroringSource, tabId: number | undefined, ui?: { castMode: MirroringCastMode; withAudio: boolean }): Promise<MirroringRoute> {
     const options = { webContentsId: tabId };
@@ -198,7 +236,7 @@ export class MirroringManager {
       if (entry.route.sinkId === sinkId) entry.activity.stopMirroring();
     }
     // `CastActivityManager::DoLaunchSession`: "If there is a route from this frame already, stop it."
-    if (source.type === "tab") this.terminateRoutesOfTab(options.webContentsId!);
+    if (source.type !== "desktop") this.terminateRoutesOfTab(options.webContentsId!);
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
     // `CastActivityManager::LaunchSession` -> `MaybeShowIssueAtLaunch`
@@ -206,11 +244,12 @@ export class MirroringManager {
     const launched: { failure?: ReturnType<typeof classifyLaunchFailure> } = {};
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
     const entry = { stats: undefined } as unknown as Entry;
+    let offscreenTab: OffscreenTabHandle | undefined;
     const client = this.options.createClient(device);
     const activity = new MirroringActivity({
       sink: device,
       source,
-      webContentsId: source.type === "tab" ? options.webContentsId : undefined,
+      webContentsId: source.type !== "desktop" ? options.webContentsId : undefined,
       client,
       createService: this.options.createService,
       commandLine: this.options.commandLine,
@@ -246,6 +285,10 @@ export class MirroringManager {
         }
       },
       onStop: () => {
+        // The activity goes, and its host with it, which owns the offscreen tab (`offscreen_tab_`)
+        const tab = offscreenTab;
+        offscreenTab = undefined;
+        tab?.destroy();
         if (this.entries.get(routeId) === entry) {
           this.entries.delete(routeId);
           if (entry.stats !== undefined) this.lastEnded = { routeId, stats: entry.stats };
@@ -272,6 +315,27 @@ export class MirroringManager {
     entry.activity = activity;
     entry.route = this.routeOf(routeId, source.type, activity);
     this.entries.set(routeId, entry);
+    // `AddMirroringActivity` -> `CreateMirroringServiceHost`: the host is made with the activity, before the launch is
+    // answered, so the offscreen tab loads its page while the receiver starts its app. The tab going away
+    // (`CastMirroringServiceHost::WebContentsDestroyed`) ends the route even when no session runs yet.
+    if (source.type === "offscreen_tab") {
+      try {
+        offscreenTab = this.options.openOffscreenTab!({
+          url: source.id,
+          presentationId,
+          onDestroyed: () => {
+            offscreenTab = undefined;
+            activity.stopMirroring();
+          },
+        });
+        source.tabId = offscreenTab.webContentsId;
+        log("info", `Opened an offscreen tab for ${hostOf(source.id)}.`);
+      } catch (err) {
+        activity.stopMirroring();
+        throw new MirroringRouteError("unable_to_cast", err instanceof Error ? err.message : String(err));
+      }
+      if (activity.state === "stopped") throw new MirroringRouteError("unable_to_cast", "the offscreen tab closed while it was opened");
+    }
     this.notify();
     try {
       await activity.start();
@@ -412,7 +476,7 @@ export class MirroringManager {
       sinkId: activity.sink.id,
       presentationId: routeId.slice(ROUTE_ID_PREFIX.length).split("/")[0]!,
       description: activity.description,
-      castMode: type === "tab" ? "tab_mirror" : "desktop_mirror",
+      castMode: type === "tab" ? "tab_mirror" : type === "desktop" ? "desktop_mirror" : "presentation",
       appId: activity.app?.appId ?? activity.source.appInfos[0]!.appId,
       displayName: activity.app?.displayName ?? "",
       sessionId: activity.app?.sessionId ?? "",
@@ -420,5 +484,14 @@ export class MirroringManager {
       ...(activity.webContentsId !== undefined ? { webContentsId: activity.webContentsId } : {}),
       freezeInfo: { canFreeze: activity.canFreeze, isFrozen: activity.isFrozen },
     };
+  }
+}
+
+/** The host of a presentation URL, for the log (the URL itself may carry what the page put in its query). */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "an invalid URL";
   }
 }

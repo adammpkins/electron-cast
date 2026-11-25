@@ -90,6 +90,16 @@ export interface SiteMirroringHooks {
    * (`routes_by_frame_`) is a mirroring one; undefined otherwise.
    */
   sinkOfFrame(senderId: number): string | undefined;
+  /**
+   * 1-UA mode: an ordinary presentation URL on a Cast sink. `available` is whether an offscreen tab can be opened.
+   * `start` is `CastActivityManager::LaunchSession` for such a source (the URL is rendered in an offscreen tab that is
+   * mirrored to the sink) and then `PresentationFrame::ConnectToPresentation` for the local route: it resolves with
+   * the page's connection to the tab's receiver, which starts out connecting.
+   */
+  offscreenTab?: {
+    available(): boolean;
+    start(request: { senderId: number; origin: string; url: string; deviceId: string }): Promise<PresentationConnectionHandle>;
+  };
 }
 
 /** A live getAvailability watch of one sender. */
@@ -277,7 +287,12 @@ export class CastPresentationHandler {
 
   /** The sources of a request this handler can serve (`cast-dial:` ones only when it has DIAL). */
   private choose(urls: string[], origin: string): ReturnType<typeof chooseSource> {
-    return chooseSource(urls, { dial: this.dial !== undefined, mirroring: this.mirroring?.allowed(origin) === true });
+    return chooseSource(urls, {
+      dial: this.dial !== undefined,
+      mirroring: this.mirroring?.allowed(origin) === true,
+      // not gated by origin: `CastMediaRouteProvider::GetOrigins` restricts only site-initiated mirroring sources
+      offscreenTab: this.mirroring?.offscreenTab?.available() === true,
+    });
   }
 
   /**
@@ -322,6 +337,7 @@ export class CastPresentationHandler {
     if (choice.kind === "no_sink") throw new PresentationError("NotFoundError", "No screens found.");
     if (choice.kind === "unsupported") throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
     if (choice.kind === "launch" && choice.mirroring === true) return this.startSiteMirroring(req, choice);
+    if (choice.kind === "launch" && choice.offscreenTab === true) return this.startOffscreenTab(req, choice);
     const parsed = choice.kind === "launch" ? choice.parsed : null;
     const castUrl = choice.kind === "launch" ? choice.url : "";
     const dialUrl = choice.dial?.url ?? null;
@@ -437,6 +453,40 @@ export class CastPresentationHandler {
     return conn;
   }
 
+  /**
+   * A request whose Cast source is an ordinary presentation URL (1-UA mode). The sinks offered are the Cast sinks that
+   * have a streaming app (`CastMediaRouteProvider::StartObservingMediaSinks` with `CastMediaSourceForTabMirroring`), and
+   * with a `cast-dial:` URL next to it the DIAL sinks that have its app; the sink chosen decides the source.
+   */
+  private async startOffscreenTab(req: PresentationRequestInfo & { deviceId?: string }, choice: LaunchableUrl & { dial?: { url: string; app: string } }): Promise<PresentationConnectionHandle> {
+    const hooks = this.mirroring!.offscreenTab!;
+    const { parsed } = choice;
+    const sender = this.senderOf(req.senderId, req.origin);
+    const request = {
+      appId: parsed.appId,
+      capabilities: [],
+      apps: parsed.appInfos.map(({ appId, requiredCapabilities }) => ({ appId, requiredCapabilities })),
+      appAvailability: true,
+      timeoutMs: 60000,
+      ...(req.deviceId === undefined ? {} : { deviceId: req.deviceId }),
+    };
+    const res = choice.dial !== undefined
+      ? await this.service.handle(sender, "requestSink", { ...request, dialApp: choice.dial.app, pickOnly: true })
+      : await this.service.handle(sender, req.deviceId === undefined ? "pickSink" : "pickSinkOnDevice", request);
+    if (!res.ok) throw this.failure(res);
+    const value = res.value as { dialSink?: CastDevice; pickedSink?: CastDevice } | null;
+    if (choice.dial !== undefined && value?.dialSink !== undefined) return this.startDial(req, choice.dial.url, value.dialSink);
+    const device = value?.pickedSink;
+    if (device === undefined) throw new PresentationError("OperationError", "No receiver was chosen");
+    try {
+      return await hooks.start({ senderId: req.senderId, origin: req.origin, url: choice.url, deviceId: device.id });
+    } catch (err) {
+      if (err instanceof PresentationError) throw err;
+      // any failed route creation is PresentationErrorType::UNKNOWN, which Blink raises as OperationError
+      throw new PresentationError("OperationError", err instanceof Error ? err.message : String(err));
+    }
+  }
+
   /** A mirroring route ended (`RemoveActivity` with `TERMINATED`): the connections of the page that started it end too. */
   siteMirroringRouteEnded(routeId: string): void {
     for (const state of this.senders.values()) {
@@ -455,6 +505,11 @@ export class CastPresentationHandler {
     // A mirroring route cannot be joined: `FindActivityForSessionJoin` only finds a `cast-session_` id and
     // `FindActivityForAutoJoin` only an app activity. (Joining by auto-join would otherwise launch the streaming app anew.)
     if (choice.mirroring === true) throw new PresentationError("NotFoundError", "No matching route");
+    // A presentation in an offscreen tab is a local presentation, joined by its id before a provider is asked
+    // (`ControllerPresentationServiceDelegateImpl::ReconnectPresentation`, done by the caller); an id that is not one
+    // finds no activity here. Not ported: `JoinSession` with "auto-join" from a page whose tab is mirrored, which
+    // would launch the URL on that sink.
+    if (choice.offscreenTab === true) throw new PresentationError("NotFoundError", "No matching route");
     const { parsed } = choice;
     const castUrl = choice.url;
     const sender = this.senderOf(req.senderId, req.origin);

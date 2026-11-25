@@ -4,7 +4,7 @@
 // ControllerPresentationConnection (third_party/blink/renderer/modules/presentation/presentation_connection.cc).
 import { PresentationError } from "../presentation-handler.ts";
 import type { PresentationConnectionHandle } from "../presentation-handler.ts";
-import type { ControllerEnd, ControllerPort, PresentationMessage } from "./local-presentation.ts";
+import type { ControllerEnd, ControllerPort, LocalPresentationManager, PresentationMessage } from "./local-presentation.ts";
 import { isWiredDisplaySource } from "./displays.ts";
 import { WiredDisplayError, type WiredDisplayProvider } from "./provider.ts";
 
@@ -27,10 +27,10 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
   private state: "connecting" | "connected" | "ended" = "connecting";
   private queue: PresentationMessage[] = [];
   private msgHandler: ((message: PresentationMessage) => void) | null = null;
-  private readonly owner: WiredDisplayControllers;
+  private readonly owner: LocalControllers;
   private readonly senderId: number;
 
-  constructor(owner: WiredDisplayControllers, senderId: number, id: string, url: string) {
+  constructor(owner: LocalControllers, senderId: number, id: string, url: string) {
     this.owner = owner;
     this.senderId = senderId;
     this.id = id;
@@ -71,7 +71,7 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
   terminate(): void {
     if (this.state !== "connected") return;
     try {
-      this.owner.provider.terminateRoute(this.id);
+      this.owner.terminateRoute(this.id);
     } catch {
       // ROUTE_NOT_FOUND: already gone, and its termination was reported
     }
@@ -119,12 +119,85 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
   }
 }
 
-/** Starts, reconnects and tracks the controller connections to wired display presentations. */
-export class WiredDisplayControllers {
-  readonly provider: WiredDisplayProvider;
+/**
+ * The controller connections of local presentations, whatever provider made the route: the part of
+ * `ControllerPresentationServiceDelegateImpl` and `PresentationFrame` that is the same for every route with
+ * `is_local_presentation()` (a wired display's, and a Cast route in 1-UA mode, whose receiver is an offscreen tab).
+ */
+export class LocalControllers {
+  /** The local presentations: where controller and receiver connections meet. */
+  readonly local: LocalPresentationManager;
+  /** `MediaRouter::TerminateRoute` for the route of a presentation id; throws when there is none. */
+  readonly terminateRoute: (presentationId: string) => void;
   private readonly bySender = new Map<number, Set<LocalControllerConnection>>();
 
+  constructor(local: LocalPresentationManager, terminateRoute: (presentationId: string) => void) {
+    this.local = local;
+    this.terminateRoute = terminateRoute;
+  }
+
+  /**
+   * `ControllerPresentationServiceDelegateImpl::ReconnectPresentation`: a local presentation is joined again from any
+   * frame when one of the request's URLs is the route's source; otherwise the provider's JoinRoute answers unknown error.
+   */
+  reconnect(req: { urls: readonly string[]; senderId: number }, presentationId: string): LocalConnectionHandle {
+    const route = this.local.getRoute(presentationId);
+    if (!this.local.isLocalPresentation(presentationId) || route === null) {
+      throw new PresentationError("NotFoundError", "Join should be handled by the presentation manager");
+    }
+    const wanted = normalize(route.mediaSource);
+    if (!req.urls.some((u) => normalize(u) === wanted)) {
+      throw new PresentationError("NotFoundError", "No presentation with this URL and id");
+    }
+    return this.attach(req.senderId, { id: presentationId, url: route.mediaSource }, route);
+  }
+
+  /**
+   * `PresentationFrame::ConnectToPresentation` for a local route: `RegisterLocalPresentationController`. The connection
+   * is returned connecting, as Blink returns it; it connects once the receiver page has used `navigator.presentation`.
+   */
+  attach(senderId: number, info: { id: string; url: string }, route: { id: string; mediaSource: string; sinkId: string }): LocalConnectionHandle {
+    const conn = new LocalControllerConnection(this, senderId, info.id, info.url);
+    const port = this.local.registerController(info, senderId, conn, route);
+    if (port === null) throw new PresentationError("NotFoundError", "The presentation has another origin");
+    conn.port = port;
+    let set = this.bySender.get(senderId);
+    if (set === undefined) {
+      set = new Set();
+      this.bySender.set(senderId, set);
+    }
+    set.add(conn);
+    return conn;
+  }
+
+  /** @internal Called by connections when they end. */
+  forget(conn: LocalControllerConnection): void {
+    this.bySender.get(conn.frameKey)?.delete(conn);
+    // A closed connection no longer waits for the receiver (CloseConnection -> UnregisterLocalPresentationController)
+    this.local.unregisterController(conn.id, conn.frameKey);
+  }
+
+  /**
+   * The page's frame went away or navigated (`PresentationFrame::Reset`): its controllers are unregistered and nothing
+   * more. The receiver stays, and so does its connection (Chrome sets no disconnect handler there).
+   */
+  senderGone(senderId: number): void {
+    const set = this.bySender.get(senderId);
+    this.bySender.delete(senderId);
+    if (set === undefined) return;
+    for (const conn of set) {
+      this.local.unregisterController(conn.id, senderId);
+      conn.detach();
+    }
+  }
+}
+
+/** Starts, reconnects and tracks the controller connections to wired display presentations. */
+export class WiredDisplayControllers extends LocalControllers {
+  readonly provider: WiredDisplayProvider;
+
   constructor(provider: WiredDisplayProvider) {
+    super(provider.local, (id) => provider.terminateRoute(id));
     this.provider = provider;
   }
 
@@ -149,57 +222,6 @@ export class WiredDisplayControllers {
       throw err;
     }
     return this.attach(req.senderId, { id: presentationId, url: source }, route);
-  }
-
-  /**
-   * `ControllerPresentationServiceDelegateImpl::ReconnectPresentation`: a local presentation is joined again from any
-   * frame when one of the request's URLs is the route's source; otherwise the provider's JoinRoute answers unknown error.
-   */
-  reconnect(req: { urls: readonly string[]; senderId: number }, presentationId: string): LocalConnectionHandle {
-    const route = this.provider.local.getRoute(presentationId);
-    if (!this.provider.local.isLocalPresentation(presentationId) || route === null) {
-      throw new PresentationError("NotFoundError", "Join should be handled by the presentation manager");
-    }
-    const wanted = normalize(route.mediaSource);
-    if (!req.urls.some((u) => normalize(u) === wanted)) {
-      throw new PresentationError("NotFoundError", "No presentation with this URL and id");
-    }
-    return this.attach(req.senderId, { id: presentationId, url: route.mediaSource }, route);
-  }
-
-  private attach(senderId: number, info: { id: string; url: string }, route: { id: string; mediaSource: string; sinkId: string }): LocalConnectionHandle {
-    const conn = new LocalControllerConnection(this, senderId, info.id, info.url);
-    const port = this.provider.local.registerController(info, senderId, conn, route);
-    if (port === null) throw new PresentationError("NotFoundError", "The presentation has another origin");
-    conn.port = port;
-    let set = this.bySender.get(senderId);
-    if (set === undefined) {
-      set = new Set();
-      this.bySender.set(senderId, set);
-    }
-    set.add(conn);
-    return conn;
-  }
-
-  /** @internal Called by connections when they end. */
-  forget(conn: LocalControllerConnection): void {
-    this.bySender.get(conn.frameKey)?.delete(conn);
-    // A closed connection no longer waits for the receiver (CloseConnection -> UnregisterLocalPresentationController)
-    this.provider.local.unregisterController(conn.id, conn.frameKey);
-  }
-
-  /**
-   * The page's frame went away or navigated (`PresentationFrame::Reset`): its controllers are unregistered and nothing
-   * more. The receiver window stays, and so does its connection (Chrome sets no disconnect handler there).
-   */
-  senderGone(senderId: number): void {
-    const set = this.bySender.get(senderId);
-    this.bySender.delete(senderId);
-    if (set === undefined) return;
-    for (const conn of set) {
-      this.provider.local.unregisterController(conn.id, senderId);
-      conn.detach();
-    }
   }
 }
 

@@ -8,11 +8,18 @@
  *    `GetMirroringNamespace`, `GetScrubbedLogMessage`),
  *  - `chrome/app/media_router_strings.grdp` (the route descriptions).
  */
+import { isWiredDisplaySource } from "../electron/wired-display/displays.ts";
 import { CAST_REMOTING_NAMESPACE, CAST_WEBRTC_NAMESPACE } from "./protocol/constants.ts";
 import type { SessionType } from "./session-host.ts";
 
-/** `MirroringType` (mirroring_activity.cc); `kOffscreenTab` is Chrome's presentation-as-mirroring and is not supported. */
-export type MirroringType = "tab" | "desktop";
+/**
+ * `MirroringType` (mirroring_activity.h). `offscreen_tab` is `kOffscreenTab`, "Used for Presentation API 1UA mode": the
+ * presentation URL is rendered in an offscreen tab and that tab is mirrored.
+ */
+export type MirroringType = "tab" | "desktop" | "offscreen_tab";
+
+/** `kMaxCastPresentationUrlLength` (cast_media_source.cc): a longer URL is no Cast source. */
+const MAX_CAST_PRESENTATION_URL_LENGTH = 64 * 1024;
 
 /** `openscreen::cast::GetCastStreamingAudioVideoAppId` and `GetCastStreamingAudioOnlyAppId` (cast_streaming_app_ids.h). */
 export const CAST_STREAMING_AUDIO_VIDEO_APP_ID = "0F5096E8";
@@ -84,6 +91,7 @@ export interface MirroringSource {
   /**
    * A site-initiated source keeps its Cast URL as `id` (as `CastMediaSource` keeps the source id), so the page it
    * captures cannot be read from the id: this is the `webContents.id` of the tab (`frame_tree_node_id_` of the activity).
+   * For an offscreen tab it is the `webContents.id` of that tab (`offscreen_tab_->web_contents()`), set once it is open.
    */
   tabId?: number;
 }
@@ -107,6 +115,29 @@ export function mirroringSourceFor(sourceId: string): MirroringSource | undefine
     return { id: sourceId, type: "desktop", appInfos, siteRequestedAudioCapture: true };
   }
   return undefined;
+}
+
+/**
+ * Whether an URL is a source the Cast provider serves in 1-UA mode. `CastMediaSource::FromMediaSource`: a valid URL of
+ * at most `kMaxCastPresentationUrlLength` that is neither `cast:` nor the legacy Cast form and whose scheme is http or
+ * https ("Arbitrary https URLs are supported via 1-UA mode which uses tab mirroring"). The mirroring host then opens an
+ * offscreen tab only for `IsValidPresentationUrl` (`CastMirroringServiceHostFactory::GetForOffscreenTab`), and the
+ * controller refuses any other URL before it reaches a provider (`ControllerPresentationServiceDelegateImpl`): https,
+ * or http on localhost. Together that is `IsValidStandardPresentationSource`.
+ */
+export function isOffscreenTabSource(url: string): boolean {
+  return url.length <= MAX_CAST_PRESENTATION_URL_LENGTH && isWiredDisplaySource(url);
+}
+
+/**
+ * `CastMediaSource::FromMediaSource` for such an URL: `CastMediaSourceForTabMirroring(source.id())`, so both streaming
+ * apps with the URL as the source id; `MirroringActivity`'s `GetMirroringType` makes it `kOffscreenTab`. `frameId` is
+ * the `webContents.id` of the page that started the presentation (`frame_tree_node_id` of `CreateRoute`); the tab that
+ * is captured is opened later and put in `tabId`.
+ */
+export function offscreenTabSourceFor(url: string): MirroringSource | undefined {
+  if (!isOffscreenTabSource(url)) return undefined;
+  return { id: url, type: "offscreen_tab", appInfos: [streamingApp(), streamingAudioApp()], siteRequestedAudioCapture: true };
 }
 
 /** `CastActivityManager::ChooseAppId`: the first app the sink can run, else the first one. */
@@ -139,8 +170,20 @@ export function sessionTypeFor(source: MirroringSource, sinkCapabilities: number
   return hasAudio && hasVideo ? "audio_video" : hasAudio ? "audio_only" : "video_only";
 }
 
-/** `MirroringActivity::GetRouteDescription` with `IDS_MEDIA_ROUTER_CASTING_TAB` / `_DESKTOP`. */
-export function routeDescription(type: MirroringType): string {
+/**
+ * `MirroringActivity::GetRouteDescription` with `IDS_MEDIA_ROUTER_CASTING_TAB` / `_DESKTOP`, and for an offscreen tab
+ * `IDS_MEDIA_ROUTER_PRESENTATION_ROUTE_DESCRIPTION` with the host of the source URL: `Presenting (<host>)`.
+ */
+export function routeDescription(type: MirroringType, sourceId = ""): string {
+  if (type === "offscreen_tab") {
+    let host = "";
+    try {
+      host = new URL(sourceId).hostname;
+    } catch {
+      // an invalid URL has an empty host
+    }
+    return `Presenting (${host})`;
+  }
   return type === "tab" ? "Casting tab" : "Casting screen";
 }
 

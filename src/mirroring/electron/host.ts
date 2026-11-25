@@ -87,6 +87,12 @@ export interface ElectronMirroringApi {
    * permission is not checked.
    */
   systemPreferences?: { getMediaAccessStatus(mediaType: "screen"): string };
+  /**
+   * `screen`: its primary display gives the size of the offscreen tab a presentation URL is rendered in
+   * (`CastMirroringServiceHost::GetCaptureResolutionConstraint`). Without it the tab is 1920x1080, Chrome's size when it
+   * has no screen.
+   */
+  screen?: { getPrimaryDisplay(): { size: { width: number; height: number }; scaleFactor?: number } };
 }
 
 export interface ElectronMirroringOptions {
@@ -218,7 +224,9 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
 
         let capture: CaptureSource;
         let mintTabSource: (() => CaptureSource) | undefined;
-        if (source.type === "tab") {
+        // An offscreen tab is captured as a tab is: `OpenOffscreenTab` sets `source_media_id_` to
+        // `BuildMediaIdForWebContents(offscreen_tab_->web_contents())` and observes those contents.
+        if (source.type !== "desktop") {
           const tabId = source.tabId ?? Number(source.id.slice(source.id.lastIndexOf(":") + 1));
           const target = e.webContents.fromId(tabId);
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
