@@ -45,6 +45,8 @@ export class OffscreenPresentations {
   readonly openOffscreenTab: OffscreenTabOpener;
   /** Presentation id -> route id, for the routes that are up. */
   private readonly routeIds = new Map<string, string>();
+  /** Presentation id -> the open tab. */
+  private readonly tabs = new Map<string, OffscreenTabHandle>();
   private mirroring: MirroringManager | undefined;
   private host: ReceiverHost | undefined;
 
@@ -55,15 +57,11 @@ export class OffscreenPresentations {
       void this.mirroring?.terminate(routeId);
     };
     this.local = new LocalPresentationManager({
-      // A receiver connection's terminate() (`ReceiverPresentationConnection::TerminateInternal` closes the receiver's
-      // page, and the tab going away stops the mirroring session): the route ends, which destroys the tab.
-      terminateRequested: (id) => {
-        try {
-          terminateRoute(id);
-        } catch {
-          // no route yet or no more: the tab's own end follows
-        }
-      },
+      // A receiver connection's terminate(): `ReceiverPresentationConnection::TerminateInternal` closes the receiver's
+      // page (`OffscreenTab::CloseContents` destroys the tab), and the tab going away stops the mirroring session
+      // (`CastMirroringServiceHost::WebContentsDestroyed`), which ends the route. This holds while the route is still
+      // launching, too.
+      terminateRequested: (id) => this.tabs.get(id)?.destroy(),
     });
     // `MediaRouter::TerminateRoute` from a controller's terminate()
     this.controllers = new LocalControllers(this.local, terminateRoute);
@@ -80,15 +78,22 @@ export class OffscreenPresentations {
           return this.host.openOffscreenTab(request);
         };
     const screen = typeof open === "function" ? undefined : open.screen;
-    this.openOffscreenTab = (request) => openTab({
-      url: request.url,
-      presentationId: request.presentationId,
-      size: captureResolutionConstraint(screen),
-      onDestroyed: request.onDestroyed,
-      receiverCreated: (info, callback) => this.local.receiverCreated(info, callback),
-      receiverReset: (id) => this.local.receiverTerminated(id),
-      ...(log === undefined ? {} : { log }),
-    });
+    this.openOffscreenTab = (request) => {
+      const tab = openTab({
+        url: request.url,
+        presentationId: request.presentationId,
+        size: captureResolutionConstraint(screen),
+        onDestroyed: () => {
+          if (this.tabs.get(request.presentationId) === tab) this.tabs.delete(request.presentationId);
+          request.onDestroyed();
+        },
+        receiverCreated: (info, callback) => this.local.receiverCreated(info, callback),
+        receiverReset: (id) => this.local.receiverTerminated(id),
+        ...(log === undefined ? {} : { log }),
+      });
+      this.tabs.set(request.presentationId, tab);
+      return tab;
+    };
   }
 
   /** The manager whose routes these are; its route list is watched so that an ended route ends its connections. */
@@ -124,5 +129,6 @@ export class OffscreenPresentations {
     this.host?.dispose();
     this.host = undefined;
     this.routeIds.clear();
+    this.tabs.clear();
   }
 }
