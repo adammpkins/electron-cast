@@ -53,7 +53,7 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
   const discovery = Object.assign(new EventEmitter(), { devices: () => [{ ...LOOPBACK_TV }], async start() {}, stop() {} });
   const cast = createCastManager({
     ipcMain, discovery, createClient: () => client, selectDevice: async () => null, presentation: false, channel: "electron-cast-mirroring-smoke",
-    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, desktopAudio: process.env.SMOKE_DESKTOP_AUDIO || undefined, log: (l, m) => console.log(`smoke: mirroring ${l}: ${m}`) },
+    mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents }, engineModulePath, log: (l, m) => console.log(`smoke: mirroring ${l}: ${m}`) },
   });
   await cast.start();
 

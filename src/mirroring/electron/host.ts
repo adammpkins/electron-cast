@@ -70,8 +70,6 @@ export interface ElectronMirroringOptions {
    * list is VP8 and VP9 (`encoding_support.cc`); default none, so a stream is VP8 unless you opt in.
    */
   extraVideoCodecs?: ("vp9")[];
-  /** Desktop audio capture: `loopback` keeps local playback, `loopbackWithMute` mutes it. Default as Chrome: the first on Windows, the second elsewhere. */
-  desktopAudio?: "loopback" | "loopbackWithMute";
   /** Absolute path of the engine entry (`engine-process.js` next to this file in the built package). */
   engineModulePath?: string;
   /** Environment for the session host (`CHROME_MIRRORING_PLAYOUT_DELAY`); default none. */
@@ -94,7 +92,8 @@ const PAGE = "<!doctype html><meta charset=\"utf-8\"><title>electron-cast captur
 /** Codec strings probed in the agent window (`GetCodecParameterString` for 720p at 30 fps). */
 const PROBE: Record<string, string> = { vp8: "vp8", vp9: "vp09.00.40.08" };
 
-export function createElectronMirroringServiceFactory(options: ElectronMirroringOptions): { factory: MirroringServiceFactory; dispose(): void } {
+/** `platform` is for tests only: Chrome's choice of desktop loopback device depends on it and is not an app setting. */
+export function createElectronMirroringServiceFactory(options: ElectronMirroringOptions, platform: string = process.platform): { factory: MirroringServiceFactory; dispose(): void } {
   const e = options.electron;
   const log = options.log ?? (() => {});
   const live = new Set<() => void>();
@@ -182,7 +181,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           // CastMirroringServiceHost::GetDesktopAudioLoopbackDeviceId: Windows keeps local playback
           // (kLoopbackInputDeviceId, kCastDesktopMirroringKeepLocalAudio is on by default there, as muting the endpoint
           // silences the loopback on some drivers); every other platform mutes it (kLoopbackWithMuteDeviceId).
-          const audioMode = options.desktopAudio ?? (process.platform === "win32" ? "loopback" : "loopbackWithMute");
+          const audioMode = platform === "win32" ? "loopback" : "loopbackWithMute";
           wc.session.setDisplayMediaRequestHandler((_request, callback) => callback(withAudio ? { video: chosen, audio: audioMode } : { video: chosen }));
           capture = { kind: "desktop", sourceId: id, audio: audioMode };
         }

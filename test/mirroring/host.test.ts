@@ -134,9 +134,9 @@ test("host: a mirrored tab is silent locally for the session and unmuted after, 
 });
 
 test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep local audio on Windows, mute elsewhere", async () => {
-  for (const [option, expected] of [[undefined, process.platform === "win32" ? "loopback" : "loopbackWithMute"], ["loopback", "loopback"], ["loopbackWithMute", "loopbackWithMute"]] as const) {
+  for (const [platform, expected] of [["win32", "loopback"], ["darwin", "loopbackWithMute"], ["linux", "loopbackWithMute"]] as const) {
     const { electron, state } = fakeElectron();
-    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", desktopAudio: option });
+    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, platform);
     host.factory(
       { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
       {},
