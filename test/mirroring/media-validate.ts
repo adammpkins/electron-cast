@@ -30,6 +30,44 @@ export function validateVp8Frame(data: Uint8Array): Vp8FrameInfo | undefined {
 }
 
 /**
+ * The start of a VP9 frame's uncompressed header (VP9 Bitstream Specification v0.6, section 6.2): frame_marker 2,
+ * the profile, show_existing_frame, frame_type (0 is a key frame), show_frame, error_resilient_mode; a key frame then
+ * has the sync code 0x49 0x83 0x42, color_config and frame_size (width and height minus 1, 16 bits each). The first
+ * frame of a superframe is the one read.
+ */
+export function validateVp9Frame(data: Uint8Array): Vp8FrameInfo | undefined {
+  let bit = 0;
+  const read = (n: number): number | undefined => {
+    let v = 0;
+    for (let i = 0; i < n; i++, bit++) {
+      const byte = data[bit >> 3];
+      if (byte === undefined) return undefined;
+      v = (v << 1) | ((byte >> (7 - (bit & 7))) & 1);
+    }
+    return v;
+  };
+  if (read(2) !== 2) return undefined;
+  const profile = read(1)! | (read(1)! << 1);
+  if (profile === 3 && read(1) !== 0) return undefined;
+  if (read(1) === 1) return { key: false }; // show_existing_frame
+  const key = read(1) === 0;
+  if (read(2) === undefined) return undefined; // show_frame, error_resilient_mode
+  if (!key) return { key };
+  if (read(8) !== 0x49 || read(8) !== 0x83 || read(8) !== 0x42) return undefined;
+  if (profile >= 2) read(1); // ten_or_twelve_bit
+  const colorSpace = read(3);
+  if (colorSpace !== 7) {
+    read(1); // color_range
+    if (profile === 1 || profile === 3) read(3); // subsampling_x, subsampling_y, reserved_zero
+  } else if (profile === 1 || profile === 3) {
+    read(1); // reserved_zero
+  }
+  const w = read(16), h = read(16);
+  if (w === undefined || h === undefined) return undefined;
+  return { key, width: w + 1, height: h + 1 };
+}
+
+/**
  * RFC 6716 section 3.1 "The TOC Byte": config (5 bits), stereo (1 bit), frame count code (2 bits). Code 3 carries a
  * frame count byte (1..48 frames); the packet may not be empty.
  */

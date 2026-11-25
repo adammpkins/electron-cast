@@ -184,8 +184,8 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   assert.ok(s.validVideoFrames >= 30, `only ${s.validVideoFrames} valid ${label} frames reached the receiver`);
   // Sender-side letterboxing (resolution_change_policy fixed_aspect_ratio, which a receiver that cannot scale gets): the
   // stream keeps the aspect ratio of the maximum, 16:9, whatever shape the page or screen is.
-  // The fake receiver reads the picture size from VP8 and H.264 key frames only.
-  if (codec !== "vp9") assert.ok(s.videoSizes.size > 0, "no key frame told its size");
+  // The fake receiver reads the picture size from the key frames.
+  assert.ok(s.videoSizes.size > 0, "no key frame told its size");
   for (const size of s.videoSizes) {
     const [w, h] = size.split("x").map(Number);
     assert.ok(Math.abs(w / h - 16 / 9) < 0.02, `a ${size} frame is not 16:9`);
@@ -196,8 +196,8 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   // A key frame is asked for once at the start; more would be bitrate spikes. (libvpx VP9 cuts a key frame by itself at a
   // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.) A new
   // capture size starts with a key frame too: on a slow machine the encoder is overloaded and the capture size steps
-  // down (VideoCaptureOracle). So: one key frame per picture size seen, and one spare. VP9 sizes are not read.
-  const keyFrameLimit = (codec === "vp9" ? 1 : Math.max(1, s.videoSizes.size)) + 1;
+  // down (VideoCaptureOracle). So: one key frame per picture size seen, and one spare.
+  const keyFrameLimit = Math.max(1, s.videoSizes.size) + 1;
   assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= keyFrameLimit, `${s.videoKeyFrames} key frames reached the receiver (sizes ${[...s.videoSizes].join(" ")})`);
   pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder)${audioWanted ? " and Opus" : ""} frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
 

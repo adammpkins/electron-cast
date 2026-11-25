@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { VideoCodec } from "../../src/mirroring/protocol/constants.ts";
 import { createEncodingSupport, hardwareCodecsToProbe, encodingPolicyFromCommandLine, softwareCodecsToProbe, SUPPORTED_VIDEO_CODECS } from "../../src/mirroring/encoding-support.ts";
 import { getCodecParameterString } from "../../src/mirroring/mirror-settings.ts";
-import { validateH264Frame } from "./media-validate.ts";
+import { validateH264Frame, validateVp9Frame } from "./media-validate.ts";
 import { makeH264Frame } from "./fake-backend.ts";
 import { shouldForceLetterboxing } from "../../src/mirroring/mirroring-activity.ts";
 import { startHarness, sleep, type Harness } from "./session-harness.ts";
@@ -282,4 +282,16 @@ test("a Nest Hub is always letterboxed, unless --disable-cast-letterboxing", () 
   assert.equal(shouldForceLetterboxing("Google Nest Hub Max", cl()), true);
   assert.equal(shouldForceLetterboxing("Chromecast Ultra", cl()), false);
   assert.equal(shouldForceLetterboxing("Google Nest Hub", cl("--disable-cast-letterboxing")), false);
+});
+
+test("the VP9 check reads a key frame's size from the uncompressed header and tells delta frames apart", () => {
+  // frame_marker 2, profile 0, a shown key frame; sync code; BT.709, studio range; 1919 and 1079 (1920x1080).
+  const key = Uint8Array.from([0x82, 0x49, 0x83, 0x42, 0x40, 0x77, 0xf0, 0x43, 0x70, 0x00]);
+  assert.deepEqual(validateVp9Frame(key), { key: true, width: 1920, height: 1080 });
+  // The same with frame_type 1: a delta frame, no size.
+  assert.deepEqual(validateVp9Frame(Uint8Array.from([0x86, 0x00])), { key: false });
+  // A wrong frame marker, a broken sync code, a truncated header.
+  assert.equal(validateVp9Frame(Uint8Array.from([0x42, 0x49, 0x83, 0x42])), undefined);
+  assert.equal(validateVp9Frame(Uint8Array.from([0x82, 0x49, 0x83, 0x43, 0x40, 0x77, 0xf0, 0x43, 0x70])), undefined);
+  assert.equal(validateVp9Frame(key.subarray(0, 6)), undefined);
 });

@@ -12,7 +12,7 @@ import { ALL_PACKETS_LOST } from "../../src/mirroring/protocol/constants.ts";
 import { FrameCrypto } from "../../src/mirroring/rtp/frame-crypto.ts";
 import { NtpTimeConverter } from "../../src/mirroring/rtcp/ntp.ts";
 import { buildReceiverRtcp, parseRtpPacket, type ReceiverLogEvent } from "./receiver-wire.ts";
-import { validateH264Frame, validateOpusPacket, validateVp8Frame } from "./media-validate.ts";
+import { validateH264Frame, validateOpusPacket, validateVp8Frame, validateVp9Frame } from "./media-validate.ts";
 
 export interface FakeReceiverOptions {
   /** Probability of dropping each incoming RTP packet. */
@@ -344,7 +344,7 @@ export class FakeReceiver {
     if (stream.kind === "video") {
       this.stats.videoFrames++;
       this.stats.videoBytes += data.length;
-      const info = stream.codec === "vp8" ? validateVp8Frame(data) : stream.codec === "h264" ? validateH264Frame(data) : { key: frame.isKey };
+      const info = stream.codec === "vp8" ? validateVp8Frame(data) : stream.codec === "vp9" ? validateVp9Frame(data) : stream.codec === "h264" ? validateH264Frame(data) : { key: frame.isKey };
       const ok = info !== undefined && info.key === frame.isKey && this.bodyOk(frame, data, 10);
       if (ok) this.stats.validVideoFrames++;
       else this.stats.invalidFrames++;
