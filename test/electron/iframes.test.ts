@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createCastManager, type CastManagerOptions, type IpcMainLike, type MediaRoute } from "../../src/electron/main.ts";
 import { MEDIA_NAMESPACE } from "../../src/electron/presentation-envelope.ts";
-import { FakeDevices, FakeClient, FakeFrame, FramedWebContents, SPEAKER, TV, tick } from "./fakes.ts";
+import { FakeDevices, FakeClient, FakeFrame, FramedWebContents, SPEAKER, TV, tick, FAST_SINKS } from "./fakes.ts";
 
 const MAIN = "https://music.youtube.com/";
 const EMBED = "https://embed.example/player";
@@ -11,10 +11,15 @@ const URL1 = "https://google.com/cast#__castAppId__=233637DE/__castClientId__=c1
 const YT = "233637DE";
 
 class FakeIpcMain implements IpcMainLike {
+  /** Set by the test once the manager exists: calls wait for the channels to the fake devices to open first. */
+  ready: () => Promise<void> = () => Promise.resolve();
   handlers = new Map<string, (event: any, ...args: any[]) => unknown>();
   listeners = new Map<string, ((event: any, ...args: any[]) => void)[]>();
   handle(channel: string, listener: (event: any, ...args: any[]) => unknown): void {
-    this.handlers.set(channel, listener);
+    this.handlers.set(channel, async (...args) => {
+      await this.ready();
+      return listener(args[0], ...args.slice(1));
+    });
   }
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
@@ -39,10 +44,12 @@ function setup(over: Partial<CastManagerOptions> = {}) {
   const clients: FakeClient[] = [];
   const requests: { origin: string; senderId: number }[] = [];
   const manager = createCastManager({
+    sinks: FAST_SINKS,
     ipcMain,
     discovery: new FakeDiscovery(),
     createClient: (d) => {
       const c = new FakeClient(d);
+      if ((over.discovery as FakeDevices | undefined)?.unreachable.has(d.id)) c.connectError = new Error("unreachable");
       const launch = c.launch.bind(c);
       c.launch = async (id: string) => {
         const app = await launch(id);
@@ -60,6 +67,7 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     },
     ...over,
   });
+  ipcMain.ready = () => manager.settled();
   // The preload adds hasGesture to start; these tests are not about it
   const pcall = (wc: FramedWebContents, frame: FakeFrame | null, method: string, params: any) =>
     Promise.resolve(ipcMain.handlers.get("electron-cast:presentation")!({ sender: wc, senderFrame: frame }, method,
@@ -96,7 +104,7 @@ test("two frames of one webContents each get only their own presentation events"
 
 test("availability watches are per frame", async () => {
   const devices = new FakeDiscovery([]);
-  const { pcall, manager } = setup({ discovery: devices });
+  const { pcall, manager, clients } = setup({ discovery: devices, sinks: { ...FAST_SINKS, retry: { maxAttempts: 1 } } });
   const wc = new FramedWebContents(5, MAIN);
   const sub = wc.addFrame(EMBED);
   // the same watchId from the other frame is the other frame's own business, not "in use"
@@ -104,13 +112,15 @@ test("availability watches are per frame", async () => {
   assert.equal((await pcall(wc, sub, "getAvailability", { watchId: "w", urls: [URL1] })).code, "InvalidAccessError");
   await pcall(wc, sub, "getAvailability", { watchId: "w-sub", urls: [URL1] });
   devices.up(TV);
-  await tick();
+  await manager.settled();
   assert.deepEqual(wc.main.events("presentation").map((e) => e.watchId), ["w"]);
   assert.deepEqual(sub.events("presentation").map((e) => e.watchId), ["w-sub"]);
   // a frame cannot stop another frame's watch
   await pcall(wc, sub, "stopWatching", { watchId: "w" });
-  devices.down(TV);
-  await tick();
+  // the device's channel is lost for good (Chrome drops a sink only when its channel cannot be reopened)
+  devices.unreachable.add(TV.id);
+  clientFor(clients, TV.id).fail();
+  await tick(20);
   assert.equal(wc.main.events("presentation").filter((e) => e.value === false).length, 1);
   await manager.dispose();
 });
@@ -186,7 +196,7 @@ test("a removed iframe is noticed and its session ends", async () => {
   // Electron announces no removal; the next navigation event anywhere in the page sweeps removed frames
   wc.emit("did-frame-navigate", {}, MAIN, 200, "OK", false, 999, 999);
   await tick();
-  assert.ok(speaker.calls.some((c) => c.startsWith("stop")) || speaker.closed);
+  assert.ok(speaker.calls.some((c) => c.startsWith("closeTransport")), "the iframe's session was let go");
   await manager.dispose();
 });
 
@@ -209,15 +219,16 @@ test("a main-frame navigation ends the page's iframes for good and a destroyed w
   const { sessionId } = JSON.parse(sub.events("presentation")[1].data).message;
   wc.navigate(wc.main, "https://music.youtube.com/next");
   await tick();
-  assert.ok(speaker.calls.includes(`stop ${sessionId}`) || speaker.closed, "the iframe left with its page");
+  assert.ok(speaker.calls.some((c) => c.startsWith("closeTransport")), "the iframe left with its page");
+  assert.ok(sessionId);
 
   const wc2 = new FramedWebContents(6, MAIN);
   const sub2 = wc2.addFrame(EMBED);
   await pcall(wc2, sub2, "start", { connectionId: "c2", urls: [URL1] });
-  const n = clients.length;
+  const closesBefore = speaker.calls.filter((c) => c.startsWith("closeTransport")).length;
   wc2.destroy();
   await tick();
-  assert.ok(clients.slice(n - 1).every((c) => c.closed || c.calls.some((x) => x.startsWith("stop"))));
+  assert.ok(speaker.calls.filter((c) => c.startsWith("closeTransport")).length > closesBefore, "the destroyed page's iframe session was let go");
   await manager.dispose();
 });
 
@@ -274,8 +285,10 @@ test("routes report frames as their webContents: an iframe's route parks and end
   wc.removeFrame(sub);
   wc.emit("did-frame-navigate", {}, MAIN, 200, "OK", false, 999, 999);
   await tick();
-  assert.deepEqual(manager.getRoutes().map((r) => r.origin), ["https://music.youtube.com"]);
-  assert.equal(seen.at(-1)?.length, 1, "observers were told the iframe's route ended");
+  // the app keeps running on the speaker, so it is listed as a route no page of this app holds (Chrome: non-local)
+  assert.deepEqual(manager.getRoutes().map((r) => [r.origin, r.isLocal]), [["https://music.youtube.com", true], ["", false]]);
+  assert.equal(seen.at(-1)?.length, 2, "observers were told the iframe's route is no longer local");
+  assert.equal(seen.at(-1)?.[1]?.isLocal, false);
   await manager.dispose();
 });
 
@@ -291,6 +304,7 @@ test("the picker's signal aborts when the subframe that asked navigates or is re
   });
   const wc = new FramedWebContents(5, MAIN);
   let sub = wc.addFrame(EMBED);
+  await manager.settled();
 
   const first = pcall(wc, sub, "start", { connectionId: "conn-1", urls: [URL1] });
   await tick();

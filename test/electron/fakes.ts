@@ -28,6 +28,8 @@ export const GROUP = device({ id: "dev-group", name: "Upstairs group", model: "G
 
 export class FakeDevices extends EventEmitter<{ deviceUp: [CastDevice]; deviceDown: [CastDevice]; deviceChanged: [CastDevice] }> {
   list: CastDevice[];
+  /** Ids of devices a test has made unreachable: a test's createClient makes their clients fail to connect. */
+  unreachable = new Set<string>();
   constructor(list: CastDevice[] = [TV, SPEAKER, GROUP]) {
     super();
     this.list = list;
@@ -265,3 +267,22 @@ export class FramedWebContents extends EventEmitter {
     return next;
   }
 }
+
+/** Chrome's delays (a random wait of up to 5 s before opening channels, a 3 s quiet before reporting) shortened to nothing. */
+export const FAST_SINKS = { openDelayMaxMs: 0, reportDelayMs: 0 };
+
+/**
+ * Make a service's `handle` wait until its channels are open first, so a test that sets up devices and calls at once
+ * sees them as sinks, which in production they become a moment after discovery.
+ */
+export function waitForSinks<T extends { handle: (...a: any[]) => Promise<any>; settled(): Promise<void> }>(service: T): T {
+  const handle = service.handle.bind(service);
+  service.handle = async (...args: any[]) => {
+    await service.settled();
+    return handle(...args);
+  };
+  return service;
+}
+
+/** True when no client was used for anything but its channel (connecting and asking its status): no launch, stop, volume or transport. */
+export const onlyChannels = (clients: FakeClient[]): boolean => clients.every((c) => c.calls.every((x) => x === "connect"));

@@ -4,6 +4,7 @@ import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
+import type { CastSinkOptions } from "./sink-service.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 
 /**
@@ -18,6 +19,7 @@ const PAGE_METHODS: ReadonlySet<string> = new Set<BridgeMethod>([
 export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
+export type { CastSinkOptions, SinkRetryOptions } from "./sink-service.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
   MediaSinksQuery, SinkIconType,
@@ -77,11 +79,25 @@ export interface CastManagerOptions {
    * `verifyDevice`). Default true; false allows uncertified receivers. Ignored when `createClient` is given.
    */
   verifyDevices?: boolean;
+  /**
+   * How the manager opens and keeps a channel to each discovered device, whose open channels are what it lists as
+   * devices. The defaults are Chrome's, and there is no way to turn the tracking off: Chrome has none.
+   */
+  sinks?: CastSinkOptions;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
   start(): Promise<void>;
+  /** The devices that have an open, authenticated channel (what Chrome lists as sinks), not everything mDNS has heard. */
   devices(): CastDevice[];
+  /** Try again now to open a channel to each discovered device that has none (Chrome: `CastMediaSinkService::DiscoverSinksNow`). */
+  discoverSinksNow(): void;
+  /**
+   * Resolves when no channel is being opened and none is waiting to be (a retry waiting out its backoff does not count),
+   * so the devices that can be reached are listed. Discovery and Chrome's random delay (up to 5 s) come first, so call it
+   * some time after `start()`.
+   */
+  settled(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -213,6 +229,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     createClient,
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
+    sinks: options.sinks,
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -425,7 +442,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The service knows frames by sender id (an iframe has a synthetic one); the API speaks of windows, so a route's
   // pages are reported as `webContents.id`s, once each however many of its frames hold the route.
   const windowIds = (ids: number[]): number[] => [...new Set(ids.map((id) => senders.get(id)?.wc.id ?? id))];
-  const api = createManagerApi(createSinksObservers(discovery), {
+  const api = createManagerApi(createSinksObservers(service.deviceSource()), {
     mediaRoutes: () =>
       service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
     observeSessions: (l) => service.observeSessions(l),
@@ -437,7 +454,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   return {
     ...api,
     start: () => discovery.start(),
-    devices: () => discovery.devices(),
+    devices: () => service.devices(),
+    discoverSinksNow: () => service.discoverSinksNow(),
+    settled: () => service.settled(),
     async dispose() {
       if (disposed) return;
       disposed = true;

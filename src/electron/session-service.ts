@@ -5,6 +5,8 @@ import { CastTimeoutError } from "../client/index.ts";
 import {
   ObservedMap, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
+import { CastSinkService, type CastSinkOptions } from "./sink-service.ts";
+import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
 export function capabilityNames(bits: number): string[] {
@@ -77,6 +79,8 @@ export interface CastSessionServiceOptions {
   selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   emit(senderId: number, event: BridgeEvent): void;
+  /** How channels to the devices are opened and retried; the defaults are Chrome's (see {@link CastSinkOptions}). */
+  sinks?: CastSinkOptions;
 }
 
 interface SenderRecord {
@@ -108,15 +112,6 @@ interface PendingRequest {
   cancelled: { value: boolean };
   /** The live picker context while the picker is open. */
   picker?: { close(): void };
-}
-
-interface ClientEntry {
-  client: CastClientLike;
-  device: CastDevice;
-  /** Connect promise, created once; every openSession awaits it. */
-  ready: Promise<void>;
-  /** Number of in-flight openSession calls; cleanupIdle never closes while > 0. */
-  opening: number;
 }
 
 const CAPABILITY_BITS: Record<string, number> = {
@@ -249,17 +244,49 @@ export class CastSessionService {
   private readonly sessions = new ObservedMap<string, SessionRecord>((kind, rec) => this.notifySession(kind, rec));
   private readonly sessionListeners = new Set<() => void>();
   private readonly sinks;
-  private readonly clients = new Map<string, ClientEntry>();
+  /** The devices with an open channel; the only devices the service offers or casts to. */
+  private readonly sinkService: CastSinkService;
+  private readonly tracker = new CastSessionTracker();
+  private lastRoutesKey = "";
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
   private disposed = false;
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
-    this.sinks = createSinksObservers(options.devices);
-    options.devices.on("deviceUp", this.deviceListener);
-    options.devices.on("deviceDown", this.deviceListener);
-    options.devices.on("deviceChanged", this.deviceListener);
+    this.sinkService = new CastSinkService({ ...options.sinks, source: options.devices, createClient: options.createClient });
+    this.sinks = createSinksObservers(this.sinkService);
+    this.sinkService.on("deviceUp", this.deviceListener);
+    this.sinkService.on("deviceDown", this.deviceListener);
+    this.sinkService.on("deviceChanged", this.deviceListener);
+    this.sinkService.on("channelOpened", ({ device, client }) => {
+      // The tracker goes first so that, when a status ends a session, it no longer lists it by the time this one reports.
+      this.tracker.attach(device.id, client);
+      this.bindClient(client, device);
+    });
+    this.sinkService.on("sinkRemoved", (device) => this.tracker.removeSink(device.id));
+    this.tracker.on("sessionAddedOrUpdated", () => this.onTrackerChanged());
+    this.tracker.on("sessionRemoved", () => this.onTrackerChanged());
+  }
+
+  /** The devices that can be cast to: those with an open, authenticated channel (as Chrome lists sinks). */
+  devices(): CastDevice[] {
+    return this.sinkService.devices();
+  }
+
+  /** The devices as a {@link DeviceSource}: what `devices()` lists, with the events of that list changing. */
+  deviceSource(): DeviceSource {
+    return this.sinkService;
+  }
+
+  /** Open channels to the discovered devices that have none now, without Chrome's random delay. */
+  discoverSinksNow(): void {
+    this.sinkService.discoverSinksNow();
+  }
+
+  /** Resolves when no channel is being opened and none is scheduled to be; for tests. */
+  settled(): Promise<void> {
+    return this.sinkService.settled();
   }
 
   /** Handle one bridge call; never throws or rejects. */
@@ -335,15 +362,10 @@ export class CastSessionService {
     if (this.disposed) return;
     this.disposed = true;
     this.sinks.dispose();
-    const d = this.options.devices;
-    d.off("deviceUp", this.deviceListener);
-    d.off("deviceDown", this.deviceListener);
-    d.off("deviceChanged", this.deviceListener);
     for (const pending of this.pendingRequests.values()) pending.picker?.close();
-    const entries = [...this.clients.values()];
-    this.clients.clear();
-    for (const entry of entries) entry.client.close();
     this.sessions.clear();
+    this.tracker.dispose();
+    this.sinkService.dispose();
     this.senders.clear();
     this.pendingRequests.clear();
   }
@@ -351,7 +373,7 @@ export class CastSessionService {
   private handleInitialize(sender: SenderInfo, params: unknown): BridgeResult {
     const p = parseInitialize(params);
     if (p === null) return bad("invalid_parameter");
-    const available = this.options.devices.devices().some((d) => deviceMatches(d, p.capabilities));
+    const available = this.sinkService.devices().some((d) => deviceMatches(d, p.capabilities));
     this.senders.set(sender.id, { appId: p.appId, capabilities: p.capabilities, lastAvailable: available });
     const joined: SessionSnapshot[] = [];
     for (const rec of this.sessions.values()) {
@@ -377,7 +399,7 @@ export class CastSessionService {
     const pending: PendingRequest = { discard, cancelled };
     this.pendingRequests.set(sender.id, pending);
     try {
-      const eligible = this.options.devices.devices().filter((d) => deviceMatches(d, p.capabilities));
+      const eligible = this.sinkService.devices().filter((d) => deviceMatches(d, p.capabilities));
       if (eligible.length === 0) return bad("receiver_unavailable");
       const request: CastRequestInfo = {
         appId: p.appId,
@@ -482,7 +504,7 @@ export class CastSessionService {
   private async stopSessionRecord(rec: SessionRecord, caller: number, tellCaller: boolean): Promise<BridgeResult> {
     rec.stoppingBy = caller;
     try {
-      await rec.client.stop(rec.app.sessionId);
+      this.tracker.applyStatus(rec.device.id, rec.client, await rec.client.stop(rec.app.sessionId));
     } catch (err) {
       rec.stoppingBy = undefined;
       return bad("session_error", describe(err));
@@ -498,7 +520,6 @@ export class CastSessionService {
     } else if (tellCaller) {
       this.emitTo(caller, { type: "sessionEnded", sessionId: rec.app.sessionId, status: "stopped" });
     }
-    this.cleanupIdle(rec.device.id, rec.client);
     return good(undefined);
   }
 
@@ -525,7 +546,7 @@ export class CastSessionService {
     const rec = this.sessions.get(p.sessionId);
     if (rec === undefined || !rec.members.has(sender.id)) return bad("session_error");
     try {
-      await rec.client.setVolume({ level: p.level });
+      this.tracker.applyStatus(rec.device.id, rec.client, await rec.client.setVolume({ level: p.level }));
     } catch (err) {
       return bad("session_error", describe(err));
     }
@@ -538,43 +559,20 @@ export class CastSessionService {
     const rec = this.sessions.get(p.sessionId);
     if (rec === undefined || !rec.members.has(sender.id)) return bad("session_error");
     try {
-      await rec.client.setVolume({ muted: p.muted });
+      this.tracker.applyStatus(rec.device.id, rec.client, await rec.client.setVolume({ muted: p.muted }));
     } catch (err) {
       return bad("session_error", describe(err));
     }
     return good(undefined);
   }
 
-  /** The device's client entry, created and connecting on first use. */
-  private clientFor(device: CastDevice): ClientEntry {
-    const existing = this.clients.get(device.id);
-    if (existing !== undefined) return existing;
-    const client = this.options.createClient(device);
-    this.bindClient(client, device);
-    const entry: ClientEntry = {
-      client,
-      device,
-      ready: client.connect().catch((err: unknown) => {
-        // Remove the entry and close the client once so the next request starts fresh.
-        this.dropClient(device.id, client);
-        throw err;
-      }),
-      opening: 0,
-    };
-    // A lookup may never await this; openSession still sees the rejection.
-    entry.ready.catch(() => {});
-    this.clients.set(device.id, entry);
-    return entry;
-  }
-
   /**
    * Join a session by its id, as Chrome's Media Router does for `reconnect("cast-session_<id>")`. A session this
    * service already holds is joined without an origin check, like one found on a device. Otherwise the id is looked up
-   * in the receiver status of
-   * every known device: Chrome's CastSessionTracker learns the sessions running on all sinks and
-   * CastActivityManager::AddNonLocalActivity makes them joinable by id (and only by id: auto-join skips them, and no
-   * origin is checked). `appId`, when given, must be the session's app (CastActivity::CanJoinSession). Unlike Chrome
-   * the lookup runs when asked instead of tracking every device all the time.
+   * in the session tracker, which knows what every device with an open channel runs: Chrome's CastActivityManager adds
+   * a non-local activity for each session its CastSessionTracker learns (AddNonLocalActivity) and
+   * FindActivityForSessionJoin finds it by id alone; auto-join skips it and no origin is checked. `appId`, when given,
+   * must be the session's app (CastActivity::CanJoinSession). Joining makes the route local, as in Chrome.
    */
   private async handleJoinRunningSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
     const p = parseSessionId(params);
@@ -585,73 +583,29 @@ export class CastSessionService {
       if (appId !== undefined && known.appId !== appId) return bad("session_error");
       return this.handleJoinSession(sender, params, false);
     }
-    const found = await this.findRunningSession(p.sessionId);
-    if (found === undefined) return bad("session_error");
-    const { entry, app, volume } = found;
-    try {
-      if (this.disposed || (appId !== undefined && app.appId !== appId)) return bad("session_error");
-      // Another join of the same session finished while this one looked.
-      if (this.sessions.has(app.sessionId)) return this.handleJoinSession(sender, params, false);
-      entry.client.connectTransport(app.transportId);
-      const rec: SessionRecord = {
-        device: entry.device,
-        client: entry.client,
-        app,
-        origin: sender.origin,
-        appId: app.appId,
-        members: new Set([sender.id]),
-        parked: new Set(),
-        lastVolume: volume,
-        lastSnapshot: null,
-      };
-      rec.lastSnapshot = this.snapshotOf(rec);
-      this.sessions.set(app.sessionId, rec);
-      return good(rec.lastSnapshot);
-    } finally {
-      entry.opening -= 1;
-      if (!this.sessions.has(app.sessionId)) this.cleanupIdle(entry.device.id, entry.client);
-    }
+    const tracked = this.tracker.sessionById(p.sessionId);
+    if (tracked === undefined || this.disposed || (appId !== undefined && tracked.appId !== appId)) return bad("session_error");
+    const client = this.sinkService.clientOf(tracked.sinkId);
+    const device = this.sinkService.sinkOf(tracked.sinkId);
+    if (client === undefined || device === undefined) return bad("session_error");
+    client.connectTransport(tracked.app.transportId);
+    const rec: SessionRecord = {
+      device,
+      client,
+      app: tracked.app,
+      origin: sender.origin,
+      appId: tracked.appId,
+      members: new Set([sender.id]),
+      parked: new Set(),
+      lastVolume: tracked.volume,
+      lastSnapshot: null,
+    };
+    rec.lastSnapshot = this.snapshotOf(rec);
+    this.sessions.set(tracked.sessionId, rec);
+    return good(rec.lastSnapshot);
   }
 
-  /**
-   * Ask every known device what it runs and resolve with the one running `sessionId`. The winner's `opening` count
-   * stays raised for the caller to release; a device that cannot be reached or runs something else is let go.
-   */
-  private findRunningSession(sessionId: string): Promise<{ entry: ClientEntry; app: ReceiverApplication; volume: ReceiverVolume } | undefined> {
-    const devices = this.options.devices.devices();
-    return new Promise((resolve) => {
-      let pending = devices.length;
-      let won = false;
-      if (pending === 0) resolve(undefined);
-      for (const device of devices) {
-        const entry = this.clientFor(device);
-        entry.opening += 1;
-        void (async () => {
-          let app: ReceiverApplication | undefined;
-          let volume: ReceiverVolume | undefined;
-          try {
-            await entry.ready;
-            const status = await entry.client.getStatus();
-            app = status.applications.find((a) => a.sessionId === sessionId);
-            volume = status.volume;
-          } catch {
-            // unreachable: not this device
-          }
-          if (app !== undefined && volume !== undefined && !won) {
-            won = true;
-            resolve({ entry, app, volume });
-            return;
-          }
-          entry.opening -= 1;
-          this.cleanupIdle(device.id, entry.client);
-          pending -= 1;
-          if (pending === 0 && !won) resolve(undefined);
-        })();
-      }
-    });
-  }
-
-  /** Connect (or reuse) the device's client, launch the app and register the session. */
+  /** Launch the app on the device's open channel and register the session. */
   private async openSession(
     device: CastDevice,
     appId: string,
@@ -659,70 +613,58 @@ export class CastSessionService {
     discard: { value: boolean },
     cancelled: { value: boolean },
   ): Promise<SessionSnapshot> {
-    const entry = this.clientFor(device);
-    const client = entry.client;
-    entry.opening += 1;
-    let registered = false;
+    // Casting needs a channel that is open now; a device that is not a sink (or whose channel dropped) is unavailable.
+    const client = this.sinkService.clientOf(device.id);
+    if (client === undefined) throw new MappedError("receiver_unavailable", "no open channel to the device");
+    if (discard.value) throw new Discarded();
+    if (cancelled.value) throw new MappedError("cancel", "cancelled");
+    let app: ReceiverApplication;
     try {
-      try {
-        await entry.ready;
-      } catch (err) {
-        if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
-        throw new MappedError("receiver_unavailable", describe(err));
-      }
-      if (discard.value) throw new Discarded();
-      if (cancelled.value) throw new MappedError("cancel", "cancelled");
-      let app: ReceiverApplication;
-      try {
-        app = await client.launch(appId);
-      } catch (err) {
-        if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
-        throw new MappedError("session_error", describe(err));
-      }
-      if (discard.value) {
-        client.closeTransport(app.transportId);
-        throw new Discarded();
-      }
-      if (cancelled.value) {
-        client.closeTransport(app.transportId);
-        throw new MappedError("cancel", "cancelled");
-      }
-      client.connectTransport(app.transportId);
-      let status: ReceiverStatus;
-      try {
-        status = await client.getStatus();
-      } catch (err) {
-        client.closeTransport(app.transportId);
-        throw new MappedError("session_error", describe(err));
-      }
-      if (discard.value) {
-        client.closeTransport(app.transportId);
-        throw new Discarded();
-      }
-      if (cancelled.value) {
-        client.closeTransport(app.transportId);
-        throw new MappedError("cancel", "cancelled");
-      }
-      const rec: SessionRecord = {
-        device,
-        client,
-        app,
-        origin: sender.origin,
-        appId,
-        members: new Set([sender.id]),
-        parked: new Set(),
-        lastVolume: status.volume,
-        lastSnapshot: null,
-      };
-      const snapshot = this.snapshotOf(rec);
-      rec.lastSnapshot = snapshot;
-      this.sessions.set(app.sessionId, rec);
-      registered = true;
-      return snapshot;
-    } finally {
-      entry.opening -= 1;
-      if (!registered) this.cleanupIdle(device.id, client);
+      app = await client.launch(appId);
+    } catch (err) {
+      if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
+      throw new MappedError("session_error", describe(err));
     }
+    if (discard.value) {
+      client.closeTransport(app.transportId);
+      throw new Discarded();
+    }
+    if (cancelled.value) {
+      client.closeTransport(app.transportId);
+      throw new MappedError("cancel", "cancelled");
+    }
+    client.connectTransport(app.transportId);
+    let status: ReceiverStatus;
+    try {
+      status = await client.getStatus();
+      this.tracker.applyStatus(device.id, client, status);
+    } catch (err) {
+      client.closeTransport(app.transportId);
+      throw new MappedError("session_error", describe(err));
+    }
+    if (discard.value) {
+      client.closeTransport(app.transportId);
+      throw new Discarded();
+    }
+    if (cancelled.value) {
+      client.closeTransport(app.transportId);
+      throw new MappedError("cancel", "cancelled");
+    }
+    const rec: SessionRecord = {
+      device,
+      client,
+      app,
+      origin: sender.origin,
+      appId,
+      members: new Set([sender.id]),
+      parked: new Set(),
+      lastVolume: status.volume,
+      lastSnapshot: null,
+    };
+    const snapshot = this.snapshotOf(rec);
+    rec.lastSnapshot = snapshot;
+    this.sessions.set(app.sessionId, rec);
+    return snapshot;
   }
 
   /** Remove a sender from a session; when it was the last one, tear the session down. */
@@ -732,18 +674,17 @@ export class CastSessionService {
     if (rec.members.size === 0 && rec.parked.size === 0) {
       rec.client.closeTransport(rec.app.transportId);
       this.sessions.delete(rec.app.sessionId);
-      this.cleanupIdle(rec.device.id, rec.client);
     } else {
       this.notifySession("updated", rec);
     }
   }
 
-  /** Subscribe to a freshly created client's events. */
-  private bindClient(client: CastClientLike, device: CastDevice): void {
+  /** Subscribe to a freshly opened channel's events. */
+  private bindClient(client: CastClientLike, _device: CastDevice): void {
     client.on("message", (msg) => this.onClientMessage(client, msg));
-    client.on("receiverStatus", (status) => this.onClientStatus(client, device, status));
+    client.on("receiverStatus", (status) => this.onClientStatus(client, status));
     client.on("transportClosed", (transportId) => this.onTransportClosed(client, transportId));
-    client.on("close", () => this.onClientClose(client, device.id));
+    client.on("close", () => this.onClientClose(client));
   }
 
   private onClientMessage(client: CastClientLike, msg: ClientMessage): void {
@@ -761,7 +702,7 @@ export class CastSessionService {
     }
   }
 
-  private onClientStatus(client: CastClientLike, device: CastDevice, status: ReceiverStatus): void {
+  private onClientStatus(client: CastClientLike, status: ReceiverStatus): void {
     for (const rec of [...this.sessions.values()]) {
       if (rec.client !== client) continue;
       const app = status.applications.find((a) => a.sessionId === rec.app.sessionId);
@@ -784,7 +725,6 @@ export class CastSessionService {
         }
       }
     }
-    this.cleanupIdle(device.id, client);
   }
 
   private onTransportClosed(client: CastClientLike, transportId: string): void {
@@ -797,9 +737,7 @@ export class CastSessionService {
     }
   }
 
-  private onClientClose(client: CastClientLike, deviceId: string): void {
-    const entry = this.clients.get(deviceId);
-    if (entry !== undefined && entry.client === client) this.clients.delete(deviceId);
+  private onClientClose(client: CastClientLike): void {
     for (const rec of [...this.sessions.values()]) {
       if (rec.client !== client) continue;
       this.sessions.delete(rec.app.sessionId);
@@ -812,7 +750,7 @@ export class CastSessionService {
   /** Re-check availability for every initialized sender; emit only on change. */
   private onDevicesChanged(): void {
     if (this.disposed) return;
-    const devices = this.options.devices.devices();
+    const devices = this.sinkService.devices();
     for (const [id, rec] of this.senders) {
       const available = devices.some((d) => deviceMatches(d, rec.capabilities));
       if (available !== rec.lastAvailable) {
@@ -822,29 +760,20 @@ export class CastSessionService {
     }
   }
 
-  /** Close the client when no session uses it any more and no openSession is in flight. */
-  private cleanupIdle(deviceId: string, client: CastClientLike): void {
-    const entry = this.clients.get(deviceId);
-    if (entry !== undefined && entry.client === client && entry.opening > 0) return;
-    for (const rec of this.sessions.values()) {
-      if (rec.client === client) return;
-    }
-    this.dropClient(deviceId, client);
-  }
-
-  /** Forget a client and close it; a no-op unless it is still the registered entry for the device. */
-  private dropClient(deviceId: string, client: CastClientLike): void {
-    const entry = this.clients.get(deviceId);
-    if (entry === undefined || entry.client !== client) return;
-    this.clients.delete(deviceId);
-    client.close();
-  }
-
   // Main-process API (see manager-api.ts). Control goes through the paths the pages use, so pages see the same events.
 
-  /** Every live session, parked ones included. */
+  /**
+   * Every live session, parked ones included, then the sessions the devices run that this service does not hold
+   * (started elsewhere, or let go of here), as Chrome's non-local routes.
+   */
   mediaRoutes(): MediaRoute[] {
-    return [...this.sessions.values()].map((rec) => this.routeOf(rec));
+    const local = [...this.sessions.values()].map((rec) => this.routeOf(rec));
+    return [...local, ...this.nonLocalSessions().map((s) => this.nonLocalRouteOf(s))];
+  }
+
+  /** The tracked sessions no page of this service holds (Chrome: activities with `is_local` false). */
+  private nonLocalSessions(): TrackedSession[] {
+    return this.tracker.sessions().filter((s) => !this.sessions.has(s.sessionId));
   }
 
   /** Be told when a session starts, changes (status, volume, pages) or ends; returns the unsubscribe function. */
@@ -853,29 +782,48 @@ export class CastSessionService {
     return () => void this.sessionListeners.delete(listener);
   }
 
-  /** Stop a session on the device for every page, as if a member had called stopSession. */
+  /**
+   * Stop a session on the device for every page, as if a member had called stopSession. A session this service does not
+   * hold is stopped on its device as it is (Chrome's TerminateSession works on non-local activities too).
+   */
   async terminateSession(sessionId: string): Promise<BridgeResult> {
     const rec = this.sessions.get(sessionId);
-    if (rec === undefined) return bad("session_error", "unknown session");
     // No page is the caller, so every member is told sessionEnded.
-    return this.stopSessionRecord(rec, MAIN_CALLER, false);
-  }
-
-  async setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult> {
-    const rec = this.sessions.get(sessionId);
-    if (rec === undefined) return bad("session_error", "unknown session");
+    if (rec !== undefined) return this.stopSessionRecord(rec, MAIN_CALLER, false);
+    const tracked = this.nonLocalSessions().find((s) => s.sessionId === sessionId);
+    const client = tracked === undefined ? undefined : this.sinkService.clientOf(tracked.sinkId);
+    if (tracked === undefined || client === undefined) return bad("session_error", "unknown session");
     try {
-      await rec.client.setVolume(volume);
+      this.tracker.applyStatus(tracked.sinkId, client, await client.stop(sessionId));
     } catch (err) {
       return bad("session_error", describe(err));
     }
     return good(undefined);
   }
 
-  /** Detach every page from the session and close its transport; the receiver app keeps running. */
+  async setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult> {
+    const rec = this.sessions.get(sessionId);
+    const tracked = rec === undefined ? this.nonLocalSessions().find((s) => s.sessionId === sessionId) : undefined;
+    const client = rec?.client ?? (tracked === undefined ? undefined : this.sinkService.clientOf(tracked.sinkId));
+    const sinkId = rec?.device.id ?? tracked?.sinkId;
+    if (client === undefined || sinkId === undefined) return bad("session_error", "unknown session");
+    try {
+      this.tracker.applyStatus(sinkId, client, await client.setVolume(volume));
+    } catch (err) {
+      return bad("session_error", describe(err));
+    }
+    return good(undefined);
+  }
+
+  /**
+   * Detach every page from the session and close its transport; the receiver app keeps running (and is then listed as a
+   * non-local route). A route no page holds has nothing to detach.
+   */
   detachSession(sessionId: string): BridgeResult {
     const rec = this.sessions.get(sessionId);
-    if (rec === undefined) return bad("session_error", "unknown session");
+    if (rec === undefined) {
+      return this.nonLocalSessions().some((s) => s.sessionId === sessionId) ? good(undefined) : bad("session_error", "unknown session");
+    }
     for (const member of rec.members) {
       this.emitTo(member, { type: "sessionEnded", sessionId, status: "disconnected" });
     }
@@ -883,13 +831,26 @@ export class CastSessionService {
     rec.parked.clear();
     rec.client.closeTransport(rec.app.transportId);
     this.sessions.delete(sessionId);
-    this.cleanupIdle(rec.device.id, rec.client);
     return good(undefined);
   }
 
   /** Tell the route observers something changed (the arguments only fit the ObservedMap callback). */
   private notifySession(_kind: "started" | "updated" | "ended", _rec: SessionRecord): void {
     if (this.disposed) return;
+    this.lastRoutesKey = JSON.stringify(this.mediaRoutes());
+    this.fireSessionListeners();
+  }
+
+  /** The tracker learned something; route observers hear of it only if the routes they see differ now. */
+  private onTrackerChanged(): void {
+    if (this.disposed) return;
+    const key = JSON.stringify(this.mediaRoutes());
+    if (key === this.lastRoutesKey) return;
+    this.lastRoutesKey = key;
+    this.fireSessionListeners();
+  }
+
+  private fireSessionListeners(): void {
     for (const listener of [...this.sessionListeners]) {
       try {
         listener();
@@ -904,7 +865,9 @@ export class CastSessionService {
       id: rec.app.sessionId,
       mediaSource: `cast:${rec.appId}`,
       sinkId: rec.device.id,
+      sinkName: rec.device.name,
       description: rec.app.statusText || rec.app.displayName,
+      isLocal: true,
       appId: rec.appId,
       displayName: rec.app.displayName,
       origin: rec.origin,
@@ -912,6 +875,25 @@ export class CastSessionService {
       members: [...rec.members],
       parkedSenders: [...rec.parked],
       parked: rec.members.size === 0,
+    };
+  }
+
+  /** Chrome's `AddNonLocalActivity`: the route has no page, and its description is the session's (`GetRouteDescription`). */
+  private nonLocalRouteOf(session: TrackedSession): MediaRoute {
+    return {
+      id: session.sessionId,
+      mediaSource: `cast:${session.appId}`,
+      sinkId: session.sinkId,
+      sinkName: this.sinkService.sinkOf(session.sinkId)?.name ?? "",
+      description: session.statusText || session.displayName,
+      isLocal: false,
+      appId: session.appId,
+      displayName: session.displayName,
+      origin: "",
+      volume: { level: session.volume.level ?? null, muted: session.volume.muted ?? null },
+      members: [],
+      parkedSenders: [],
+      parked: false,
     };
   }
 

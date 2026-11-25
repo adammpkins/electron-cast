@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CastSessionService } from "../../src/electron/session-service.ts";
 import type { SessionSnapshot } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, EventLog, TV, SPEAKER } from "./fakes.ts";
+import { FakeDevices, FakeClient, EventLog, TV, SPEAKER, onlyChannels, FAST_SINKS, waitForSinks } from "./fakes.ts";
 
 const YT = "233637DE";
 const MDX = "urn:x-cast:com.google.youtube.mdx";
@@ -16,7 +16,8 @@ function setup(opts: { devices?: FakeDevices; tweak?: (c: FakeClient) => void; a
   const devices = opts.devices ?? new FakeDevices();
   const log = new EventLog();
   const clients: FakeClient[] = [];
-  const service = new CastSessionService({
+  const service = waitForSinks(new CastSessionService({
+    sinks: FAST_SINKS,
     devices,
     createClient: (d) => {
       const c = new FakeClient(d);
@@ -27,7 +28,7 @@ function setup(opts: { devices?: FakeDevices; tweak?: (c: FakeClient) => void; a
     selectDevice: async (list) => list.find((d) => d.id === TV.id) ?? null,
     allowOrigin: opts.allowOrigin,
     emit: log.emit,
-  });
+  }));
   return { service, devices, log, clients };
 }
 
@@ -90,7 +91,7 @@ test("joining by id needs the session's app; unknown ids and bad params find not
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: "CC1AD845" })).ok, false);
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId: "nope", appId: YT })).ok, false);
   assert.equal((await service.handle(PAGE, "joinRunningSession", {})).ok, false);
-  assert.ok(clients.every((c) => c.closed), "devices that did not run it are not left open");
+  assert.ok(clients.every((c) => !c.calls.some((x) => x.startsWith("connectTransport") || x.startsWith("launch"))), "no device that did not run it was touched");
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT })).ok, true, "the right app still joins");
 });
 
@@ -111,7 +112,7 @@ test("allowOrigin gates joinRunningSession before any device is contacted", asyn
   const { service, clients, sessionId } = await restarted({ allowOrigin: () => false });
   const r = await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT });
   assert.equal(r.ok === false && r.code, "extension_missing");
-  assert.equal(clients.length, 0);
+  assert.ok(onlyChannels(clients), "nothing was asked of any device");
 });
 
 test("a session found on a device appears as a route and route observers hear of it", async () => {

@@ -6,7 +6,7 @@ import type { CastClientLike } from "../../src/electron/session-service.ts";
 import { CastClient } from "../../src/client/index.ts";
 import { CastDiscovery } from "../../src/discovery/index.ts";
 import type { BridgeEvent } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, TV, tick } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS } from "./fakes.ts";
 
 // Compile-time: the real classes fit the shapes the manager takes.
 const _client: CastClientLike = new CastClient({ host: "127.0.0.1" });
@@ -19,10 +19,15 @@ const MDX = "urn:x-cast:com.google.youtube.mdx";
 const ORIGIN = "https://music.youtube.com";
 
 class FakeIpcMain implements IpcMainLike {
+  /** Set by the test once the manager exists: calls wait for the channels to the fake devices to open first. */
+  ready: () => Promise<void> = () => Promise.resolve();
   handlers = new Map<string, (event: any, ...args: any[]) => unknown>();
   handle(channel: string, listener: (event: any, ...args: any[]) => unknown): void {
     if (this.handlers.has(channel)) throw new Error(`Attempted to register a second handler for '${channel}'`);
-    this.handlers.set(channel, listener);
+    this.handlers.set(channel, async (...args) => {
+      await this.ready();
+      return listener(args[0], ...args.slice(1));
+    });
   }
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
@@ -76,6 +81,7 @@ function setup(over: Partial<CastManagerOptions> = {}) {
   const clients: FakeClient[] = [];
   const picks: unknown[] = [];
   const manager = createCastManager({
+    sinks: FAST_SINKS,
     ipcMain,
     discovery,
     createClient: (d) => {
@@ -89,6 +95,7 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     },
     ...over,
   });
+  ipcMain.ready = () => manager.settled();
   const call = (wc: FakeWebContents, method: string, params: unknown, url: string | null = `${ORIGIN}/watch?v=x`) => {
     const handler = ipcMain.handlers.get(`${over.channel ?? "electron-cast"}:call`);
     assert.ok(handler, "call handler registered");
@@ -147,7 +154,8 @@ test("a page cannot call a method only main uses (joinRunningSession), or an unk
   const joined = await call(new FakeWebContents(5), "joinRunningSession", { sessionId: r.value.sessionId, appId: YT });
   assert.deepEqual(joined, { ok: false, code: "invalid_parameter", description: "unknown method: joinRunningSession" });
   assert.deepEqual(await call(wc, "nope", {}), { ok: false, code: "invalid_parameter", description: "unknown method: nope" });
-  assert.equal(clients.length, 1);
+  assert.equal(clients.length, 3, "only the channels to the devices");
+  assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("launch")), [`launch ${YT}`], "joining by this route launched nothing");
 });
 
 test("service events are sent to that webContents on <channel>:event", async () => {
@@ -169,7 +177,7 @@ test("a destroyed webContents leaves its sessions", async () => {
   const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { transportId: string } };
   wc.destroy();
   assert.ok(clients[0]?.calls.includes(`closeTransport ${r.value.transportId}`));
-  assert.equal(clients[0]?.closed, true);
+  assert.equal(clients[0]?.closed, false, "the device's channel stays open");
 });
 
 test("a main-frame navigation (reload or new page) keeps the session open for the next page to rejoin", async () => {
@@ -184,7 +192,7 @@ test("a main-frame navigation (reload or new page) keeps the session open for th
   assert.deepEqual(again.value.sessions.map((s) => s.sessionId), [r.value.sessionId]);
   wc.destroy();
   assert.ok(clients[0]?.calls.includes(`closeTransport ${r.value.transportId}`));
-  assert.equal(clients[0]?.closed, true);
+  assert.equal(clients[0]?.closed, false);
 });
 
 test("each webContents is watched once, however many calls it makes", async () => {
@@ -212,7 +220,9 @@ test("start starts discovery; devices lists it; dispose stops discovery and clos
   const { call, discovery, clients, manager } = setup();
   await manager.start();
   assert.equal(discovery.starts, 1);
-  assert.deepEqual(manager.devices().map((d) => d.id), discovery.devices().map((d) => d.id));
+  await manager.settled();
+  await tick(5);
+  assert.deepEqual(manager.devices().map((d) => d.id), discovery.devices().map((d) => d.id), "the devices with an open channel");
   const wc = new FakeWebContents(9);
   await call(wc, "initialize", INIT);
   await call(wc, "requestSession", REQ);
