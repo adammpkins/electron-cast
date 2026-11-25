@@ -71,7 +71,9 @@ export interface AudioEncoderCallbacks {
   onStatus(status: OperationalStatus): void;
 }
 
+/** Everything a session owns. `stopAll` releases captures and encoders once, when the session ends. */
 export interface MirroringBackend {
+  stopAll?(): void;
   createAudioEncoder(config: FrameSenderConfig, callbacks: AudioEncoderCallbacks): AudioEncoderPort;
   createVideoEncoder(config: FrameSenderConfig, callbacks: VideoEncoderCallbacks): VideoEncoderPort;
   startAudioCapture(params: { sampleRate: number; channels: number; framesPerBuffer: number }, sink: AudioCaptureSink): void;
