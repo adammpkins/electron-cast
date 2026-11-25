@@ -160,7 +160,46 @@ which joins a session it holds (same origin rule as `joinSession`) or else asks 
 status and registers the session it finds. The one difference from Chrome: the lookup runs on request instead of
 tracking every device continuously. The page must supply the id (Google's SDK stores nothing itself).
 
-Known gap: events go to the main frame only, so Google's SDK inside an iframe gets nothing.
+### Frames
+
+Presentation mode follows Chrome: the Presentation API is scoped to a frame. In Chromium,
+`PresentationServiceImpl` (`content/browser/presentation/presentation_service_impl.cc`) is created per
+`RenderFrameHost`; it keeps that frame's availability listeners, passes `render_frame_host_->GetLastCommittedOrigin()`
+as the request origin for start and reconnect, requires transient user activation on that frame
+(`render_frame_host_->HasTransientUserActivation()`), and calls `controller_delegate_->Reset(process_id, frame_id)` when
+the frame is destroyed or commits a non-same-document navigation (`DidFinishNavigation`). The controller delegate
+(`components/media_router/browser/presentation/controller_presentation_service_delegate_impl.cc`) keeps one
+`PresentationFrame` per `GlobalRenderFrameHostId`, and `PresentationFrame::Reset` detaches its routes rather than
+terminating them, which is the "park" here. Only `SetDefaultPresentationUrls` is limited to the outermost document
+(`is_outermost_document_`); electron-cast has no `defaultRequest` support, so that rule has no counterpart.
+
+electron-cast does the same:
+
+- A sender is a frame. The main frame's sender id is its webContents id (unchanged). A subframe gets an id of its own
+  (from 2^30 up), allocated on its first call and keyed by `frame.frameTreeNodeId`, which is browser-global and stays
+  constant for the frame's lifetime across navigations and process swaps (`processId`/`routingId` change on a
+  cross-process navigation, so they can't key a frame that must rejoin its session). The session service and the
+  presentation handler still see plain numeric sender ids; only `main.ts` knows about frames (`registerSender`,
+  `senderIdOf`, `deliver`).
+- Events go to one frame: `webContents.send` for the main frame, otherwise `frame.send` on the frame found by
+  `frameTreeNodeId` in `webContents.mainFrame.framesInSubtree` at send time (a held `WebFrameMain` goes stale when the
+  frame navigates).
+- Connections, watches and sessions are owned by the sender; `close`, `terminate` and `send` from another frame are
+  ignored, and `senderFrame` of an IPC event is browser-provided, so a frame can't claim another's id. `allowOrigin` and
+  the picker see the sending frame's own origin.
+- `did-frame-navigate` for a subframe ends that frame's connections and parks its sessions (`senderNavigated`). A main
+  frame `did-navigate` does that for the main frame and ends every subframe sender of that page (`senderGone`). A
+  destroyed webContents ends all of them.
+- Electron has no event for a removed iframe (only `frame-created`), so removed frames are found by sweeping: on every
+  `did-frame-navigate`, and every 5 seconds (unref'd timer) while a subframe sender exists; a failed `frame.send` also
+  ends the sender.
+- The preload only runs in subframes if the app sets `webPreferences.nodeIntegrationInSubFrames: true`; without it
+  iframes have no stand-in and behave as before. See the README.
+- `mode: "chromecast"` (`<channel>:call`) stays main-frame only and refuses iframe calls.
+
+Not done: Chrome also cancels a pending start whose frame navigated to another origin while the picker was open
+(`HandleStartPresentationResponse` in the controller delegate); here a pending start is cancelled when the frame is
+removed or navigates, not on an origin change alone.
 
 ## Electron layer (`src/electron/`)
 
@@ -171,12 +210,12 @@ interfaces, so the library has no Electron dependency and runs in plain Node.
   presentation? })` returns `{ start, devices, dispose }`. It registers one invoke handler on `<channel>:call`; events
   go back to the page on `<channel>:event`. Unless `presentation: false`, it also serves presentation mode:
   `<channel>:presentation` (invoke), `<channel>:presentation:send` (page to main) and `<channel>:presentation:event`
-  (main to page). Each connection and availability watch belongs to one webContents, and the others can't touch it. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
+  (main to page). Each connection and availability watch belongs to one frame, and the others can't touch it. `selectDevice(devices, request)` resolves the user's choice: a device, `null` (maps to
   `chrome.cast.ErrorCode.CANCEL`) or `"stop"`
   (stop `request.session`, the sender's current session, which is set when the sender is already casting that app;
   picking that session's device returns it without relaunching). `allowOrigin(origin)` gates every call by the
-  sender frame's origin. A sender is one webContents, which leaves its sessions when it is destroyed or navigates
-  (`did-navigate`).
+  sender frame's origin. A sender is one frame (see Frames): the main frame leaves its sessions when its webContents is destroyed and parks them
+  when it navigates (`did-navigate`); a subframe likewise on `did-frame-navigate` and removal.
 - `preload.ts`: `installCastBridge({ contextBridge, ipcRenderer, channel?, mode?, bridgeKey?,
   presentationBridgeKey? })` exposes a bridge and, before page scripts run, installs the Presentation API stand-in
   (default) or, with `mode: "chromecast"`, the polyfill.

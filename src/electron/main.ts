@@ -8,19 +8,32 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 
 /** The subset of an Electron `WebFrameMain` the manager needs. */
-export interface FrameLike { url: string; origin?: string }
+export interface FrameLike {
+  url: string;
+  origin?: string;
+  /** Browser-global and constant for the frame's lifetime, across navigations; identifies a subframe. */
+  frameTreeNodeId?: number;
+  /** Null or absent on a main frame. */
+  parent?: unknown;
+  processId?: number;
+  routingId?: number;
+  /** Reaches only this frame (and needs the preload to run there: `nodeIntegrationInSubFrames`). */
+  send?(channel: string, ...args: any[]): void;
+}
 /** The subset of an Electron `WebContents` the manager needs. */
 export interface WebContentsLike {
   readonly id: number;
   send(channel: string, ...args: any[]): void;
   isDestroyed(): boolean;
+  /** The frame tree; consulted to find a subframe's current frame and to notice frames that were removed. */
+  readonly mainFrame?: { readonly framesInSubtree: readonly FrameLike[] };
   once(event: "destroyed", listener: () => void): unknown;
-  on(event: "did-navigate", listener: (...args: any[]) => void): unknown;
+  on(event: "did-navigate" | "did-frame-navigate", listener: (...args: any[]) => void): unknown;
 }
 /** The subset of an Electron `IpcMainInvokeEvent` the manager needs. */
 export interface IpcMainInvokeEventLike { sender: WebContentsLike; senderFrame: FrameLike | null }
 /** The subset of an Electron `IpcMainEvent` the manager needs. */
-export interface IpcMainEventLike { sender: WebContentsLike }
+export interface IpcMainEventLike { sender: WebContentsLike; senderFrame?: FrameLike | null }
 /** The subset of an Electron `IpcMain` the manager needs (`on`/`removeListener` unless `presentation: false`). */
 export interface IpcMainLike {
   handle(channel: string, listener: (event: IpcMainInvokeEventLike, ...args: any[]) => unknown): void;
@@ -50,8 +63,12 @@ export interface CastManager {
   dispose(): Promise<void>;
 }
 
-/** Availability watches kept per webContents; the page never releases one, so the oldest are dropped. */
+/** Availability watches kept per frame; the page never releases one, so the oldest are dropped. */
 const MAX_WATCHES_PER_PAGE = 32;
+/** Sender ids of subframes start here, far above any webContents id (a main frame's sender id is its webContents id). */
+const SUBFRAME_ID_BASE = 2 ** 30;
+/** How often removed iframes (which Electron does not announce) are noticed and their sessions released. */
+const FRAME_SWEEP_MS = 5000;
 /** Largest page-to-receiver message accepted (Cast messages are capped at 64 KiB on the wire). */
 const MAX_MESSAGE_CHARS = 1 << 20;
 
@@ -79,8 +96,96 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   }
   const discovery = options.discovery ?? new CastDiscovery();
   const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port }));
-  const contents = new Map<number, WebContentsLike>();
+  /**
+   * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
+   * the frame's lifetime (across its navigations, so a reloaded iframe can rejoin its session). The frame is looked up
+   * in the frame tree on every use, never held, because navigating can swap the frame object.
+   */
+  interface SenderEntry { wc: WebContentsLike; frameTreeNodeId: number | null }
+  const senders = new Map<number, SenderEntry>();
+  const subframeIds = new Map<number, number>();  // frameTreeNodeId -> sender id
+  const watched = new Set<number>();              // webContents ids
+  let nextSubframeId = SUBFRAME_ID_BASE;
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
   let handler: CastPresentationHandler | undefined;
+
+  const findFrame = (wc: WebContentsLike, frameTreeNodeId: number): FrameLike | undefined => {
+    try {
+      return wc.mainFrame?.framesInSubtree.find((f) => f.frameTreeNodeId === frameTreeNodeId);
+    } catch {
+      return undefined;  // the webContents is gone
+    }
+  };
+  const isMainFrame = (frame: FrameLike): boolean => frame.parent === undefined || frame.parent === null;
+  /**
+   * The sender id of an IPC event's frame, without registering it; undefined when it is not a known sender. An event
+   * with no `senderFrame` property at all is the main frame's; a null one is a frame that is already gone.
+   */
+  const senderIdOf = (wc: WebContentsLike, frame: FrameLike | null | undefined): number | undefined => {
+    if (frame === undefined) return wc.id;
+    if (frame === null) return undefined;
+    if (isMainFrame(frame)) return wc.id;
+    return typeof frame.frameTreeNodeId === "number" ? subframeIds.get(frame.frameTreeNodeId) : undefined;
+  };
+  /** The sender id of an IPC event's frame, registering a subframe (and watching its webContents) on first use. */
+  const registerSender = (wc: WebContentsLike, frame: FrameLike): number | null => {
+    if (isMainFrame(frame)) {
+      watch(wc);
+      if (!senders.has(wc.id)) senders.set(wc.id, { wc, frameTreeNodeId: null });
+      return wc.id;
+    }
+    const node = frame.frameTreeNodeId;
+    if (typeof node !== "number") return null;
+    watch(wc);
+    let id = subframeIds.get(node);
+    if (id === undefined) {
+      id = nextSubframeId++;
+      subframeIds.set(node, id);
+      senders.set(id, { wc, frameTreeNodeId: node });
+      sweepTimer ??= setInterval(sweepFrames, FRAME_SWEEP_MS);
+      sweepTimer.unref?.();
+    }
+    return id;
+  };
+  /** Forget a subframe sender for good: its connections, watches and sessions end. */
+  const dropSubframe = (id: number): void => {
+    const entry = senders.get(id);
+    if (entry === undefined || entry.frameTreeNodeId === null) return;
+    presentation?.senderGone(id);
+    senders.delete(id);
+    subframeIds.delete(entry.frameTreeNodeId);
+    service.senderGone(id);
+    if (subframeIds.size === 0 && sweepTimer !== undefined) {
+      clearInterval(sweepTimer);
+      sweepTimer = undefined;
+    }
+  };
+  /** Drop subframe senders whose frame was removed (Electron announces neither an iframe's removal nor its page's). */
+  function sweepFrames(): void {
+    for (const [id, entry] of [...senders]) {
+      if (entry.frameTreeNodeId === null) continue;
+      if (entry.wc.isDestroyed() || findFrame(entry.wc, entry.frameTreeNodeId) === undefined) dropSubframe(id);
+    }
+  }
+  /** Send to the one frame that owns the sender; a frame that is gone ends the sender. */
+  const deliver = (senderId: number, ch: string, payload: unknown): void => {
+    const entry = senders.get(senderId);
+    if (entry === undefined || entry.wc.isDestroyed()) return;
+    try {
+      if (entry.frameTreeNodeId === null) {
+        entry.wc.send(ch, payload);
+        return;
+      }
+      const frame = findFrame(entry.wc, entry.frameTreeNodeId);
+      if (frame?.send === undefined) {
+        queueMicrotask(() => dropSubframe(senderId));  // not inside the service's own emit
+        return;
+      }
+      frame.send(ch, payload);
+    } catch {
+      // the webContents or frame was destroyed between the check and the send
+    }
+  };
   const service = new CastSessionService({
     devices: discovery,
     createClient,
@@ -92,39 +197,53 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       } catch (err) {
         console.error("electron-cast: presentation handler failed on a service event", err);
       }
-      const wc = contents.get(senderId);
-      if (wc === undefined || wc.isDestroyed()) return;
-      try {
-        wc.send(`${channel}:event`, event);
-      } catch {
-        // the webContents was destroyed between the check and the send
-      }
+      deliver(senderId, `${channel}:event`, event);
     },
   });
 
-  /** Record a webContents on first use and watch it once. */
-  const watch = (wc: WebContentsLike): void => {
-    if (contents.has(wc.id)) return;
-    contents.set(wc.id, wc);
+  /** Watch a webContents once: its destruction and its navigations end or park its senders. */
+  function watch(wc: WebContentsLike): void {
+    if (watched.has(wc.id)) return;
+    watched.add(wc.id);
+    const subframes = (): number[] =>
+      [...senders].filter(([, e]) => e.wc === wc && e.frameTreeNodeId !== null).map(([id]) => id);
     wc.once("destroyed", () => {
+      watched.delete(wc.id);
+      for (const id of subframes()) dropSubframe(id);
       presentation?.senderGone(wc.id);
-      contents.delete(wc.id);
+      senders.delete(wc.id);
       service.senderGone(wc.id);
     });
     // A navigation ends the page's connections, but its sessions stay open (parked) so the next page can rejoin them
     wc.on("did-navigate", () => {
       presentation?.senderGone(wc.id);
       service.senderNavigated(wc.id);
+      for (const id of subframes()) dropSubframe(id);  // the page's iframes went with it
     });
-  };
+    // An iframe that navigates on its own is treated the same way (the main frame is handled above).
+    wc.on("did-frame-navigate", (_event, _url, _code, _text, mainFrame, processId, routingId) => {
+      if (mainFrame === true) return;
+      const frame = wc.mainFrame?.framesInSubtree.find((f) => f.processId === processId && f.routingId === routingId);
+      const id = typeof frame?.frameTreeNodeId === "number" ? subframeIds.get(frame.frameTreeNodeId) : undefined;
+      if (id !== undefined) {
+        presentation?.senderGone(id);
+        service.senderNavigated(id);
+      }
+      sweepFrames();
+    });
+  }
 
   options.ipcMain.handle(`${channel}:call`, (event, method, params) => {
     const origin = originOf(event.senderFrame);
-    if (origin === null) {
+    if (origin === null || event.senderFrame === null) {
       return Promise.resolve({ ok: false, code: "extension_missing", description: "No sender frame" });
     }
-    watch(event.sender);
-    return service.handle({ id: event.sender.id, origin }, method, params);
+    // mode "chromecast" is main-frame only; iframes are served in presentation mode, as in Chrome
+    if (!isMainFrame(event.senderFrame)) {
+      return Promise.resolve({ ok: false, code: "extension_missing", description: "chrome.cast is not available in iframes; use presentation mode" });
+    }
+    const id = registerSender(event.sender, event.senderFrame)!;
+    return service.handle({ id, origin }, method, params);
   });
 
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
@@ -134,16 +253,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     const off = ipc.removeListener!.bind(ipc);
     const h = new CastPresentationHandler({ service });
     handler = h;
-    const connections = new Map<string, { conn: PresentationConnectionHandle | null; wcId: number }>();
-    const watches = new Map<string, { ac: AbortController; wcId: number }>();
-    const sendTo = (wcId: number, payload: unknown): void => {
-      const wc = contents.get(wcId);
-      if (wc === undefined || wc.isDestroyed()) return;
-      try {
-        wc.send(`${channel}:presentation:event`, payload);
-      } catch {
-        // destroyed between the check and the send
-      }
+    const connections = new Map<string, { conn: PresentationConnectionHandle | null; sid: number }>();
+    const watches = new Map<string, { ac: AbortController; sid: number }>();
+    const sendTo = (sid: number, payload: unknown): void => {
+      deliver(sid, `${channel}:presentation:event`, payload);
     };
     const invalid = (description: string) => ({ ok: false, code: "InvalidAccessError", description });
     const isId = (v: unknown): v is string => typeof v === "string" && v !== "" && v.length <= 256;
@@ -151,9 +264,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       Array.isArray(v) && v.length > 0 && v.length <= 16 && v.every((u) => typeof u === "string");
 
     /** Finish a start/reconnect: register the connection and route its traffic to the page. */
-    const open = async (wcId: number, connectionId: string, opening: () => Promise<PresentationConnectionHandle>) => {
+    const open = async (sid: number, connectionId: string, opening: () => Promise<PresentationConnectionHandle>) => {
       if (connections.has(connectionId)) return invalid("connectionId in use");
-      const slot: { conn: PresentationConnectionHandle | null; wcId: number } = { conn: null, wcId };
+      const slot: { conn: PresentationConnectionHandle | null; sid: number } = { conn: null, sid };
       connections.set(connectionId, slot);  // reserved while the picker or join is pending
       let conn: PresentationConnectionHandle;
       try {
@@ -164,25 +277,25 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         const name = typeof e?.name === "string" && e.name !== "" && e.name !== "Error" ? e.name : "OperationError";
         return { ok: false, code: name, description: typeof e?.message === "string" ? e.message : String(err) };
       }
-      if (!contents.has(wcId) || connections.get(connectionId) !== slot) {
+      if (!senders.has(sid) || connections.get(connectionId) !== slot) {
         conn.close();
         return { ok: false, code: "AbortError", description: "The page went away" };
       }
       slot.conn = conn;
       conn.onclose = (state) => {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
-        sendTo(wcId, { type: "statechange", connectionId, state });
+        sendTo(sid, { type: "statechange", connectionId, state });
       };
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
-      conn.onmessage = (data) => sendTo(wcId, { type: "message", connectionId, data });
+      conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
       return { ok: true, value: { id: conn.id, url: conn.url } };
     };
 
     ipc.handle(`${channel}:presentation`, async (event, method, params) => {
       const origin = originOf(event.senderFrame);
-      if (origin === null) return { ok: false, code: "NotAllowedError", description: "No sender frame" };
-      watch(event.sender);
-      const wcId = event.sender.id;
+      if (origin === null || event.senderFrame === null) return { ok: false, code: "NotAllowedError", description: "No sender frame" };
+      const sid = registerSender(event.sender, event.senderFrame);
+      if (sid === null) return { ok: false, code: "NotAllowedError", description: "Unidentifiable sender frame" };
       const p = (typeof params === "object" && params !== null ? params : {}) as Record<string, unknown>;
       try {
         switch (method) {
@@ -190,28 +303,28 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             if (!isId(p.watchId) || !isUrls(p.urls)) return invalid("getAvailability expects { watchId, urls }");
             const watchId = p.watchId;
             const old = watches.get(watchId);
-            if (old !== undefined && old.wcId !== wcId) return invalid("watchId in use");
+            if (old !== undefined && old.sid !== sid) return invalid("watchId in use");
             old?.ac.abort();
             watches.delete(watchId);
-            const mine = [...watches].filter(([, w]) => w.wcId === wcId);
+            const mine = [...watches].filter(([, w]) => w.sid === sid);
             for (const [id, w] of mine.slice(0, Math.max(0, mine.length - (MAX_WATCHES_PER_PAGE - 1)))) {
               w.ac.abort();
               watches.delete(id);
             }
             const ac = new AbortController();
-            watches.set(watchId, { ac, wcId });
+            watches.set(watchId, { ac, sid });
             const available = await h.getAvailability({
               urls: p.urls,
               origin,
-              senderId: wcId,
+              senderId: sid,
               signal: ac.signal,
-              onchange: (value) => sendTo(wcId, { type: "availability", watchId, value }),
+              onchange: (value) => sendTo(sid, { type: "availability", watchId, value }),
             });
             return { ok: true, value: { available } };
           }
           case "stopWatching": {
             const w = isId(p.watchId) ? watches.get(p.watchId) : undefined;
-            if (w !== undefined && w.wcId === wcId) {
+            if (w !== undefined && w.sid === sid) {
               w.ac.abort();
               watches.delete(p.watchId as string);
             }
@@ -221,7 +334,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             if (!isId(p.connectionId) || !isUrls(p.urls)) return invalid("start expects { connectionId, urls }");
             {
               const urls = p.urls;
-              return await open(wcId, p.connectionId, () => h.startPresentation({ urls, origin, senderId: wcId }));
+              return await open(sid, p.connectionId, () => h.startPresentation({ urls, origin, senderId: sid }));
             }
           case "reconnect":
             if (!isId(p.connectionId) || !isUrls(p.urls) || !isId(p.presentationId)) {
@@ -229,13 +342,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             }
             {
               const { urls, presentationId } = p;
-              return await open(wcId, p.connectionId,
-                () => h.reconnectPresentation({ urls, origin, senderId: wcId, presentationId }));
+              return await open(sid, p.connectionId,
+                () => h.reconnectPresentation({ urls, origin, senderId: sid, presentationId }));
             }
           case "close":
           case "terminate": {
             const c = isId(p.connectionId) ? connections.get(p.connectionId) : undefined;
-            if (c !== undefined && c.wcId === wcId && c.conn !== null) {
+            if (c !== undefined && c.sid === sid && c.conn !== null) {
               if (method === "close") c.conn.close();
               else c.conn.terminate();
             }
@@ -252,7 +365,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     const onSend = (event: IpcMainEventLike, connectionId: unknown, data: unknown): void => {
       if (typeof connectionId !== "string" || typeof data !== "string") return;
       const c = connections.get(connectionId);
-      if (c === undefined || c.wcId !== event.sender.id || c.conn === null) return;
+      if (c === undefined || c.sid !== senderIdOf(event.sender, event.senderFrame) || c.conn === null) return;
       if (data.length > MAX_MESSAGE_CHARS) return;
       c.conn.send(data);
     };
@@ -260,11 +373,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
 
     return {
       /** Close the page's connections and watches before the service drops it. */
-      senderGone(wcId: number): void {
-        h.senderGone(wcId);
-        for (const [id, c] of connections) if (c.wcId === wcId) connections.delete(id);
+      senderGone(sid: number): void {
+        h.senderGone(sid);
+        for (const [id, c] of connections) if (c.sid === sid) connections.delete(id);
         for (const [id, w] of watches) {
-          if (w.wcId !== wcId) continue;
+          if (w.sid !== sid) continue;
           w.ac.abort();
           watches.delete(id);
         }
@@ -291,7 +404,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       presentation?.dispose();
       discovery.stop();
       await service.dispose();
-      contents.clear();
+      senders.clear();
+      subframeIds.clear();
+      watched.clear();
+      if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      sweepTimer = undefined;
     },
   };
 }

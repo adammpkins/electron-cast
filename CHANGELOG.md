@@ -20,6 +20,11 @@
   not start, by asking the known devices what they run. Auto-join still does not join them, as in Chrome, and nothing
   is persisted. The service gains a `joinRunningSession` call for this; `mode: "chromecast"` is unchanged.
 - Discovery now also runs mDNS over IPv6 (link-local, per adapter) so IPv6-only devices are found, with `fe80::` addresses carrying their scope so they can be connected to. IPv4 is still preferred. A network adapter that goes away takes its devices with it at once, and sockets are replaced after the machine wakes from sleep.
+- Google's Cast SDK now works inside iframes in presentation mode, with Chrome's per-frame semantics: each frame has its
+  own availability watches, connections and sessions, receives only its own events (`frame.send`), and uses its own
+  origin. An iframe that navigates parks its sessions; a removed iframe or a navigating page ends them. Needs
+  `nodeIntegrationInSubFrames: true` in the window's `webPreferences` so the preload runs in iframes; without it nothing
+  changes. `mode: "chromecast"` stays main-frame only.
 
 ## 0.3.1
 
