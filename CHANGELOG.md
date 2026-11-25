@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A weekly canary (`npm run canary`, `tools/sdk-canary.mjs`) fetches Google's Cast sender SDK for the current Chrome
+  majors and checks it still speaks the message envelope the translator expects. A failed run opens one issue.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which

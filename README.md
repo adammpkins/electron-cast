@@ -107,6 +107,15 @@ The main process serves both modes. `createCastManager({ ..., presentation: fals
 
 Discovery and connections are tested with Chromecast Ultra, Google Home Mini, Nest Hub, Nest Hub Max and speaker groups.
 
+## Staying compatible with Google's SDK
+
+In the default mode the page runs Google's SDK, which Google can change per Chrome major without an electron-cast
+release. `npm run canary` (also a weekly GitHub Actions job) downloads the SDK for Chrome stable, beta and dev and for
+the Chromium that Electron 45 ships, and checks as text, without running it, that it still uses the message types,
+fields, request types and presentation URLs electron-cast translates. A missing one fails; a new message type is a
+warning. `tools/sdk-canary-baseline.json` records what the SDK looked like when it last worked; refresh it with
+`node tools/sdk-canary.mjs --update-baseline`. Options: `--majors 158,159`, `--electron <major>|none`.
+
 ## Lower layers
 
 The package root exports every layer, if you want to use them without Electron:

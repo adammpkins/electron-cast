@@ -52,6 +52,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",
+    "canary": "node tools/sdk-canary.mjs",
     "check": "npm run typecheck && npm run lint && npm test",
     "prepack": "npm run build"
   },

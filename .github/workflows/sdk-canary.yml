@@ -1,0 +1,50 @@
+name: SDK canary
+
+# Google's Cast sender SDK can change per Chrome major without an electron-cast release. This fetches it for the
+# current Chrome majors and checks it still speaks the envelope electron-cast translates (tools/sdk-canary.mjs).
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "Google's Cast SDK no longer matches what electron-cast handles"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node tools/sdk-canary.mjs --report "$RUNNER_TEMP/sdk-canary.md"
+      # One open issue, kept up to date: edited while the canary fails, closed once it passes again.
+      - name: Open or update the issue
+        if: failure()
+        run: |
+          # No report means the canary could not run (network, API change): the red run is the signal then.
+          [ -s "$RUNNER_TEMP/sdk-canary.md" ] || exit 0
+          {
+            cat "$RUNNER_TEMP/sdk-canary.md"
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/body.md"
+          gh label create sdk-canary --color B60205 --description "Google Cast SDK changed" || true
+          number=$(gh issue list --label sdk-canary --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$ISSUE_TITLE" --label sdk-canary --body-file "$RUNNER_TEMP/body.md"
+          fi
+      - name: Close the issue when compatible again
+        if: success()
+        run: |
+          number=$(gh issue list --label sdk-canary --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue close "$number" --comment "The canary passes again: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
