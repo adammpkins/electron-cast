@@ -39,13 +39,14 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm i --no-save electron@${{ matrix.electron }}
+      # Its own folder: npm skips electron in the repo's node_modules because it is an optional peer dependency
+      - run: npm i --prefix smoke/.out/electron --no-package-lock electron@${{ matrix.electron }}
       - name: Allow Electron's sandbox on Linux
         if: runner.os == 'Linux'
         run: |
           # Keep the real sandbox (the smoke test checks the preload ran sandboxed) rather than using --no-sandbox
-          sudo chown root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          sudo chown root smoke/.out/electron/node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 smoke/.out/electron/node_modules/electron/dist/chrome-sandbox
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Smoke test (Linux, under a virtual display)
         if: runner.os == 'Linux'
