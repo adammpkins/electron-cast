@@ -159,6 +159,8 @@ Rows marked "0.5, in `next`" are in the `next` prerelease (`npm i electron-cast@
 | App availability (`GET_APP_AVAILABILITY`) for a page's `getAvailability()` and the devices its `start()` offers | Yes | Yes | **0.5, in `next`.** Asked over the open channels, with Chrome's refresh rules. `mode: "chromecast"` still goes by capabilities |
 | Start requires a user gesture | Checked in the browser process | Checked by the preload in the renderer | Electron has no main-process API for it ([SECURITY.md](SECURITY.md#user-gesture)) |
 | Sessions: launch an app, app messages, media commands, volume, stop | Yes | Yes | |
+| A Cast presentation URL's parameters (`supportedAppTypes`, `appParams`, `invisibleSender`, streaming delay and audio, several legacy app ids) | Yes | Yes | Parsed as `CastMediaSource::FromMediaSource` does, and a sink is offered a URL when it can run one of its apps. Not yet tried on a real device. The streaming fields are parsed and not used: a page's mirroring sources are unavailable |
+| Sinks listed in Chrome's order, devices with no `fn` skipped, receiver labels stable across restarts | Yes | Yes | `MediaSink::CompareUsingCollator`, `CreateCastMediaSink`, `GetReceiverIdHashToken`. The app keeps the label token through `receiverIdHashToken`. Not yet tried on a real device |
 | Auto-join after a reload (`origin_scoped`, `tab_and_origin_scoped`) | Yes | Yes | |
 | Rejoin a session after the browser or app restarts, by id | Yes (`reconnect("cast-session_<id>")`) | Yes | The app stores the session id ([guide](docs/guides/restart-rejoin.md)); the session tracker knows which device runs it |
 | Several windows | Yes | Yes | |

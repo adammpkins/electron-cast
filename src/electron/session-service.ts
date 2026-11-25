@@ -6,6 +6,8 @@ import { CastTimeoutError } from "../client/index.ts";
 import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
+import { sortDevicesAsSinks } from "./sink-order.ts";
+import { chooseAppInfo } from "./cast-media-source.ts";
 import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sink-service.ts";
 import type { NetworkMonitor } from "./network-monitor.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
@@ -199,6 +201,7 @@ const CAPABILITY_BITS: Record<string, number> = {
   video_in: 2,
   audio_out: 4,
   audio_in: 8,
+  dev_mode: 16,
   multizone_group: 32,
 };
 
@@ -245,13 +248,27 @@ function parseInitialize(params: unknown): { appId: string; capabilities: string
   return { appId, capabilities, autoJoinPolicy };
 }
 
-function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean } | null {
+/** The `apps` of a presentation request: every app of its URL and the capabilities each needs (`CastMediaSource::app_infos()`). */
+function parseApps(value: unknown): CastAppInfoParam[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const apps: CastAppInfoParam[] = [];
+  for (const entry of value as unknown[]) {
+    if (!isRecord(entry) || typeof entry.appId !== "string" || typeof entry.requiredCapabilities !== "number") return null;
+    apps.push({ appId: entry.appId, requiredCapabilities: entry.requiredCapabilities });
+  }
+  return apps;
+}
+
+function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean; apps?: CastAppInfoParam[] } | null {
   if (!isRecord(params)) return null;
   const { appId, capabilities, timeoutMs } = params;
   if (typeof appId !== "string" || !isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  const apps = parseApps(params.apps);
+  if (apps === null) return null;
+  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, ...(apps === undefined ? {} : { apps }) };
 }
 
 /** `requestSession`'s parameters as a picker request with no DIAL app. */
@@ -268,6 +285,14 @@ interface RequestParams {
   timeoutMs: number;
   /** Offer only the sinks that said they have the Cast app (a page's presentation request). */
   appAvailability: boolean;
+  /** Every app of the presentation URL; `appId` is the first. The app launched is `ChooseAppId`'s choice for the sink. */
+  apps?: CastAppInfoParam[];
+}
+
+/** An app of a presentation URL and the capability bits a sink needs to run it. */
+interface CastAppInfoParam {
+  appId: string;
+  requiredCapabilities: number;
 }
 
 /** `requestSink` parameters: like `requestSession`'s, with the Cast app id optional and a DIAL app name. */
@@ -280,7 +305,9 @@ function parseRequestSink(params: unknown): RequestParams | null {
   if (!isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  const apps = parseApps(params.apps);
+  if (apps === null) return null;
+  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, ...(apps === undefined ? {} : { apps }) };
 }
 
 function parseSessionId(params: unknown): { sessionId: string } | null {
@@ -748,10 +775,17 @@ export class CastSessionService {
     let combined: ReturnType<typeof createSinksObservers> | undefined;
     try {
       // A page's presentation request is offered the sinks that have the app; chrome.cast's requestSession is unchanged
-      if (p.appAvailability && appId !== null) appSinks = await this.appSinks({ appIds: [appId], capabilities });
+      if (p.appAvailability && appId !== null) {
+        appSinks = await this.appSinks(p.apps === undefined
+          ? { appIds: [appId], capabilities }
+          : { appIds: p.apps.map((a) => a.appId), capabilities: [], appInfos: p.apps });
+      }
       if (cancelled.value || this.disposed) return bad("cancel");
+      // a device is offered when it can run an app of the request (one app: its capability names)
+      const supportsRequest = (d: CastDevice): boolean =>
+        p.apps === undefined ? deviceMatches(d, capabilities) : p.apps.some((a) => (d.capabilities & a.requiredCapabilities) === a.requiredCapabilities);
       const castEligible = (): CastDevice[] =>
-        appId === null ? [] : (appSinks?.devices() ?? this.sinkService.devices()).filter((d) => deviceMatches(d, capabilities));
+        appId === null ? [] : (appSinks?.devices() ?? this.sinkService.devices()).filter((d) => supportsRequest(d));
       let eligible = [...castEligible(), ...dialAvailable()];
       if (eligible.length === 0 && dial !== undefined && stopMonitoring !== undefined) {
         await waitForDevices(dial.source, Math.min(p.timeoutMs, DIAL_PROBE_WAIT_MS), () => cancelled.value || discard.value || dialAvailable().length > 0);
@@ -783,10 +817,10 @@ export class CastSessionService {
         const castObservers = appSinks?.observers ?? this.sinks;
         if (dial !== undefined) combined = createSinksObservers(combineSources(appSinks?.source ?? this.sinkService, dial.source));
         const pick = createPickerContext(combined ?? castObservers, (d) =>
-          d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && deviceMatches(d, capabilities));
+          d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && supportsRequest(d));
         pending.picker = pick;
         try {
-          choice = await this.options.selectDevice(eligible, request, pick.context);
+          choice = await this.options.selectDevice(sortDevicesAsSinks(eligible), request, pick.context);
         } catch (err) {
           return bad("session_error", describe(err));
         } finally {
@@ -814,6 +848,8 @@ export class CastSessionService {
         const rec = this.sessions.get(request.session.sessionId);
         if (rec !== undefined) return good(this.snapshotOf(rec));
       }
+      // CastActivityManager::ChooseAppId: the first app of the source the sink can run, else the first
+      const launchAppId = p.apps === undefined ? appId : chooseAppInfo(p.apps.map((a) => ({ ...a, capabilities: [] })), choice.capabilities).appId;
       // The bound starts after the picker resolves; picker time does not count.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const bound = new Promise<never>((_, reject) => {
@@ -823,7 +859,7 @@ export class CastSessionService {
         }, p.timeoutMs);
       });
       try {
-        const snapshot = await Promise.race([this.openSession(choice, appId, sender, discard, cancelled), bound]);
+        const snapshot = await Promise.race([this.openSession(choice, launchAppId, sender, discard, cancelled), bound]);
         return good(snapshot);
       } catch (err) {
         if (err instanceof Discarded) return bad("timeout", "timed out");

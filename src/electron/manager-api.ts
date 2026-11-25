@@ -13,6 +13,8 @@ import type { MirroringStats } from "../mirroring/stats/statistics.ts";
 import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource } from "../mirroring/routing.ts";
 
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
+import { castIconType, sortSinks } from "./sink-order.ts";
+import { sinkSupportsApp } from "./cast-media-source.ts";
 import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast and DIAL devices (a DIAL sink is `generic`). */
@@ -327,8 +329,9 @@ export function presentationUrlForDevice(
   }
   for (const url of urls) {
     const parsed = parsePresentationUrl(url);
-    if (parsed !== null && capsMatch(device, parsed.capabilities)
-      && (appAvailable === undefined || appAvailable(device, parsed.appId) === true)) return url;
+    // CastAppAvailabilityTracker::GetAvailableSinks: some app of the URL is available and the sink has all its capabilities
+    if (parsed !== null && parsed.appInfos.some((i) => sinkSupportsApp(device.capabilities, i)
+      && (appAvailable === undefined || appAvailable(device, i.appId) === true))) return url;
   }
   return null;
 }
@@ -354,7 +357,7 @@ export function toMediaSink(device: CastDevice): MediaSink {
     return { id: device.id, providerId: "dial", name: device.name, description: device.model, iconType: "generic", device: { ...device } };
   }
   // GetCastSinkIconType (media_sink_util.cc): video_out first, then a multizone group, else audio.
-  const iconType: SinkIconType = (device.capabilities & 1) !== 0 ? "cast" : (device.capabilities & 32) !== 0 ? "cast_audio_group" : "cast_audio";
+  const iconType: SinkIconType = castIconType(device.capabilities);
   return { id: device.id, providerId: "cast", name: device.name, description: device.model, iconType, device: { ...device } };
 }
 
@@ -455,16 +458,20 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
           if (d.dial !== undefined || (eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
           for (const url of urls) {
             const parsed = parsePresentationUrl(url);
-            if (parsed === null || !capsMatch(d, parsed.capabilities) || availability.cached(d, parsed.appId) !== undefined) continue;
-            const key = `${d.id}\n${parsed.appId}`;
-            const before = asked.get(key);
-            if (before !== undefined && now - before <= APP_AVAILABILITY_REFRESH_MS) continue;
-            asked.set(key, now);
-            void availability.check(d, parsed.appId).then(() => { if (active) check(); });
+            if (parsed === null) continue;
+            for (const info of parsed.appInfos) {
+              if (!sinkSupportsApp(d.capabilities, info) || availability.cached(d, info.appId) !== undefined) continue;
+              const key = `${d.id}\n${info.appId}`;
+              const before = asked.get(key);
+              if (before !== undefined && now - before <= APP_AVAILABILITY_REFRESH_MS) continue;
+              asked.set(key, now);
+              void availability.check(d, info.appId).then(() => { if (active) check(); });
+            }
           }
         }
       };
-      const current = (): MediaSink[] => source.devices().filter(matches).map(toMediaSink);
+      // the list the app sees is sorted as the dialog sorts it (MediaRouterUI::OnSinksUpdated)
+      const current = (): MediaSink[] => sortSinks(source.devices().filter(matches).map(toMediaSink));
       let last = "";
       const check = (): void => {
         ask();
@@ -503,7 +510,7 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
   };
 }
 
-const CAPABILITY_BITS: Record<string, number> = { video_out: 1, video_in: 2, audio_out: 4, audio_in: 8, multizone_group: 32 };
+const CAPABILITY_BITS: Record<string, number> = { video_out: 1, video_in: 2, audio_out: 4, audio_in: 8, dev_mode: 16, multizone_group: 32 };
 
 /** True when every named capability is set on the device (unknown names are ignored, as in the session service). */
 function capsMatch(device: CastDevice, capabilities: string[]): boolean {

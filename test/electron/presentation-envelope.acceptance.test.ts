@@ -9,23 +9,30 @@ import {
 } from "../../src/electron/presentation-envelope.ts";
 import { snapshot } from "../polyfill/harness.ts";
 
+/** The fields the Cast launch path had before the parser read every `CastMediaSource` field. */
+function launchFields(p: ReturnType<typeof parsePresentationUrl>): unknown {
+  if (p === null) return null;
+  const { appId, capabilities, clientId, autoJoinPolicy, defaultActionPolicy, launchTimeout } = p;
+  return { appId, capabilities, clientId, autoJoinPolicy, defaultActionPolicy, launchTimeout };
+}
+
 test("parses the legacy google.com/cast URL that Google's sender builds", () => {
   const url = "https://google.com/cast#__castAppId__=CC1AD845/__castClientId__=1732-99/__castAutoJoinPolicy__=origin_scoped"
     + "/__castDefaultActionPolicy__=cast_this_tab/__castLaunchTimeout__=30000";
-  assert.deepEqual(parsePresentationUrl(url), {
+  assert.deepEqual(launchFields(parsePresentationUrl(url)), {
     appId: "CC1AD845", capabilities: [], clientId: "1732-99", autoJoinPolicy: "origin_scoped",
     defaultActionPolicy: "cast_this_tab", launchTimeout: 30000,
   });
-  assert.deepEqual(parsePresentationUrl("https://google.com/cast#__castAppId__=233637DE(video_out,audio_out)"), {
+  assert.deepEqual(launchFields(parsePresentationUrl("https://google.com/cast#__castAppId__=233637DE(video_out,audio_out)")), {
     appId: "233637DE", capabilities: ["video_out", "audio_out"], clientId: null,
-    autoJoinPolicy: "tab_and_origin_scoped", defaultActionPolicy: "create_session", launchTimeout: null,
+    autoJoinPolicy: "page_scoped", defaultActionPolicy: "create_session", launchTimeout: null,
   });
   const dial = "https://google.com/cast#__castAppId__=CC1AD845/__castClientId__=7/__dialAppName__=x/__dialPostData__=YS9iPWM=";
   assert.equal(parsePresentationUrl(dial)?.clientId, "7", "DIAL parameters are ignored");
 });
 
 test("parses cast: URLs and rejects everything else", () => {
-  assert.deepEqual(parsePresentationUrl("cast:CC1AD845?clientId=5&autoJoinPolicy=page_scoped&capabilities=video_out,audio_out&launchTimeout=5000"), {
+  assert.deepEqual(launchFields(parsePresentationUrl("cast:CC1AD845?clientId=5&autoJoinPolicy=page_scoped&capabilities=video_out,audio_out&launchTimeout=5000")), {
     appId: "CC1AD845", capabilities: ["video_out", "audio_out"], clientId: "5", autoJoinPolicy: "page_scoped",
     defaultActionPolicy: "create_session", launchTimeout: 5000,
   });

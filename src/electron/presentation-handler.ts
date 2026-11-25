@@ -238,8 +238,9 @@ export class CastPresentationHandler {
     const observation = this.service.observeAppAvailability(
       this.senderOf(req.senderId, req.origin),
       {
-        appIds: cast === null ? [] : [cast.appId],
-        capabilities: cast?.capabilities ?? [],
+        appIds: cast === null ? [] : cast.appInfos.map((i) => i.appId),
+        capabilities: [],
+        ...(cast === null ? {} : { appInfos: cast.appInfos.map(({ appId, requiredCapabilities }) => ({ appId, requiredCapabilities })) }),
         ...(choice.dial === undefined ? {} : { dialApp: choice.dial.app }),
       },
       (value) => req.onchange(value),
@@ -268,6 +269,7 @@ export class CastPresentationHandler {
     const request = {
       appId: parsed?.appId ?? null,
       capabilities: parsed?.capabilities ?? [],
+      ...(parsed === null ? {} : { apps: parsed.appInfos.map(({ appId, requiredCapabilities }) => ({ appId, requiredCapabilities })) }),
       appAvailability: true,
       timeoutMs: parsed?.launchTimeout ?? 60000,
       ...(req.deviceId === undefined ? {} : { deviceId: req.deviceId }),

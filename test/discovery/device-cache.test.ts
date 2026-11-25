@@ -204,20 +204,46 @@ test("two instances with the same TXT id collapse to the most recently refreshed
   assert.equal(list[0]?.instanceName, alias);
 });
 
-test("falls back to the instance label when fn is missing, and to 0 for a bad ca", () => {
+test("a bad ca is 0 capabilities", () => {
   const cache = new CastDeviceCache();
   const bare = records("chromecast").map((r) => {
     if (r.type !== "TXT") return r;
     const data = Object.assign(Object.create(null), r.data) as Record<string, string>;
-    delete data.fn;
     data.ca = "not-a-number";
     return { ...r, data };
   });
   cache.ingest(bare, 0);
   const [d] = cache.devices();
-  assert.equal(d?.name, "Chromecast-afdd4ab851bc954c170d37581867bf54");
   assert.equal(d?.capabilities, 0);
   assert.equal(d?.isGroup, false);
+});
+
+// CreateCastMediaSink: kMissingID and kMissingFriendlyName are errors, so a device without them is not a sink
+for (const field of ["id", "fn"]) {
+  for (const how of ["missing", "empty"]) {
+    test(`a device with ${how} ${field} is not a sink`, () => {
+      const cache = new CastDeviceCache();
+      const broken = records("chromecast").map((r) => {
+        if (r.type !== "TXT") return r;
+        const data = Object.assign(Object.create(null), r.data) as Record<string, string>;
+        if (how === "missing") delete data[field];
+        else data[field] = "";
+        return { ...r, data };
+      });
+      cache.ingest(broken, 0);
+      assert.deepEqual(cache.devices(), []);
+    });
+  }
+}
+
+test("a device is a sink with only id and fn, whatever else its TXT lacks", () => {
+  const cache = new CastDeviceCache();
+  const bare = records("chromecast").map((r) => (r.type === "TXT" ? { ...r, data: Object.assign(Object.create(null), { id: "abc", fn: "Den" }) as Record<string, string> } : r));
+  cache.ingest(bare, 0);
+  const [d] = cache.devices();
+  assert.equal(d?.name, "Den");
+  assert.equal(d?.model, "");
+  assert.equal(d?.capabilities, 0);
 });
 
 test("a custom service name can be watched", () => {

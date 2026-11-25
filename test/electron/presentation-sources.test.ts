@@ -42,7 +42,8 @@ test("capability suffixes and escapes do not hide a streaming app", () => {
   assert.deepEqual(castUrlAppIds(legacy(`${AV}(video_out,audio_out)`)), [AV]);
   assert.equal(classifyPresentationUrl(legacy(`${AV}(video_out)`)), "mirroring");
   assert.equal(classifyPresentationUrl(`https://google.com/cast#__castAppId__=%30F5096E8`), "mirroring");
-  assert.equal(containsStreamingApp(`cast:${AV}(video_out)`), true);
+  // ParseCastUrl takes the whole path as the app id (it does not split off `(caps)`), so this is not the streaming app
+  assert.equal(containsStreamingApp(`cast:${AV}(video_out)`), false);
 });
 
 test("the app id comparison is exact, as CastMediaSource::ContainsApp is", () => {

@@ -339,7 +339,43 @@ electron-cast:
   `connectionavailable` bridge event sent before the first message. As in `OnPresentationResponse`, it is announced only while the
   default request is still the one started. The route is a normal session, so routes observers need nothing more.
 
+### Receiver labels, sink order and sink validation
+
+- **The label token.** A receiver label is the hash of the sink id and a token (`GetReceiverIdHashToken`): 64 random bytes in
+  base64, made on first use and kept in the profile's `media_router.receiver_id_hash_token` pref, so a page that remembers
+  a `receiverLabel` finds the same one after a restart. **Deviation:** a library has no profile and writes no files of its
+  own (it never imports Electron, so it has no `userData` path either). The app keeps the token through the
+  `receiverIdHashToken` option (`load`, `save`), as it keeps remembered access code devices through `accessCode.store`;
+  without it the token lasts for the process, which is what electron-cast did before (with 16 bytes). A store that throws
+  does not stop casting: a token is made for the run.
+- **Order.** The sinks the app is given (`registerMediaSinksObserver`, the `selectDevice` list, the wired display list)
+  are sorted as `MediaRouterUI::OnSinksUpdated` sorts the dialog's: `MediaSink::CompareUsingCollator` compares the icon type
+  (`cast`, `cast_audio_group`, `cast_audio`, `wired_display`, `generic`), then the names with the application locale's
+  collator, then the sink ids. **Deviation:** the collator is `Intl.Collator()` in the runtime's default locale (Electron
+  derives it from the app's locale), not an ICU collator created for `app.getLocale()`. `CastDeviceCache.devices()` stays
+  sorted by name and id, as it is not a list shown to the app.
+- **Validation.** `CreateCastMediaSink` rejects a device whose TXT record has no `id`, or no `fn` or an empty one, and one
+  with no valid address; it requires nothing else (`md` and `ca` default to empty and 0). TXT entries are
+  `service_data[key] = value` for each entry that has an `=`: keys are case-sensitive and the last repeat wins.
+
 ### Presentation sources
+
+`src/electron/cast-media-source.ts` reads a Cast presentation URL as `CastMediaSource::FromMediaSource` does, and
+`parsePresentationUrl` returns its fields under Chrome's names: `appInfos` (each app with the capabilities it needs),
+`autoJoinPolicy`, `defaultActionPolicy`, `clientId`, `launchTimeout`, `targetPlayoutDelayMillis`
+(`streamingTargetPlayoutDelayMillis`), `siteRequestedAudioCapture` (`streamingCaptureAudio=0` turns it off),
+`supportedAppTypes` (default `["WEB"]`), `appParams` and `connectionType` (`invisible` for `invisibleSender=true`).
+`appId` and `capabilities` are the first app's. The rules are Chrome's: a `cast:` URL's app is its whole path (not
+unescaped, and a `(caps)` suffix is part of the id), its query values are unescaped with `+` as a space and the last
+repeated key wins; the legacy form lists every `__castAppId__=ID(caps)`, unescapes each value, and takes the first pair of
+a key; `streamingTargetPlayoutDelayMillis`, `streamingCaptureAudio`, `supportedAppTypes`, `appParams` and
+`invisibleSender` are read only from a `cast:` URL; an unnamed or unknown auto-join policy is `page_scoped`; a number is
+used only when `base::StringToInt` accepts it and it is above 0; a URL over 64 KB is refused. A sink is offered for a URL when
+some app of it is available there and the sink has all of that app's capabilities
+(`CastAppAvailabilityTracker::GetAvailableSinks`), and the app launched is `ChooseAppId`'s: the first the sink can run.
+`streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio` are parsed but no code reads them yet: a page's mirroring
+sources are reported unavailable (see below), so there is no mirroring session for them to configure; they join the
+mirroring session when site-initiated mirroring is ported.
 
 Chrome's Cast provider builds a `CastMediaSource` from each presentation URL
 (`components/media_router/common/providers/cast/cast_media_source.cc`, `FromMediaSource`): `remote-playback:` and plain
