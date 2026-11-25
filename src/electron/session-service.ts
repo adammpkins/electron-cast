@@ -573,7 +573,7 @@ export class CastSessionService {
    * in the receiver status of
    * every known device: Chrome's CastSessionTracker learns the sessions running on all sinks and
    * CastActivityManager::AddNonLocalActivity makes them joinable by id (and only by id: auto-join skips them, and no
-   * origin is checked). `appId`, when given, must be the session's app (CastActivity::CanJoinSession). Unlike Chrome
+   * origin is checked). `appId`, when given, must be the session's app (AppActivity::CanJoinSession). Unlike Chrome
    * the lookup runs when asked instead of tracking every device all the time.
    */
   private async handleJoinRunningSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
