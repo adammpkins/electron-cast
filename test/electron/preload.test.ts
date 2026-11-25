@@ -39,7 +39,7 @@ class FakeIpcRenderer implements IpcRendererLike {
 function setup(opts: { channel?: string; bridgeKey?: string } = {}) {
   const contextBridge = new FakeContextBridge();
   const ipcRenderer = new FakeIpcRenderer();
-  installCastBridge({ contextBridge, ipcRenderer, ...opts });
+  installCastBridge({ contextBridge, ipcRenderer, mode: "chromecast", ...opts });
   const bridge = contextBridge.exposed.get(opts.bridgeKey ?? "__electronCastBridge") as CastBridge | undefined;
   assert.ok(bridge, "bridge exposed");
   return { contextBridge, ipcRenderer, bridge };

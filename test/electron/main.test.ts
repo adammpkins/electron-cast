@@ -27,6 +27,15 @@ class FakeIpcMain implements IpcMainLike {
   removeHandler(channel: string): void {
     this.handlers.delete(channel);
   }
+  listeners = new Map<string, ((...args: any[]) => void)[]>();
+  on(channel: string, listener: (...args: any[]) => void): unknown {
+    this.listeners.set(channel, [...(this.listeners.get(channel) ?? []), listener]);
+    return this;
+  }
+  removeListener(channel: string, listener: (...args: any[]) => void): unknown {
+    this.listeners.set(channel, (this.listeners.get(channel) ?? []).filter((l) => l !== listener));
+    return this;
+  }
 }
 
 class FakeWebContents extends EventEmitter {
@@ -94,7 +103,7 @@ const REQ = { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 };
 
 test("registers one invoke handler on <channel>:call and removes it on dispose", async () => {
   const { ipcMain, manager } = setup();
-  assert.deepEqual([...ipcMain.handlers.keys()], ["electron-cast:call"]);
+  assert.deepEqual([...ipcMain.handlers.keys()], ["electron-cast:call", "electron-cast:presentation"]);
   await manager.dispose();
   assert.deepEqual([...ipcMain.handlers.keys()], []);
   await manager.dispose();
@@ -102,7 +111,7 @@ test("registers one invoke handler on <channel>:call and removes it on dispose",
 
 test("a custom channel prefix is used", () => {
   const { ipcMain } = setup({ channel: "my-cast" });
-  assert.deepEqual([...ipcMain.handlers.keys()], ["my-cast:call"]);
+  assert.deepEqual([...ipcMain.handlers.keys()], ["my-cast:call", "my-cast:presentation"]);
 });
 
 test("calls reach the session service as the sending webContents and frame origin", async () => {

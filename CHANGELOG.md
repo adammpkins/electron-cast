@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.3.0)
 
-- Presentation mode (opt-in, `presentation: true` in `createCastManager` and `mode: "presentation"` in
-  `installCastBridge`): the page gets a stand-in Presentation API instead of electron-cast's `chrome.cast`, so Google's
-  own Cast SDK (`cast_sender.js`, `cast.framework`) runs unmodified. The main process answers it with a translator for
-  the message format Chrome's Media Router uses with that SDK. The default mode is unchanged.
+- **Changed default: pages now run Google's own Cast SDK.** `installCastBridge` installs a stand-in Presentation API
+  (`mode: "presentation"`, the new default) instead of electron-cast's `chrome.cast`, so Google's `cast_sender.js` and
+  `cast.framework` load and run unmodified. The main process answers it with a translator for the message format
+  Chrome's Media Router uses with that SDK. `createCastManager` serves it by default (`presentation: false` turns it
+  off) and now needs `ipcMain.on` and `ipcMain.removeListener`, which Electron's `ipcMain` has.
+- A cast must now start from a user gesture, as in Chrome.
+- The previous behaviour is still available with `mode: "chromecast"` in `installCastBridge`.
 
 ## 0.2.0
 

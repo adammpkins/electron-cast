@@ -21,7 +21,7 @@ export interface WebContentsLike {
 export interface IpcMainInvokeEventLike { sender: WebContentsLike; senderFrame: FrameLike | null }
 /** The subset of an Electron `IpcMainEvent` the manager needs. */
 export interface IpcMainEventLike { sender: WebContentsLike }
-/** The subset of an Electron `IpcMain` the manager needs (`on`/`removeListener` only in presentation mode). */
+/** The subset of an Electron `IpcMain` the manager needs (`on`/`removeListener` unless `presentation: false`). */
 export interface IpcMainLike {
   handle(channel: string, listener: (event: IpcMainInvokeEventLike, ...args: any[]) => unknown): void;
   removeHandler(channel: string): void;
@@ -37,8 +37,9 @@ export interface CastManagerOptions {
   createClient?(device: CastDevice): CastClientLike;                     // default new CastClient({ host, port })
   channel?: string;                                                       // default "electron-cast"
   /**
-   * Also answer the preload's presentation mode (the page's own Google Cast SDK running on a stand-in
-   * Presentation API). Needs `ipcMain.on` and `ipcMain.removeListener`. Default false.
+   * Answer the preload's presentation mode (the page's own Google Cast SDK running on a stand-in Presentation API),
+   * which is the preload's default. Needs `ipcMain.on` and `ipcMain.removeListener`. Default true; false serves only
+   * the preload's `mode: "chromecast"`.
    */
   presentation?: boolean;
 }
@@ -68,12 +69,12 @@ function originOf(frame: FrameLike | null): string | null {
 /**
  * Wires the session service to Electron IPC: one invoke handler per app on
  * `<channel>:call`, events sent back on `<channel>:event`. Each webContents is
- * a sender that leaves its sessions when it is destroyed or navigates. With
- * `presentation: true` it also serves `<channel>:presentation` (see {@link CastManagerOptions.presentation}).
+ * a sender that leaves its sessions when it is destroyed or navigates. Unless
+ * `presentation: false` it also serves `<channel>:presentation` (see {@link CastManagerOptions.presentation}).
  */
 export function createCastManager(options: CastManagerOptions): CastManager {
   const channel = options.channel ?? "electron-cast";
-  if (options.presentation === true && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
+  if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
   const discovery = options.discovery ?? new CastDiscovery();
@@ -276,7 +277,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       },
     };
   };
-  const presentation = options.presentation === true ? setUpPresentation() : undefined;
+  const presentation = options.presentation !== false ? setUpPresentation() : undefined;
 
   let disposed = false;
   return {

@@ -48,10 +48,10 @@ class FakeIpcRenderer implements IpcRendererLike {
   }
 }
 
-test("preload presentation mode exposes only the presentation bridge and installs the stand-in", async () => {
+test("preload default is presentation mode: only the presentation bridge, and the stand-in", async () => {
   const contextBridge = new FakeContextBridge();
   const ipcRenderer = new FakeIpcRenderer();
-  installCastBridge({ contextBridge, ipcRenderer, mode: "presentation" });
+  installCastBridge({ contextBridge, ipcRenderer });
   assert.deepEqual([...contextBridge.exposed.keys()], ["__electronCastPresentationBridge"]);
   assert.equal(contextBridge.executed.length, 1);
   assert.equal(contextBridge.executed[0]?.func, installPresentationStandIn);
@@ -83,11 +83,19 @@ test("preload presentation mode honours the channel and key, and needs ipcRender
   assert.throws(() => installCastBridge({ contextBridge: new FakeContextBridge(), ipcRenderer: noSend, mode: "presentation" }), TypeError);
 });
 
-test("preload default mode is unchanged", () => {
+test("preload chromecast mode installs electron-cast's chrome.cast; an unknown mode throws", () => {
   const contextBridge = new FakeContextBridge();
-  installCastBridge({ contextBridge, ipcRenderer: new FakeIpcRenderer() });
+  installCastBridge({ contextBridge, ipcRenderer: new FakeIpcRenderer(), mode: "chromecast" });
   assert.deepEqual([...contextBridge.exposed.keys()], ["__electronCastBridge"]);
   assert.equal(contextBridge.executed[0]?.func, installChromeCast);
+  assert.throws(() => installCastBridge({ contextBridge: new FakeContextBridge(), ipcRenderer: new FakeIpcRenderer(), mode: "cast" as any }), TypeError);
+});
+
+test("manager default serves presentation mode", () => {
+  const ipcMain = new FakeIpcMain();
+  createCastManager({ ipcMain, discovery: new FakeDiscovery(), selectDevice: async () => null });
+  assert.deepEqual([...ipcMain.handlers.keys()], ["electron-cast:call", "electron-cast:presentation"]);
+  assert.equal(ipcMain.listeners.get("electron-cast:presentation:send")?.length, 1);
 });
 
 // ---------- main ----------

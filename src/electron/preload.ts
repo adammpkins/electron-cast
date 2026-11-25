@@ -11,7 +11,7 @@ export interface ContextBridgeLike {
 export interface IpcRendererLike {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
   on(channel: string, listener: (event: unknown, ...args: any[]) => void): unknown;
-  /** Needed only in presentation mode. */
+  /** Needed in presentation mode (the default). */
   send?(channel: string, ...args: unknown[]): void;
 }
 /** Dependencies of {@link installCastBridge}; the Electron objects are passed in, never imported. */
@@ -21,9 +21,9 @@ export interface CastBridgeOptions {
   channel?: string;    // default "electron-cast"
   bridgeKey?: string;  // default "__electronCastBridge"
   /**
-   * "chromecast" (default) installs electron-cast's own chrome.cast. "presentation" installs a stand-in
-   * Presentation API instead, so the page's own copy of Google's Cast SDK loads and runs unmodified; the main
-   * process must be created with `presentation: true`.
+   * "presentation" (default) installs a stand-in Presentation API, so the page's own copy of Google's Cast SDK
+   * loads and runs unmodified. "chromecast" installs electron-cast's own chrome.cast instead and blocks Google's
+   * loader scripts.
    */
   mode?: "chromecast" | "presentation";
   presentationBridgeKey?: string;  // default "__electronCastPresentationBridge"
@@ -33,10 +33,15 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Call from a preload script: exposes the bridge and installs chrome.cast in the page before its scripts run. */
+/**
+ * Call from a preload script. Exposes the bridge and, before the page's scripts run, installs the Presentation API
+ * stand-in (default) or, with `mode: "chromecast"`, electron-cast's own chrome.cast.
+ */
 export function installCastBridge(options: CastBridgeOptions): void {
   const channel = options.channel ?? "electron-cast";
-  if (options.mode === "presentation") {
+  const mode = options.mode ?? "presentation";
+  if (mode !== "presentation" && mode !== "chromecast") throw new TypeError(`unknown mode: ${String(mode)}`);
+  if (mode === "presentation") {
     installPresentationBridge(options, channel);
     return;
   }
