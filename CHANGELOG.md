@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0-next.1 (prerelease)
+
+A prerelease of 0.5.0 on the npm `next` tag: install it with `npm i electron-cast@next` (`npm i electron-cast`
+still installs 0.4.0).
 
 This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
 channels, the sessions on them are followed whoever started them, the app can cast and control media from its own
