@@ -83,9 +83,9 @@ export interface VirtualHarness {
  * run is a function of the code and the options only. `Date.now` (the sender's wall-clock origin for its NTP
  * timestamps) is pinned for the length of the run.
  */
-export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType } = {}): Promise<VirtualHarness> {
+export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType; oneWayDelayMs?: number } = {}): Promise<VirtualHarness> {
   const clock = new VirtualClock();
-  const env = new VirtualEnvironment(clock);
+  const env = new VirtualEnvironment(clock, opts.oneWayDelayMs);
   const realNow = Date.now;
   Date.now = () => 1_700_000_000_000 + clock.now();
   const receiver = await FakeReceiver.create({
