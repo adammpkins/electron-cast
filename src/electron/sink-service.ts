@@ -116,7 +116,6 @@ IPV6_PUBLIC.addSubnet("ff00::", 8, "ipv6");
 
 const LOOPBACK = new net.BlockList();
 LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
-LOOPBACK.addAddress("::1", "ipv6");
 
 /** `net::IPAddress::IsPubliclyRoutable`. An address that is not an IP literal counts as routable (it cannot be vetted). */
 export function isPubliclyRoutable(host: string): boolean {
@@ -124,17 +123,34 @@ export function isPubliclyRoutable(host: string): boolean {
   if (net.isIPv4(bare)) return !IPV4_RESERVED.check(bare, "ipv4");
   if (net.isIPv6(bare)) {
     if (IPV6_PUBLIC.check(bare, "ipv6")) return true;
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
-    return mapped !== null && !IPV4_RESERVED.check(mapped[1] as string, "ipv4");
+    // IsPubliclyRoutableIPv6: an IPv4-mapped address is as routable as the IPv4 address in it. The URL parser gives one
+    // form whatever way it was written (::ffff:8.8.8.8, ::ffff:808:808, 0:0:0:0:0:ffff:808:808), so match that.
+    const mapped = IPV4_MAPPED.exec(canonicalIPv6(bare));
+    if (mapped === null) return false;
+    const high = parseInt(mapped[1] as string, 16);
+    const low = parseInt(mapped[2] as string, 16);
+    return !IPV4_RESERVED.check(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`, "ipv4");
   }
   return true;
+}
+
+const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
+
+/** The compressed lower-case form of an IPv6 literal, as the URL parser writes it. */
+function canonicalIPv6(address: string): string {
+  try {
+    return new URL(`http://[${address}]`).hostname.slice(1, -1);
+  } catch {
+    return address.toLowerCase();
+  }
 }
 
 /** `net::IPAddress::IsLoopback`: 127.0.0.0/8 or ::1. */
 export function isLoopback(host: string): boolean {
   const bare = host.split("%")[0] ?? host;
   if (net.isIPv4(bare)) return LOOPBACK.check(bare, "ipv4");
-  if (net.isIPv6(bare)) return LOOPBACK.check(bare, "ipv6");
+  // ::1 only: node's BlockList would also match ::ffff:127.0.0.1 against 127/8, which IsLoopback does not
+  if (net.isIPv6(bare)) return canonicalIPv6(bare) === "::1";
   return false;
 }
 

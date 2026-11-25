@@ -336,6 +336,15 @@ test("isPubliclyRoutable and isLoopback follow net/base/ip_address.cc", () => {
   for (const h of ["8.8.8.8", "172.32.0.1", "1.1.1.1", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
     assert.equal(isPubliclyRoutable(h), true, h);
   }
+  // an IPv4-mapped address is as routable as the IPv4 address in it (IsPubliclyRoutableIPv6), whatever its spelling
+  for (const h of ["::ffff:8.8.8.8", "::ffff:808:808", "0:0:0:0:0:ffff:808:808", "::FFFF:8.8.8.8", "::ffff:0808:0808"]) {
+    assert.equal(isPubliclyRoutable(h), true, h);
+  }
+  for (const h of ["::ffff:192.168.1.5", "::ffff:c0a8:105", "::ffff:10.0.0.1", "::ffff:127.0.0.1", "::ffff:169.254.1.1", "::ffff:7f00:1"]) {
+    assert.equal(isPubliclyRoutable(h), false, h);
+  }
+  assert.equal(isPubliclyRoutable("64:ff9b::808:808"), false, "Chrome does not treat NAT64 as embedding an IPv4 address");
+  assert.equal(isLoopback("::ffff:127.0.0.1"), false, "IsLoopback does not look into a mapped address either");
   assert.equal(isLoopback("127.5.5.5"), true);
   assert.equal(isLoopback("::1"), true);
   assert.equal(isLoopback("10.0.0.1"), false);
