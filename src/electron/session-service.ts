@@ -477,6 +477,11 @@ export class CastSessionService {
     return this.sinkService;
   }
 
+  /** Whether the Cast sink was found by DIAL (`discovered_by_dial` of the sink service status). */
+  discoveredByDial(deviceId: string): boolean {
+    return this.sinkService.discoveredByDial(deviceId);
+  }
+
   /**
    * Open channels to the discovered devices that have none now, without Chrome's random delay, and ask the sinks again
    * about the apps being observed, by the refresh rules (`CastMediaRouteProvider::DiscoverSinksNow` ->

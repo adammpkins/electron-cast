@@ -113,9 +113,13 @@ export class MediaRouterLogger {
     return this.entries.map((e) => ({ ...e }));
   }
 
-  /** `LoggerImpl::GetLogsAsJson`. */
+  /**
+   * `LoggerImpl::GetLogsAsJson`: pretty printed. `AsValue` fills a `base::DictValue`, which is sorted by key, so the keys are
+   * written in alphabetical order.
+   */
   getLogsAsJson(): string {
-    return JSON.stringify(this.entries, null, 3);
+    const sorted = this.entries.map((e) => Object.fromEntries(Object.entries(e).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))));
+    return JSON.stringify(sorted, null, 3);
   }
 
   /** `LoggerImpl::AddObserver`. Returns the `RemoveObserver` function. */

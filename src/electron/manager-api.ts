@@ -14,10 +14,12 @@ import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSou
 
 import type { IssuesObserver, RouterIssues } from "./issues.ts";
 import type { LogEntry, LogObserver } from "./logger.ts";
+import type { MediaSinkServiceStatus, MediaSinkServiceStatusValue, StatusProviderId } from "./sink-service-status.ts";
 
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 export type { Issue, IssueInfo, IssueSeverity, IssuesObserver } from "./issues.ts";
 export type { LogCategory, LogEntry, LogObserver, LogSeverity } from "./logger.ts";
+export type { DiscoveredSinkStatus, MediaSinkServiceStatusValue } from "./sink-service-status.ts";
 import { castIconType, sortSinks } from "./sink-order.ts";
 import { sinkSupportsApp } from "./cast-media-source.ts";
 import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
@@ -206,6 +208,11 @@ export interface CastManagerApi {
    * mirroring events (and `UI` ones), oldest first. A debugging aid; Chrome gives pages no access to it and neither does this library.
    */
   getLogs(): LogEntry[];
+  /**
+   * `MediaRouterDesktop::GetLogsAsString` (`LoggerImpl::GetLogsAsJson`), the log the Cast feedback page attaches: the same
+   * entries as {@link getLogs}, as pretty-printed JSON with Chrome's key order.
+   */
+  getLogsAsString(): string;
   /** `LoggerImpl::AddObserver`: told of each entry as it is written. Returns the remove function. */
   registerLogObserver(observer: LogObserver): () => void;
   /**
@@ -213,6 +220,17 @@ export interface CastManagerApi {
    * `null` when the media router is off (Chrome: no activity manager).
    */
   getCastProviderState(): CastProviderState | null;
+  /**
+   * `MediaRouterDesktop::GetState` (`MediaSinkServiceStatus::GetStatusAsValue`), what `chrome://media-router-internals` shows
+   * as its state: `discovered_sinks`, the sinks each discovery service (`cast`, `dial`) last reported, and
+   * `available_sinks`, the last 100 lists of sink ids, keyed `<PROVIDER>:<media source>`, that observers of a media source
+   * got. Chrome's key names are kept. A discovery service reports 3 s after its sinks change. Only the sources of
+   * `registerMediaSinksObserver` queries with `presentationUrls` or `castMode` are recorded; with
+   * `--disable-features=MediaRouter` both maps are empty.
+   */
+  getMediaSinkServiceStatus(): MediaSinkServiceStatusValue;
+  /** `MediaRouterDesktop::GetMediaSinkServiceStatus` (`GetStatusAsJSONString`): {@link getMediaSinkServiceStatus} as pretty-printed JSON. */
+  getMediaSinkServiceStatusAsString(): string;
   /** The current routes (what `MediaRoutesObserver` last got), parked ones included. */
   getRoutes(): MediaRoute[];
   /** `MediaRouter::TerminateRoute`: stops the receiver app; pages get `sessionEnded` as if the device had. */
@@ -453,7 +471,7 @@ class ObserverSet<T> {
  * Sinks observation over a device source: `registerMediaSinksObserver` plus the source subscription, which is made
  * while at least one observer is registered. A change that leaves the (filtered) list as it was is not reported.
  */
-export function createSinksObservers(source: DeviceSource, availability?: AppAvailability): {
+export function createSinksObservers(source: DeviceSource, availability?: AppAvailability, status?: MediaSinkServiceStatus): {
   register(observer: MediaSinksObserver, query?: MediaSinksQuery, signal?: AbortSignal, eligible?: (d: CastDevice) => boolean): () => void;
   dispose(): void;
 } {
@@ -475,14 +493,16 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       const origin = query?.origin ?? "";
       const dial = availability?.dial;
       const dialAvailable = dial === undefined ? undefined : (d: CastDevice, app: string): boolean => dial.available(d, app, origin);
-      // Chrome's sinks query for a TAB_MIRROR or DESKTOP_MIRROR source: a Cast sink that can run one of its streaming apps
+      // Chrome's sinks query for a TAB_MIRROR or DESKTOP_MIRROR source: a Cast sink that can run one of its streaming apps.
+      // Any tab id gives the same apps; -1 is not a tab source (`IsTabMirroringSource` wants digits), so it listed every device.
       const mirrorSource =
         query?.castMode === undefined
           ? undefined
-          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(-1) : desktopMediaSource("any", query.withAudio === true));
-      const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
-        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null)
+          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(0) : desktopMediaSource("any", query.withAudio === true));
+      const matchesBase = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
         && (mirrorSource === undefined || (d.dial === undefined && sinkSupportsSource(mirrorSource, d.capabilities)));
+      const matches = (d: CastDevice): boolean => matchesBase(d)
+        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null);
       // DialMediaRouteProvider::StartObservingMediaSinks: the DIAL sinks are asked about each cast-dial: app while the
       // observer is registered
       const dialApps = urls === undefined || dial === undefined ? [] : [...new Set(urls.map((u) => (isDialSource(u) ? appNameFromDialSource(u) : "")))].filter((a) => a !== "");
@@ -514,6 +534,25 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       };
       // the list the app sees is sorted as the dialog sorts it (MediaRouterUI::OnSinksUpdated)
       const current = (): MediaSink[] => sortSinks(source.devices().filter(matches).map(toMediaSink));
+      // `MediaRouterDesktop::OnSinksReceived` -> `MediaSinkServiceStatus::UpdateAvailableSinks`: each provider reports the sinks
+      // of each media source its observers watch. A query that names no source (only capabilities, or nothing) is not one
+      // Chrome's providers see, so it is not recorded.
+      const recordAvailable = (): void => {
+        if (status === undefined) return;
+        const report = (provider: StatusProviderId, mediaSource: string, ok: (d: CastDevice) => boolean): void => {
+          status.updateAvailableSinks(provider, mediaSource, sortSinks(source.devices().filter(ok).map(toMediaSink)).map((s) => s.id));
+        };
+        if (urls !== undefined) {
+          for (const url of urls) {
+            const provider: StatusProviderId | undefined = isDialSource(url) ? "DIAL" : parsePresentationUrl(url) !== null ? "CAST" : undefined;
+            if (provider === undefined) continue;
+            report(provider, url, (d) => matchesBase(d)
+              && presentationUrlForDevice(d, [url], availability?.cached.bind(availability), dialAvailable) !== null);
+          }
+        } else if (mirrorSource !== undefined) {
+          report("CAST", mirrorSource.id, matchesBase);
+        }
+      };
       let last = "";
       const check = (): void => {
         ask();
@@ -521,6 +560,7 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
         const key = JSON.stringify(sinks);
         if (key === last) return;
         last = key;
+        recordAvailable();
         try {
           observer.onSinksUpdated(sinks);
         } catch (err) {
@@ -583,7 +623,9 @@ function must(result: BridgeResult): void {
 /** What the API needs for issues and the log; main.ts makes them (a test may leave them out: no issues are raised then). */
 export interface ApiDiagnostics {
   issues: RouterIssues;
-  logger: { getLogs(): LogEntry[]; addObserver(observer: LogObserver): () => void };
+  logger: { getLogs(): LogEntry[]; getLogsAsJson(): string; addObserver(observer: LogObserver): () => void };
+  /** `MediaRouterDesktop::media_sink_service_status_`; the same one `createSinksObservers` was given. */
+  status?: MediaSinkServiceStatus;
   /** False when the media router is off (`--disable-features=MediaRouter`). */
   enabled: boolean;
   /**
@@ -633,6 +675,9 @@ export function createManagerApi(
       diagnostics?.issues.manager.clearTopIssueForSink(sinkId);
     },
     getLogs: () => diagnostics?.logger.getLogs() ?? [],
+    getLogsAsString: () => diagnostics?.logger.getLogsAsJson() ?? "[]",
+    getMediaSinkServiceStatus: () => diagnostics?.status?.getStatusAsValue() ?? { available_sinks: {}, discovered_sinks: {} },
+    getMediaSinkServiceStatusAsString: () => diagnostics?.status?.getStatusAsJSONString() ?? JSON.stringify({ available_sinks: {}, discovered_sinks: {} }, null, 3),
     registerLogObserver(observer) {
       if (typeof observer !== "function") throw new TypeError("observer must be a function");
       return diagnostics?.logger.addObserver(observer) ?? (() => {});

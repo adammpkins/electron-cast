@@ -5,7 +5,7 @@ import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle, type SiteMirroringHooks } from "./presentation-handler.ts";
 import { randomUUID } from "node:crypto";
 import {
-  MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
+  MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice, toMediaSink,
   type CastManagerApi, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
 import { getReceiverIdHashToken, type ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
@@ -26,6 +26,7 @@ import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
 import { IssueManager, RouterIssues, originNameForDisplay } from "./issues.ts";
+import { DiscoveredSinksTracker, MediaSinkServiceStatus } from "./sink-service-status.ts";
 import { MediaRouterLogger } from "./logger.ts";
 import { CastMessageLog } from "./message-logging.ts";
 import {
@@ -69,6 +70,7 @@ export type {
   CastManagerApi, CastProviderState, CastSessionState, DevicePickerContext, Issue, IssueInfo, IssueSeverity, IssuesObserver,
   LogCategory, LogEntry, LogObserver, LogSeverity, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
   MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
+  DiscoveredSinkStatus, MediaSinkServiceStatusValue,
 } from "./manager-api.ts";
 
 /** The subset of an Electron `WebFrameMain` the manager needs. */
@@ -1135,6 +1137,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   const isDialRoute = (id: string): boolean => dial?.provider.routes().some((r) => r.id === id) ?? false;
   const notDial = { ok: false as const, code: "invalid_parameter", description: "A DIAL route has no volume or media control" };
   const castDevices = service.deviceSource();
+  const sinkStatus = new MediaSinkServiceStatus();
   const api = createManagerApi(createSinksObservers(dialSource === undefined ? castDevices : combineSources(castDevices, dialSource), {
     cached: (d, appId) => service.cachedAppAvailability(d, appId),
     check: (d, appId) => service.checkAppAvailability(d, appId),
@@ -1144,7 +1147,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     }),
-  }), {
+  }, sinkStatus), {
     mediaRoutes: routes,
     observeSessions: (l) => {
       const off = service.observeSessions(l);
@@ -1224,6 +1227,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   }, {
     issues,
     logger,
+    status: sinkStatus,
     enabled: routerEnabled,
     // MediaRouteStarter::GetScreenCapturePermission asks on macOS only; Electron cannot prompt, so a refusal is the answer
     ...(options.mirroring !== undefined && "electron" in options.mirroring && options.mirroring.electron.systemPreferences !== undefined && process.platform === "darwin"
@@ -1234,6 +1238,21 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   castSinks = () => service.devices();
   const castChanged = (): void => dial?.castDevicesChanged();
   if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.on(e, castChanged);
+  // MediaRouterDesktop::OnUserGesture: the status hears of each discovery service's sinks (DualMediaSinkService "cast" and "dial")
+  const discoveredTrackers = [
+    new DiscoveredSinksTracker(sinkStatus, "cast",
+      () => service.devices().map((d) => ({ sink: toMediaSink(d), discoveredByDial: service.discoveredByDial(d.id) })),
+      (listener) => {
+        for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.on(e, listener);
+        return () => { for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, listener); };
+      }),
+    ...(dialSource === undefined ? [] : [new DiscoveredSinksTracker(sinkStatus, "dial",
+      () => dialSource.devices().map((d) => ({ sink: toMediaSink(d), discoveredByDial: false })),
+      (listener) => {
+        dialSource.on("deviceChanged", listener);
+        return () => dialSource.off("deviceChanged", listener);
+      })]),
+  ];
   let disposed = false;
   return {
     ...api,
@@ -1260,6 +1279,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (disposed) return;
       disposed = true;
       api.dispose();
+      for (const t of discoveredTrackers) t.dispose();
       permissionSource.off?.("permissionRejected", onPermissionRejected);
       issues.manager.dispose();
       logger.dispose();
