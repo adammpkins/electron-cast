@@ -9,8 +9,9 @@
   routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route. No new
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
-  tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
-  pause and resume, hardware codecs.
+  tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting (Electron has no hook for it, see docs/DESIGN.md), tab
+  switching, pause and resume, hardware codecs. Like Chrome, a mirroring session sends `GET_CAPABILITIES` once after the first
+  negotiation and keeps the receiver's remoting capabilities.
 
 ## 0.4.0
 

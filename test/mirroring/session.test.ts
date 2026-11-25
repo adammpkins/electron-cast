@@ -138,3 +138,48 @@ test("stopSession is idempotent and notifies once", async () => {
   assert.equal(h.stopped(), true);
   h.close();
 });
+
+// openscreen_session_host.cc OnNegotiated: RequestCapabilities once on the first negotiation; sender_session.cc
+// OnCapabilitiesResponse / ToCapabilities.
+
+test("GET_CAPABILITIES is sent once and the response is converted as ToCapabilities does", async () => {
+  const h = await startHarness();
+  await sleep(300);
+  assert.equal(h.receiver.capabilityRequests, 1);
+  assert.deepEqual(h.host.receiverCapabilities, { audio: ["baseline", "opus"], video: ["vp8"] });
+  h.close();
+});
+
+test("capabilities map every media capability name, ignoring plain video", async () => {
+  const h = await startHarness({
+    receiver: {
+      capabilitiesResponse: (seqNum) => ({ type: "CAPABILITIES_RESPONSE", seqNum, result: "ok", capabilities: { mediaCaps: ["audio", "aac", "opus", "video", "4k", "h264", "vp8", "vp9", "hevc", "av1"] } }),
+    },
+  });
+  await sleep(300);
+  assert.deepEqual(h.host.receiverCapabilities, { audio: ["baseline", "aac", "opus"], video: ["4k", "h264", "vp8", "vp9", "hevc", "av1"] });
+  h.close();
+});
+
+test("a receiver newer than the supported remoting version leaves the session running without capabilities", async () => {
+  const h = await startHarness({
+    receiver: { capabilitiesResponse: (seqNum) => ({ type: "CAPABILITIES_RESPONSE", seqNum, result: "ok", capabilities: { remoting: 3, mediaCaps: ["audio"] } }) },
+  });
+  await sleep(300);
+  assert.equal(h.host.receiverCapabilities, undefined);
+  assert.equal(h.errors.length, 0);
+  assert.ok(h.log.some((m) => m.includes("Remoting is disabled for this session") && m.includes("too new")));
+  assert.equal(h.host.isStopped, false);
+  h.close();
+});
+
+test("an error response to GET_CAPABILITIES leaves the session running", async () => {
+  const h = await startHarness({
+    receiver: { capabilitiesResponse: (seqNum) => ({ type: "CAPABILITIES_RESPONSE", seqNum, result: "error", error: { code: 1, description: "no remoting" } }) },
+  });
+  await sleep(300);
+  assert.equal(h.host.receiverCapabilities, undefined);
+  assert.equal(h.errors.length, 0);
+  assert.ok(h.log.some((m) => m.includes("Remoting is disabled for this session")));
+  h.close();
+});
