@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work, or works differently from Chrome.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never post device names, device ids, IP addresses, MAC addresses, Wi-Fi network names or certificates. Scrub your logs first.
+
+        For a security problem, do not open an issue. Use a [private advisory](https://github.com/adammpkins/electron-cast/security/advisories/new).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal example helps most. Say if a real device is needed.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: electron-cast, Electron and OS.
+      placeholder: electron-cast 0.4.0, Electron 45, Windows 11
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device model and Cast firmware (if a device is involved)
+  - type: textarea
+    id: chrome
+    attributes:
+      label: What Chrome does
+      description: If you know, how Chrome behaves in the same case, with the Chromium source if you found it.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (scrubbed)
+      render: text

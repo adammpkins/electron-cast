@@ -1,0 +1,78 @@
+name: Device report
+description: Tell us what worked and what failed on your OS, network and Cast device.
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. Reports from macOS, real Linux desktops (GNOME or KDE, X11 or Wayland), DIAL smart TVs, setups with two network adapters, Cast groups and older Chromecasts are the most useful. A report where everything worked is useful too.
+
+        **Scrub everything before you post.** Never post device names, device ids, IP addresses, MAC addresses, Wi-Fi network names or certificates. Replace them with placeholders such as `Living Room TV` and `192.0.2.10`. See [CONTRIBUTING.md](https://github.com/adammpkins/electron-cast/blob/main/CONTRIBUTING.md#scrub-before-you-post).
+
+        Only test with devices that are yours.
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: macOS 15.1, Ubuntu 24.04 GNOME on Wayland, Windows 11 23H2
+    validations:
+      required: true
+  - type: input
+    id: electron
+    attributes:
+      label: Electron version
+      placeholder: "45.0.0"
+    validations:
+      required: true
+  - type: input
+    id: library
+    attributes:
+      label: electron-cast version
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device model and Cast firmware
+      description: The model and firmware version, not its name. Say if it is a DIAL smart TV, a Cast group, or a speaker.
+      placeholder: Chromecast with Google TV, firmware 1.56.xxxxxx
+    validations:
+      required: true
+  - type: dropdown
+    id: ip
+    attributes:
+      label: Network, IP version
+      options:
+        - IPv4 only
+        - IPv4 and IPv6
+        - IPv6 only
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: network
+    attributes:
+      label: Network, other details
+      description: How many network adapters, Wi-Fi or wired, a VPN or virtual switch, and whether the device is on the same network as the computer.
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: For example the probes, a live harness, or your own app. Say how you ran it.
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+  - type: textarea
+    id: failed
+    attributes:
+      label: What failed
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (scrubbed)
+      description: Paste only scrubbed output. Probe output hides names and addresses unless you passed `--names`.
+      render: text
