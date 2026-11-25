@@ -1,11 +1,15 @@
 import { EventEmitter } from "node:events";
 import os from "node:os";
-import { CastDeviceCache, type CastDevice } from "./device-cache.ts";
-import { decodeDnsPacket, encodeMdnsQuery, RecordType, type DnsPacket } from "./dns-packet.ts";
+import { CastDeviceCache, type CacheChange, type CastDevice } from "./device-cache.ts";
+import { decodeDnsPacket, encodeMdnsQuery, RecordType, type DnsPacket, type DnsRecord } from "./dns-packet.ts";
 import { openUdpMdnsSocket } from "./udp-socket.ts";
 
-/** An external IPv4 interface. */
-export interface NetworkInterfaceInfo { name: string; address: string }
+/**
+ * An interface mDNS runs on. `family` is "IPv4" when absent. For "IPv6" it is the interface's link-local address
+ * and `scopeId` its zone. An IPv4 entry may carry the `scopeId` of the same adapter's link-local address, so
+ * link-local AAAA records heard on it can be turned into addresses that can be connected to (`fe80::1%12`).
+ */
+export interface NetworkInterfaceInfo { name: string; address: string; family?: "IPv4" | "IPv6"; scopeId?: number }
 
 /** Callbacks for an mDNS socket: incoming packets and socket errors. */
 export interface MdnsSocketHandlers {
@@ -42,14 +46,47 @@ export function listIPv4Interfaces(nets?: NodeJS.Dict<os.NetworkInterfaceInfo[]>
   return out;
 }
 
+const LINK_LOCAL_V6 = /^fe[89ab][0-9a-f]:/i;
+
+/**
+ * The interfaces mDNS should run on: every external IPv4 address (see {@link listIPv4Interfaces}), then one IPv6
+ * link-local address per adapter (mDNS over IPv6 is per link, whatever global addresses the adapter has).
+ */
+export function listMdnsInterfaces(nets?: NodeJS.Dict<os.NetworkInterfaceInfo[]>): NetworkInterfaceInfo[] {
+  const all = nets ?? os.networkInterfaces();
+  const scopes = new Map<string, { address: string; scopeId: number }>();
+  for (const [name, addrs] of Object.entries(all)) {
+    for (const addr of addrs ?? []) {
+      const family: unknown = addr.family;
+      if (family !== "IPv6" && family !== 6) continue;
+      if (addr.internal || !LINK_LOCAL_V6.test(addr.address)) continue;
+      const scopeId = (addr as { scopeid?: number }).scopeid;
+      if (typeof scopeId !== "number" || scopeId <= 0) continue;
+      if (!scopes.has(name)) scopes.set(name, { address: addr.address.split("%")[0] ?? addr.address, scopeId });
+    }
+  }
+  const v4 = listIPv4Interfaces(all).map((i): NetworkInterfaceInfo => {
+    const scope = scopes.get(i.name);
+    return scope ? { ...i, scopeId: scope.scopeId } : i;
+  });
+  const v6 = [...scopes].map(([name, { address, scopeId }]): NetworkInterfaceInfo => ({ name, address, family: "IPv6", scopeId }));
+  return [...v4, ...v6];
+}
+
+/** Identifies an interface: IPv6 link-local addresses repeat across adapters, so they carry their scope. */
+function ifaceKey(iface: NetworkInterfaceInfo): string {
+  return iface.family === "IPv6" ? `${iface.address}%${iface.scopeId ?? iface.name}` : iface.address;
+}
+
 export interface CastDiscoveryOptions {
   serviceName?: string;          // default "_googlecast._tcp.local"
-  interfaces?: () => NetworkInterfaceInfo[];   // default () => listIPv4Interfaces()
+  interfaces?: () => NetworkInterfaceInfo[];   // default () => listMdnsInterfaces() (IPv4, plus IPv6 link-local)
   openSocket?: OpenMdnsSocket;   // default openUdpMdnsSocket
   followUpQueriesMs?: number[];  // default [1000, 3000], measured from start
   refreshMs?: number;            // default 60000
   expireCheckMs?: number;        // default 1000
   interfaceCheckMs?: number;     // default 10000
+  resumeGapMs?: number;          // default 3 x interfaceCheckMs: a check this late means the machine slept
 }
 
 export interface CastDiscoveryEvents {
@@ -64,13 +101,24 @@ interface SocketEntry {
   socket: MdnsSocket;
 }
 
+/**
+ * A link-local AAAA record (`fe80::...`) only names a device together with the link it was heard on, so the
+ * interface's scope is appended (`fe80::1%12`); with no known scope the address is unusable and the record is
+ * dropped. Everything else passes through.
+ */
+function scopeLinkLocal(record: DnsRecord, iface: NetworkInterfaceInfo): DnsRecord[] {
+  if (record.type !== "AAAA" || !LINK_LOCAL_V6.test(record.data) || record.data.includes("%")) return [record];
+  if (iface.scopeId === undefined) return [];
+  return [{ ...record, data: `${record.data}%${iface.scopeId}` }];
+}
+
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
 /**
  * Discovers Cast devices by sending mDNS PTR queries on every external IPv4
- * interface and joining the answers into {@link CastDevice}s.
+ * interface (and over IPv6 link-local where it works) and joining the answers into {@link CastDevice}s.
  */
 export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
   private readonly serviceName: string;
@@ -80,10 +128,16 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
   private readonly refreshMs: number;
   private readonly expireCheckMs: number;
   private readonly interfaceCheckMs: number;
+  private readonly resumeGapMs: number;
   private readonly queryPacket: Buffer;
   private cache: CastDeviceCache;
   private sockets: SocketEntry[] = [];
   private readonly pending = new Set<string>();
+  /** Interfaces whose last open failed and was reported, so a retry loop does not repeat the report. */
+  private readonly failed = new Set<string>();
+  /** Interface keys of the last listing, to tell which interfaces went away. */
+  private lastListed = new Set<string>();
+  private lastCheckAt = 0;
   private timers: NodeJS.Timeout[] = [];
   private startPromise: Promise<void> | null = null;
   private stopped = false;
@@ -91,12 +145,13 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
   constructor(options: CastDiscoveryOptions = {}) {
     super();
     this.serviceName = options.serviceName ?? DEFAULT_SERVICE_NAME;
-    this.listIfaces = options.interfaces ?? (() => listIPv4Interfaces());
+    this.listIfaces = options.interfaces ?? (() => listMdnsInterfaces());
     this.openSocketFn = options.openSocket ?? openUdpMdnsSocket;
     this.followUpQueriesMs = options.followUpQueriesMs ?? [1000, 3000];
     this.refreshMs = options.refreshMs ?? 60_000;
     this.expireCheckMs = options.expireCheckMs ?? 1000;
     this.interfaceCheckMs = options.interfaceCheckMs ?? 10_000;
+    this.resumeGapMs = options.resumeGapMs ?? this.interfaceCheckMs * 3;
     this.cache = new CastDeviceCache(this.serviceName);
     this.queryPacket = encodeMdnsQuery(this.serviceName, RecordType.PTR);
   }
@@ -107,6 +162,7 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
     if (this.startPromise !== null) return this.startPromise;
     this.startTimers();
     const ifaces = this.listIfaces();
+    this.lastListed = new Set(ifaces.map(ifaceKey));
     this.startPromise = Promise.allSettled(ifaces.map((iface) => this.openIface(iface))).then(
       () => undefined,
     );
@@ -141,6 +197,7 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
     for (const entry of this.sockets) this.closeQuietly(entry.socket);
     this.sockets = [];
     this.pending.clear();
+    this.failed.clear();
     this.cache = new CastDeviceCache(this.serviceName);
   }
 
@@ -161,12 +218,14 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
         for (const device of change.removed) this.emit("deviceDown", device);
       }, this.expireCheckMs),
     );
+    this.lastCheckAt = Date.now();
     this.timers.push(setInterval(() => this.checkInterfaces(), this.interfaceCheckMs));
   }
 
   /** Opens a socket on `iface`; on success adds it and sends one query on it. */
   private openIface(iface: NetworkInterfaceInfo): Promise<void> {
-    this.pending.add(iface.address);
+    const key = ifaceKey(iface);
+    this.pending.add(key);
     const work = (async (): Promise<void> => {
       // Errors are matched to this socket, not to its address: a late error from a replaced socket must not
       // close the socket that replaced it.
@@ -175,28 +234,32 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
       try {
         socket = await this.openSocketFn(iface, this.makeHandlers(iface, holder));
       } catch (error) {
-        if (!this.stopped) this.emit("socketError", iface, toError(error));
+        if (!this.stopped && !this.failed.has(key)) {
+          this.failed.add(key);
+          this.emit("socketError", iface, toError(error));
+        }
         return;
       }
       holder.socket = socket;
-      if (this.stopped || this.sockets.some((s) => s.iface.address === iface.address)) {
+      this.failed.delete(key);
+      if (this.stopped || this.sockets.some((s) => ifaceKey(s.iface) === key)) {
         this.closeQuietly(socket);
         return;
       }
       this.sockets.push({ iface, socket });
       this.safeQuery(iface, socket);
     })();
-    return work.finally(() => this.pending.delete(iface.address));
+    return work.finally(() => this.pending.delete(key));
   }
 
   private makeHandlers(iface: NetworkInterfaceInfo, holder: { socket?: MdnsSocket }): MdnsSocketHandlers {
     return {
-      message: (packet: Buffer) => this.onMessage(packet),
+      message: (packet: Buffer) => this.onMessage(packet, iface),
       error: (error: Error) => this.onSocketError(iface, error, holder.socket),
     };
   }
 
-  private onMessage(packet: Buffer): void {
+  private onMessage(packet: Buffer, iface: NetworkInterfaceInfo): void {
     if (this.stopped) return;
     let decoded: DnsPacket;
     try {
@@ -205,8 +268,13 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
       return;
     }
     if (!decoded.isResponse) return;
-    const records = [...decoded.answers, ...decoded.authorities, ...decoded.additionals];
-    const change = this.cache.ingest(records, Date.now());
+    const records = [...decoded.answers, ...decoded.authorities, ...decoded.additionals].flatMap((r) =>
+      scopeLinkLocal(r, iface),
+    );
+    this.emitChange(this.cache.ingest(records, Date.now(), ifaceKey(iface)));
+  }
+
+  private emitChange(change: CacheChange): void {
     for (const device of change.removed) this.emit("deviceDown", device);
     for (const device of change.updated) this.emit("deviceChanged", device);
     for (const device of change.added) this.emit("deviceUp", device);
@@ -242,15 +310,32 @@ export class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
     } catch {
       return;
     }
-    const listed = new Set(ifaces.map((i) => i.address));
+    // A timer that fires long after it was due means the machine slept. Sockets can come back from sleep alive but
+    // deaf (lost multicast membership, no error), so open fresh ones rather than trust them.
+    const now = Date.now();
+    const resumed = now - this.lastCheckAt > this.resumeGapMs;
+    this.lastCheckAt = now;
+    if (resumed) {
+      for (const entry of this.sockets) this.closeQuietly(entry.socket);
+      this.sockets = [];
+    }
+    const listed = new Set(ifaces.map(ifaceKey));
     this.sockets = this.sockets.filter((entry) => {
-      if (listed.has(entry.iface.address)) return true;
+      if (listed.has(ifaceKey(entry.iface))) return true;
       this.closeQuietly(entry.socket);
       return false;
     });
+    // Devices that were only heard on an interface that is gone cannot be reached, so they go now, not after their TTL.
+    for (const key of this.lastListed) {
+      if (listed.has(key)) continue;
+      this.failed.delete(key);
+      this.emitChange(this.cache.dropSource(key));
+    }
+    this.lastListed = listed;
     for (const iface of ifaces) {
-      if (this.sockets.some((s) => s.iface.address === iface.address)) continue;
-      if (this.pending.has(iface.address)) continue;
+      const key = ifaceKey(iface);
+      if (this.sockets.some((s) => ifaceKey(s.iface) === key)) continue;
+      if (this.pending.has(key)) continue;
       void this.openIface(iface);
     }
   }

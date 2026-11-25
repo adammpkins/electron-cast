@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Discovery now also runs mDNS over IPv6 (link-local, per adapter) so IPv6-only devices are found, with `fe80::` addresses carrying their scope so they can be connected to. IPv4 is still preferred. A network adapter that goes away takes its devices with it at once, and sockets are replaced after the machine wakes from sleep.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which

@@ -95,6 +95,14 @@ Observed on real devices (fixtures in `test/fixtures/mdns/`):
 - On Windows a PC commonly has several adapters (Ethernet, Wi-Fi, Tailscale, WSL/Hyper-V virtual switches) and Cast
   devices answer on only one. Discovery must query and listen on every non-internal IPv4 interface; binding one
   default interface (what `multicast-dns` does) finds nothing on many machines.
+- IPv6 and network changes. Besides IPv4, discovery joins `ff02::fb` on each adapter's link-local address (one
+  socket per adapter; if that fails it is reported once and IPv4 carries on). `CastDevice.host` is IPv4 when the
+  device has one (Chromium's Cast discovery resolves only A records, so IPv4 is what Chrome would use), else global
+  IPv6, else link-local; `addresses` lists them in that order, newest first. Link-local AAAA records get the scope
+  of the interface that heard them (`fe80::1%12`), which is what `tls.connect` needs. Devices are still keyed by
+  TXT `id`, so a new DHCP address updates the same device (`deviceChanged`). When an interface disappears, devices
+  that only it heard are removed at once rather than after their TTL, and a timer that fires far too late (the
+  machine slept) makes discovery replace its sockets and query again.
 
 ## Polyfill layer (`src/polyfill/`)
 

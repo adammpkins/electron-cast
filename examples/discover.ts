@@ -8,7 +8,8 @@ const seconds = arg !== undefined && Number.isFinite(Number(arg)) && Number(arg)
 const discovery = new CastDiscovery();
 
 const line = (kind: string, d: CastDevice): void => {
-  console.log(`${kind.padEnd(6)} ${d.name}  ${d.model}  ${d.host}:${d.port}  ca=${d.capabilities}  id=${d.id}`);
+  const others = d.addresses.filter((a) => a !== d.host);
+  console.log(`${kind.padEnd(6)} ${d.name}  ${d.model}  ${d.host}:${d.port}  ca=${d.capabilities}  id=${d.id}${others.length > 0 ? `  also ${others.join(", ")}` : ""}`);
 };
 
 discovery.on("deviceUp", (d) => line("up", d));
@@ -20,11 +21,13 @@ discovery.on("socketError", (iface, error) => {
 
 await discovery.start();
 for (const iface of discovery.interfaces()) {
-  console.log(`listening on ${iface.name} (${iface.address})`);
+  console.log(`listening on ${iface.name} (${iface.address}${iface.family === "IPv6" ? `%${iface.scopeId}` : ""})`);
 }
 
 setTimeout(() => {
-  const count = discovery.devices().length;
+  const all = discovery.devices();
+  const count = all.length;
+  for (const d of all) console.log(`  ${d.name}: ${d.addresses.join(", ")}`);
   discovery.stop();
   console.log(`done: ${count} device(s)`);
 }, seconds * 1000);

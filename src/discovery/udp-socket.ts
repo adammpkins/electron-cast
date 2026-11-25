@@ -2,6 +2,7 @@ import dgram from "node:dgram";
 import type { MdnsSocket, MdnsSocketHandlers, NetworkInterfaceInfo } from "./cast-discovery.ts";
 
 export const MDNS_GROUP = "224.0.0.251";
+export const MDNS_GROUP_V6 = "ff02::fb";
 export const MDNS_PORT = 5353;
 
 type CreateSocket = (options: dgram.SocketOptions) => dgram.Socket;
@@ -42,12 +43,13 @@ function makeSocket(
   socket: dgram.Socket,
   handlers: MdnsSocketHandlers,
   mode: "multicast" | "unicast",
+  group: string,
 ): MdnsSocket & { mode: "multicast" | "unicast" } {
   let closed = false;
   return {
     mode,
     send(packet: Buffer): void {
-      socket.send(packet, MDNS_PORT, MDNS_GROUP, (error) => {
+      socket.send(packet, MDNS_PORT, group, (error) => {
         if (error) handlers.error(error);
       });
     },
@@ -84,7 +86,7 @@ async function setupMulticast(
     throw error;
   }
   attach(socket, handlers);
-  return makeSocket(socket, handlers, "multicast");
+  return makeSocket(socket, handlers, "multicast", MDNS_GROUP);
 }
 
 /** mDNS legacy unicast: bind an ephemeral port on the interface; responders answer straight back. */
@@ -107,15 +109,72 @@ async function setupUnicast(
     throw error;
   }
   attach(socket, handlers);
-  return makeSocket(socket, handlers, "unicast");
+  return makeSocket(socket, handlers, "unicast", MDNS_GROUP);
 }
 
-/** Opens an mDNS socket on one interface: multicast on port 5353 if possible, else a unicast socket. */
+/** An IPv6 interface address with its zone, e.g. `fe80::1%12`: link-local addresses are ambiguous without one. */
+function scoped(iface: NetworkInterfaceInfo): string {
+  return iface.scopeId === undefined ? iface.address : `${iface.address}%${iface.scopeId}`;
+}
+
+async function setupMulticast6(
+  create: CreateSocket,
+  iface: NetworkInterfaceInfo,
+  handlers: MdnsSocketHandlers,
+): Promise<MdnsSocket & { mode: "multicast" | "unicast" }> {
+  const socket = create({ type: "udp6", reuseAddr: true, ipv6Only: true });
+  try {
+    await waitForBind(socket, { port: MDNS_PORT, exclusive: false });
+    socket.addMembership(MDNS_GROUP_V6, scoped(iface));
+    socket.setMulticastInterface(`::%${iface.scopeId ?? iface.name}`);
+    socket.setMulticastTTL(255);
+    socket.setMulticastLoopback(false);
+  } catch (error) {
+    try {
+      socket.close();
+    } catch {
+      // already closed
+    }
+    throw error;
+  }
+  attach(socket, handlers);
+  return makeSocket(socket, handlers, "multicast", MDNS_GROUP_V6);
+}
+
+async function setupUnicast6(
+  create: CreateSocket,
+  iface: NetworkInterfaceInfo,
+  handlers: MdnsSocketHandlers,
+): Promise<MdnsSocket & { mode: "multicast" | "unicast" }> {
+  const socket = create({ type: "udp6", ipv6Only: true });
+  try {
+    await waitForBind(socket, { port: 0, address: scoped(iface) });
+    socket.setMulticastInterface(`::%${iface.scopeId ?? iface.name}`);
+    socket.setMulticastTTL(255);
+  } catch (error) {
+    try {
+      socket.close();
+    } catch {
+      // already closed
+    }
+    throw error;
+  }
+  attach(socket, handlers);
+  return makeSocket(socket, handlers, "unicast", MDNS_GROUP_V6);
+}
+
+/**
+ * Opens an mDNS socket on one interface: multicast on port 5353 if possible, else a unicast socket. An IPv6
+ * interface (`family: "IPv6"`) uses ff02::fb on that interface's scope.
+ */
 export function openUdpMdnsSocket(
   iface: NetworkInterfaceInfo,
   handlers: MdnsSocketHandlers,
   options?: { createSocket?: CreateSocket },
 ): Promise<MdnsSocket & { mode: "multicast" | "unicast" }> {
   const create = options?.createSocket ?? ((opts: dgram.SocketOptions) => dgram.createSocket(opts));
+  if (iface.family === "IPv6") {
+    return setupMulticast6(create, iface, handlers).catch(() => setupUnicast6(create, iface, handlers));
+  }
   return setupMulticast(create, iface, handlers).catch(() => setupUnicast(create, iface, handlers));
 }

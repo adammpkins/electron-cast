@@ -4,6 +4,7 @@ import type { NetworkInterfaceInfo as OsInterface } from "node:os";
 import {
   CastDiscovery,
   listIPv4Interfaces,
+  listMdnsInterfaces,
   type CastDiscoveryOptions,
   type MdnsSocket,
   type MdnsSocketHandlers,
@@ -22,7 +23,8 @@ const QUERY = encodeMdnsQuery(SERVICE, RecordType.PTR);
 interface Announce {
   id: string;
   fn: string;
-  addr: string;
+  addr?: string;
+  aaaa?: string[];
   port?: number;
   ca?: number;
   ttl?: number;
@@ -31,17 +33,30 @@ interface Announce {
 
 const instanceOf = (id: string) => `Chromecast-${id}.${SERVICE}`;
 
-function announce(o: Announce): Buffer {
+function ipv6Bytes(address: string): Buffer {
+  const [head = "", tail] = address.split("::");
+  const words = (part: string) => (part === "" ? [] : part.split(":").map((w) => parseInt(w, 16)));
+  const h = words(head);
+  const t = tail === undefined ? [] : words(tail);
+  const all = [...h, ...Array<number>(tail === undefined ? 0 : 8 - h.length - t.length).fill(0), ...t];
+  const b = Buffer.alloc(16);
+  all.forEach((w, i) => b.writeUInt16BE(w, i * 2));
+  return b;
+}
+
+function announce(o: Announce, opts: { cacheFlush?: boolean } = {}): Buffer {
+  const flush = opts.cacheFlush === false ? 0x0001 : 0x8001;
   const instance = instanceOf(o.id);
   const host = `${o.id}.local`;
   const ttl = o.ttl ?? 120;
   const srv = Buffer.concat([Buffer.from([0, 0, 0, 0, (o.port ?? 8009) >> 8, (o.port ?? 8009) & 0xff]), dnsName(host)]);
   return Buffer.concat([
-    header({ an: 1, ar: 3, flags: o.flags ?? 0x8400 }),
+    header({ an: 1, ar: 2 + (o.addr ? 1 : 0) + (o.aaaa?.length ?? 0), flags: o.flags ?? 0x8400 }),
     rr(SERVICE, RecordType.PTR, 1, ttl, dnsName(instance)),
     rr(instance, RecordType.SRV, 0x8001, ttl, srv),
     rr(instance, RecordType.TXT, 0x8001, 4500, txt([`id=${o.id}`, `fn=${o.fn}`, "md=Chromecast", `ca=${o.ca ?? 5}`, "rs="])),
-    rr(host, RecordType.A, 0x8001, ttl, Buffer.from(o.addr.split(".").map(Number))),
+    ...(o.addr ? [rr(host, RecordType.A, flush, ttl, Buffer.from(o.addr.split(".").map(Number)))] : []),
+    ...(o.aaaa ?? []).map((a) => rr(host, RecordType.AAAA, flush, ttl, ipv6Bytes(a))),
   ]);
 }
 
@@ -125,7 +140,9 @@ class FakeNet {
   }
 }
 
-const ETH: NetworkInterfaceInfo = { name: "Ethernet", address: "10.0.0.5" };
+const ETH: NetworkInterfaceInfo = { name: "Ethernet", address: "10.0.0.5", scopeId: 12 };
+const ETH6: NetworkInterfaceInfo = { name: "Ethernet", address: "fe80::5", family: "IPv6", scopeId: 12 };
+const WIFI6: NetworkInterfaceInfo = { name: "Wi-Fi", address: "fe80::5", family: "IPv6", scopeId: 7 };
 const WIFI: NetworkInterfaceInfo = { name: "Wi-Fi", address: "192.168.1.5" };
 const WSL: NetworkInterfaceInfo = { name: "vEthernet (WSL)", address: "172.20.0.1" };
 
@@ -187,6 +204,26 @@ test("listIPv4Interfaces keeps external IPv4 addresses, in order, once each", ()
   ]);
 });
 
+test("listMdnsInterfaces adds one link-local IPv6 interface per adapter, with its scope", () => {
+  const nets = {
+    Ethernet: [
+      { address: "fe80::5", family: "IPv6", internal: false, scopeid: 12 },
+      { address: "2001:db8::5", family: "IPv6", internal: false, scopeid: 0 },
+      { address: "fe80::6", family: "IPv6", internal: false, scopeid: 12 },
+      { address: "10.0.0.5", family: "IPv4", internal: false },
+    ],
+    "Wi-Fi": [{ address: "fe80::5", family: "IPv6", internal: false, scopeid: 7 }],
+    "No scope": [{ address: "fe80::9", family: "IPv6", internal: false, scopeid: 0 }],
+    Loopback: [{ address: "::1", family: "IPv6", internal: true, scopeid: 0 }],
+  } as unknown as NodeJS.Dict<OsInterface[]>;
+  assert.deepEqual(listMdnsInterfaces(nets), [
+    { name: "Ethernet", address: "10.0.0.5", scopeId: 12 },
+    { name: "Ethernet", address: "fe80::5", family: "IPv6", scopeId: 12 },
+    { name: "Wi-Fi", address: "fe80::5", family: "IPv6", scopeId: 7 },
+  ]);
+  assert.deepEqual(listIPv4Interfaces(nets), [{ name: "Ethernet", address: "10.0.0.5" }]);
+});
+
 test("listIPv4Interfaces reads the machine's interfaces by default", () => {
   const list = listIPv4Interfaces();
   assert.ok(Array.isArray(list));
@@ -213,7 +250,8 @@ test("start called twice opens each socket once", async () => {
 });
 
 test("queries again 1 s and 3 s after start, then every 60 s", async () => {
-  const { net, discovery } = setup([ETH]);
+  // This test jumps the mocked clock by a minute at a time, which is not a sleep.
+  const { net, discovery } = setup([ETH], { resumeGapMs: Infinity });
   await discovery.start();
   const at = async (to: number, expected: number) => {
     await advance(to - Date.now());
@@ -283,6 +321,71 @@ test("the same answer heard on two interfaces is one device", async () => {
   net.on(WIFI.address).receive(announce(TV));
   assert.equal(events.length, 1);
   assert.equal(discovery.devices().length, 1);
+});
+
+test("a device that only has AAAA records is found; global IPv6 is preferred to link-local", async () => {
+  const { net, discovery, events } = setup([ETH, ETH6]);
+  await discovery.start();
+  const v6only: Announce = { id: "dddd0000000000000000000000000004", fn: "v6 only", aaaa: ["fe80::abcd", "2001:db8::10"] };
+  net.on("fe80::5").receive(announce(v6only));
+  assert.deepEqual(events, [{ type: "deviceUp", id: v6only.id, name: "v6 only" }]);
+  const [d] = discovery.devices();
+  assert.equal(d?.host, "2001:db8::10");
+  assert.deepEqual(d?.addresses, ["2001:db8::10", "fe80::abcd%12"]);
+});
+
+test("a link-local-only device gets the scope of the interface that heard it, so it can be connected to", async () => {
+  const { net, discovery } = setup([ETH, WIFI6, ETH6]);
+  await discovery.start();
+  net.on("fe80::5").receive(announce({ id: "dddd0000000000000000000000000004", fn: "ll", aaaa: ["fe80::abcd"] }));
+  assert.equal(discovery.devices()[0]?.host, "fe80::abcd%7", "the first socket with that address is WIFI6's");
+  const other = setup([ETH, ETH6]);
+  await other.discovery.start();
+  other.net.on("10.0.0.5").receive(announce({ id: "dddd0000000000000000000000000004", fn: "ll", aaaa: ["fe80::abcd"] }));
+  assert.equal(other.discovery.devices()[0]?.host, "fe80::abcd%12", "an IPv4 socket knows its adapter's scope");
+});
+
+test("a link-local address heard on an interface with no known scope is not usable and is ignored", async () => {
+  const { net, discovery } = setup([WIFI]);
+  await discovery.start();
+  net.on(WIFI.address).receive(announce({ id: "dddd0000000000000000000000000004", fn: "ll", aaaa: ["fe80::abcd"] }));
+  assert.deepEqual(discovery.devices(), []);
+});
+
+test("IPv4 is preferred when a device has both", async () => {
+  const { net, discovery } = setup([ETH, ETH6]);
+  await discovery.start();
+  net.on("10.0.0.5").receive(announce({ ...TV, aaaa: ["2001:db8::10"] }));
+  const [d] = discovery.devices();
+  assert.equal(d?.host, "10.0.0.10");
+  assert.deepEqual(d?.addresses, ["10.0.0.10", "2001:db8::10"]);
+});
+
+test("a device that gets a new IP (DHCP) is updated in place, not duplicated, and the new address leads", async () => {
+  const { net, discovery, events } = setup([ETH]);
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  await advance(5000);
+  // The device announces the new address without the cache-flush bit, so the old record is still in the cache.
+  net.on(ETH.address).receive(announce({ ...TV, addr: "10.0.0.77" }, { cacheFlush: false }));
+  assert.deepEqual(events.map((e) => e.type), ["deviceUp", "deviceChanged"]);
+  assert.equal(discovery.devices().length, 1);
+  assert.equal(discovery.devices()[0]?.host, "10.0.0.77");
+  // With the cache-flush bit the old addresses are dropped altogether.
+  await advance(5000);
+  net.on(ETH.address).receive(announce({ ...TV, addr: "10.0.0.78" }));
+  assert.equal(discovery.devices().length, 1);
+  assert.deepEqual(discovery.devices()[0]?.addresses, ["10.0.0.78"]);
+});
+
+test("a goodbye (TTL 0) for the A record removes only that address", async () => {
+  const { net, discovery, events } = setup([ETH]);
+  await discovery.start();
+  net.on(ETH.address).receive(announce({ ...TV, aaaa: ["2001:db8::10"] }));
+  const bye = Buffer.concat([header({ an: 1 }), rr(`${TV.id}.local`, RecordType.A, 0x8001, 0, Buffer.from([10, 0, 0, 10]))]);
+  net.on(ETH.address).receive(bye);
+  assert.deepEqual(discovery.devices()[0]?.addresses, ["2001:db8::10"]);
+  assert.deepEqual(events.map((e) => e.type), ["deviceUp", "deviceChanged"]);
 });
 
 test("a changed TXT record is deviceChanged", async () => {
@@ -406,6 +509,69 @@ test("new interfaces are opened and queried; vanished ones are closed; unchanged
   assert.deepEqual(discovery.interfaces(), [ETH, WSL]);
   await advance(10_000);
   assert.deepEqual(net.attempts, [ETH.address, WIFI.address, WSL.address]);
+});
+
+test("devices heard only on an interface that goes away are removed at once; others stay", async () => {
+  const { net, discovery, events } = setup([ETH, WIFI]);
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  net.on(WIFI.address).receive(announce(SPEAKER));
+  net.on(ETH.address).receive(announce(HUB));
+  net.on(WIFI.address).receive(announce(HUB));
+  events.length = 0;
+  net.ifaces = [WIFI];
+  await advance(10_000);
+  assert.deepEqual(events, [{ type: "deviceDown", id: TV.id, name: "Lounge TV" }]);
+  assert.deepEqual(discovery.devices().map((d) => d.id), [HUB.id, SPEAKER.id]);
+});
+
+test("an interface whose socket had already failed still drops its devices when it disappears", async () => {
+  const { net, discovery, events } = setup([ETH, WIFI]);
+  await discovery.start();
+  net.on(ETH.address).receive(announce(TV));
+  net.on(ETH.address).handlers.error(new Error("ENETDOWN"));
+  events.length = 0;
+  net.ifaces = [WIFI];
+  await advance(10_000);
+  assert.deepEqual(events, [{ type: "deviceDown", id: TV.id, name: "Lounge TV" }]);
+});
+
+test("an IPv6 interface that cannot be opened is reported once and IPv4 carries on", async () => {
+  const { net, discovery, errors } = setup([ETH, ETH6]);
+  net.failOpen.set(ETH6.address, new Error("EADDRNOTAVAIL ff02::fb"));
+  await discovery.start();
+  assert.deepEqual(errors, [{ address: "fe80::5", message: "EADDRNOTAVAIL ff02::fb" }]);
+  assert.deepEqual(discovery.interfaces(), [ETH]);
+  for (let i = 0; i < 3; i++) await advance(10_000);
+  assert.equal(net.attempts.filter((a) => a === "fe80::5").length, 4, "retried at every check");
+  assert.equal(errors.length, 1, "but reported once");
+  net.on(ETH.address).receive(announce(TV));
+  assert.equal(discovery.devices().length, 1);
+  net.failOpen.clear();
+  await advance(10_000);
+  assert.deepEqual(discovery.interfaces(), [ETH, ETH6]);
+});
+
+test("the same link-local address on two adapters is two interfaces", async () => {
+  const { net, discovery } = setup([ETH6, WIFI6]);
+  await discovery.start();
+  assert.deepEqual(discovery.interfaces(), [ETH6, WIFI6]);
+  net.ifaces = [WIFI6];
+  await advance(10_000);
+  assert.deepEqual(discovery.interfaces(), [WIFI6]);
+});
+
+test("after a long gap between interface checks (sleep and resume) the sockets are replaced and queried", async () => {
+  const { net, discovery } = setup([ETH]);
+  await discovery.start();
+  const before = net.on(ETH.address);
+  // A sleeping machine runs no timers: jump the clock without ticking them.
+  mock.timers.setTime(5 * 60_000);
+  await advance(10_000);
+  assert.equal(before.closed, true);
+  const fresh = net.on(ETH.address);
+  assert.notEqual(fresh, before);
+  assert.deepEqual(fresh.sent, [QUERY]);
 });
 
 test("the interface check interval can be configured", async () => {
