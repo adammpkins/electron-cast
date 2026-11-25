@@ -5,6 +5,7 @@ import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
+import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 
 /**
@@ -20,6 +21,11 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type { CastSinkOptions, ChannelParams, SinkRetryOptions } from "./sink-service.ts";
+export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type {
+  AccessCodeCapabilities, AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AccessCodeStore, AddSinkResult,
+  SinkCreationFailure,
+} from "./access-code.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
   MediaSinksQuery, SinkIconType,
@@ -84,6 +90,11 @@ export interface CastManagerOptions {
    * devices. The defaults are Chrome's, and there is no way to turn the tracking off: Chrome has none.
    */
   sinks?: CastSinkOptions;
+  /**
+   * Adding a device by its address, as Chrome's access code casting adds the device a code resolved to (see
+   * {@link CastManager.addSinkByAddress}). Off unless `enabled`, as Chrome's `AccessCodeCastEnabled` policy is.
+   */
+  accessCode?: AccessCodeOptions;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -98,6 +109,25 @@ export interface CastManager extends CastManagerApi {
    * some time after `start()`.
    */
   settled(options?: { retries?: boolean }): Promise<void>;
+  /**
+   * Add a device whose address the app knows, as Chrome adds the device an access code resolved to. electron-cast does not
+   * resolve codes: that is a private Google service (docs/DESIGN.md, "Access code casting"), so the app supplies the
+   * address. A channel is opened to the device and it is listed like a discovered one, then removed 20 s after
+   * `accessCode.deviceDuration` seconds, or once a route to it ends after that. Rejects with `AccessCodeCastDisabledError`
+   * unless `accessCode.enabled`. The address rules of discovered devices apply: a public or loopback address is refused
+   * (`channel_open_error`) unless `sinks.allowAllIps` is set.
+   */
+  addSinkByAddress(device: AccessCodeDevice): Promise<AddSinkResult>;
+  /** Change `accessCode.enabled` and `accessCode.deviceDuration` while running, as Chrome applies its policies. */
+  configureAccessCode(settings: { enabled?: boolean; deviceDuration?: number }): Promise<void>;
+  /** The devices added by address that are remembered now. */
+  rememberedSinks(): AccessCodeRememberedSink[];
+  /**
+   * The machine's network changed. Devices added by address and not in use are removed, and the remembered ones are tried
+   * again 4.45 s later, so those on the new network come back (Chrome: `AccessCodeCastSinkService::OnNetworksChanged`).
+   * electron-cast does not see networks come and go, so call it from the app's own network monitoring.
+   */
+  networksChanged(): void;
   dispose(): Promise<void>;
 }
 
@@ -140,6 +170,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       verifyDevice: options.verifyDevices !== false,
       connectTimeoutMs: params.connectTimeoutMs,
       heartbeatTimeoutMs: params.livenessTimeoutMs,
+      heartbeatIntervalMs: params.pingIntervalMs,
     }));
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
@@ -237,6 +268,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
     sinks: options.sinks,
+    accessCode: options.accessCode,
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -464,6 +496,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
     settled: (options) => service.settled(options),
+    addSinkByAddress: (device) => service.addSinkByAddress(device),
+    configureAccessCode: (settings) => service.configureAccessCode(settings),
+    rememberedSinks: () => service.rememberedSinks(),
+    networksChanged: () => service.networksChanged(),
     async dispose() {
       if (disposed) return;
       disposed = true;
