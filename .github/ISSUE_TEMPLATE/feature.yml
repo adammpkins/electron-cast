@@ -1,0 +1,39 @@
+name: Feature or API change
+description: Propose a new feature or a change to the public API. Please open this before writing code.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        electron-cast does what Chrome does, and cites the Chromium source for it. We agree on that behaviour here first, so your pull request goes smoothly. App-specific features belong in the app, and `mode: "chromecast"` is frozen. See [CONTRIBUTING.md](https://github.com/adammpkins/electron-cast/blob/main/CONTRIBUTING.md#behave-as-chrome-and-cite-chromium).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do, and why
+    validations:
+      required: true
+  - type: textarea
+    id: chromium
+    attributes:
+      label: The Chromium behaviour being matched
+      description: Say what Chrome does, and link the source on chromium.googlesource.com (file and function, not a line number). If Chrome has no such behaviour, say so and explain why Electron needs it.
+    validations:
+      required: true
+  - type: textarea
+    id: api
+    attributes:
+      label: Proposed API or behaviour change
+      description: What would change for people who use the library.
+  - type: textarea
+    id: differs
+    attributes:
+      label: Where it would differ from Chrome
+      description: Anything Electron forces us to do differently. Each deviation is documented in docs/DESIGN.md.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Checks
+      options:
+        - label: It does not need a runtime dependency.
+        - label: It is not specific to one app.
+        - label: It is not a new feature for `mode: "chromecast"`, which is frozen.
