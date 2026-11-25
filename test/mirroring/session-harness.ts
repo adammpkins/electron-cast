@@ -20,7 +20,7 @@ export interface Harness {
   close(): void;
 }
 
-export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType; env?: Record<string, string | undefined> } = {}): Promise<Harness> {
+export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType; env?: Record<string, string | undefined>; enableRtcpReporting?: boolean } = {}): Promise<Harness> {
   const receiver = await FakeReceiver.create(opts.receiver);
   const env = new UdpEnvironment("127.0.0.1");
   await env.bind();
@@ -30,7 +30,7 @@ export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?
   const log: string[] = [];
   let stopped = false;
   const host = new OpenscreenSessionHost(
-    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0" },
+    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0", ...(opts.enableRtcpReporting === true ? { enableRtcpReporting: true } : {}) },
     {
       environment: env,
       router,

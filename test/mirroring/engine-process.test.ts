@@ -170,3 +170,50 @@ test("the engine process relays a tab switch and freeze and unfreeze to the agen
     receiver.close();
   }
 });
+
+test("the engine process answers get-stats with the session's statistics", async () => {
+  const receiver = await FakeReceiver.create({ eventLog: true });
+  const toMain: FromEngine[] = [];
+  let onToEngine: ((e: { data: ToEngine; ports: MessagePortLike[] }) => void) | undefined;
+  runEngineProcess(
+    {
+      postMessage: (m) => {
+        toMain.push(m);
+        if (m.type === "send") receiver.onControlMessage(m.namespace, m.json);
+      },
+      on: (_event, listener) => {
+        onToEngine = listener;
+      },
+    },
+    () => {},
+  );
+  receiver.sendControl = (json) => setImmediate(() => onToEngine!({ data: { type: "message", namespace: "urn:x-cast:com.google.cast.webrtc", json }, ports: [] }));
+  const agent = new FakeAgentPort();
+  onToEngine!({
+    data: {
+      type: "start",
+      params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1", enableRtcpReporting: true },
+      source: { kind: "tab", mediaSourceId: "tab-id" },
+      softwareCodecs: ["vp8"],
+      env: {},
+    },
+    ports: [agent],
+  });
+  try {
+    await sleep(1800);
+    onToEngine!({ data: { type: "get-stats", id: 7 }, ports: [] });
+    await sleep(50);
+    const reply = toMain.find((m) => m.type === "stats");
+    assert.ok(reply && reply.type === "stats" && reply.id === 7);
+    const video = reply.stats?.video;
+    assert.ok(video !== undefined);
+    assert.ok((video.NUM_PACKETS_SENT as number) > 20);
+    assert.ok((video.NUM_FRAMES_CAPTURED as number) > 20);
+    assert.ok((video.FRAMES_INSERTED as number) > 20);
+    assert.ok((video.NUM_PACKETS_RECEIVED as number) > 20);
+  } finally {
+    onToEngine!({ data: { type: "stop" }, ports: [] });
+    await sleep(50);
+    receiver.close();
+  }
+});

@@ -80,6 +80,39 @@ export interface ReceiverRtcpOptions {
   nacks?: { frameId: number; packetId: number }[];
   /** Sorted, unique. */
   acks?: number[];
+  /** The receiver event log: one frame log per entry, each with one event. */
+  eventLog?: ReceiverLogEvent[];
+}
+
+/** One event of the receiver's RTCP event log, as `CompoundRtcpParser::ParseFrameLogMessages` reads it. */
+export interface ReceiverLogEvent {
+  /** Low 32 bits of the RTP timestamp. */
+  rtpTimestamp: number;
+  /** Receiver clock, whole milliseconds; only the low 24 bits fit the frame log's base time. */
+  timestampMs: number;
+  /** 4-bit wire type (11 ack sent, 12 played out, 13 decoded, 14 packet received). */
+  wireType: number;
+  /** Packet id for packet received, signed delay in milliseconds for played out. */
+  value: number;
+  /** Added to the base time, 0..4095. */
+  deltaMs?: number;
+}
+
+/** The Cast receiver log, an application-defined RTCP packet (`AppendReceiverLogPacket`). */
+export function buildReceiverLogPacket(receiverSsrc: number, events: ReceiverLogEvent[]): Buffer {
+  const payload = 8 + events.length * 12;
+  const b = Buffer.alloc(4 + payload);
+  let p = writeCommonHeader(b, 0, RtcpPacketType.applicationDefined, RtcpSubtype.receiverLog, payload);
+  p = b.writeUInt32BE(receiverSsrc, p);
+  p = b.writeUInt32BE(RTCP_CAST_IDENTIFIER_WORD, p);
+  for (const e of events) {
+    p = b.writeUInt32BE(e.rtpTimestamp >>> 0, p);
+    // One event per frame log: the count byte is the number of events minus one.
+    p = b.writeUInt32BE(e.timestampMs & 0xffffff, p);
+    p = b.writeUInt16BE(e.value & 0xffff, p);
+    p = b.writeUInt16BE(((e.wireType & 0xf) << 12) | ((e.deltaMs ?? 0) & 0xfff), p);
+  }
+  return b;
 }
 
 /** `CompoundRtcpBuilder::BuildPacket`. */
@@ -160,6 +193,7 @@ export function buildReceiverRtcp(o: ReceiverRtcpOptions): Buffer {
     ack.copy(b, p);
     parts.push(b);
   }
+  if (o.eventLog !== undefined && o.eventLog.length > 0) parts.push(buildReceiverLogPacket(o.receiverSsrc, o.eventLog));
   return Buffer.concat(parts);
 }
 

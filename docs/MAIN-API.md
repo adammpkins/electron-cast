@@ -485,6 +485,28 @@ route is bound to is in `route.members`. Switching is for `tab_mirror` routes on
 a route still launching, or a page that cannot be captured). `freezeInfo` is `{ canFreeze, isFrozen }` on mirroring
 routes. A frozen route unfreezes when its tab is switched.
 
+Mirroring statistics are a debugging aid, as in Chrome's `chrome://media-router-internals` "Mirroring stats" (not a web
+API; nothing is uploaded, and Chrome's UMA is not ported):
+
+```js
+manager.setMirroringStatsEnabled(true); // off by default; read when a session starts, so call it before startCasting
+const route = await manager.startCasting(sink.id, { castMode: "tab_mirror", webContentsId });
+const off = manager.registerMirroringStatsObserver((routeId, stats) => {}); // every 500 ms, as Chrome's observers
+manager.getMirroringStats(route.id); // { audio: {...}, video: {...} }; {} until the first fetch or when it was off
+manager.isMirroringStatsEnabled();
+```
+
+The dictionary has Chrome's names and units. Per stream: `ENQUEUE_FPS`, `AVG_CAPTURE_LATENCY_MS`, `AVG_ENCODE_TIME_MS`,
+`AVG_QUEUEING_LATENCY_MS`, `AVG_NETWORK_LATENCY_MS`, `AVG_PACKET_LATENCY_MS`, `AVG_FRAME_LATENCY_MS`,
+`AVG_E2E_LATENCY_MS`, `ENCODE_KBPS`, `TRANSMISSION_KBPS`, `MS_SINCE_LAST_RECEIVER_RESPONSE`, `NUM_FRAMES_CAPTURED`,
+`NUM_FRAMES_DROPPED_BY_ENCODER`, `NUM_FRAMES_LATE`, `NUM_PACKETS_SENT`, `NUM_PACKETS_RECEIVED`, `FIRST_EVENT_TIME_MS`,
+`LAST_EVENT_TIME_MS`, `UNKNOWN_OPEN_SCREEN_STAT` (retransmitted packets), the histograms (`CAPTURE_LATENCY_MS_HISTO`,
+`ENCODE_TIME_MS_HISTO`, `QUEUEING_LATENCY_MS_HISTO`, `NETWORK_LATENCY_MS_HISTO`, `PACKET_LATENCY_MS_HISTO`,
+`E2E_LATENCY_MS_HISTO`, `LATE_FRAME_MS_HISTO`, each a list like `[{ "0-19": 12 }, { ">=800": 1 }]`), and from the session
+host `TARGET_BITRATE`, `ENCODER_UTILIZATION`, `LOSSINESS`, `FRAMES_INSERTED`, `FRAMES_DROPPED`. A value that is not
+finite is the string `"null"`. As in Chrome the structure is for logs, not a contract. `getMirroringStats` takes a route
+id because several routes can run (Chrome's debugger keeps one global copy).
+
 `mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
 `BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`, `webContents`), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
 `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.

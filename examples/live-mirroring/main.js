@@ -6,6 +6,8 @@
 // its idle screen). Add --extra-codecs to let the sender offer VP9 as well as VP8.
 // In tab mode a second, differently coloured window opens too. While casting, press in the terminal (or use the
 // "Cast" menu): s = switch the mirrored tab to the other window (and back), f = freeze the picture, u = unfreeze.
+//   npm run tab -- "Living Room" --stats   also prints the mirroring statistics (Chrome's media-router-internals "Mirroring
+//   stats") every 5 seconds
 import { app, BrowserWindow, Menu, MessageChannelMain, desktopCapturer, dialog, ipcMain, utilityProcess, webContents } from "electron";
 import { createCastManager } from "electron-cast/main";
 
@@ -98,6 +100,9 @@ async function main() {
     return;
   }
 
+  // Chrome reads this when a session starts, so it is switched on before startCasting.
+  if (flag("stats")) cast.setMirroringStatsEnabled(true);
+
   let route;
   try {
     if (mode === "desktop") {
@@ -161,7 +166,16 @@ async function main() {
   });
   console.log("Keys: s = switch tab, f = freeze, u = unfreeze (or the Cast menu).");
 
+  let statsTimer;
+  if (flag("stats")) {
+    statsTimer = setInterval(() => {
+      const stats = cast.getMirroringStats(route.id);
+      console.log(`Mirroring stats: ${JSON.stringify(stats, null, 2)}`);
+    }, 5000);
+  }
+
   const stop = async () => {
+    clearInterval(statsTimer);
     await cast.terminateRoute(route.id).catch(() => {});
     await cast.dispose();
     app.quit();

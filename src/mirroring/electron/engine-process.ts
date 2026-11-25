@@ -10,6 +10,7 @@ import { createEncodingSupport } from "../encoding-support.ts";
 import { createMirroringServiceFactory } from "../engine.ts";
 import type { MirroringService } from "../mirroring-activity.ts";
 import type { SessionParameters } from "../session-host.ts";
+import type { MirroringStats } from "../stats/statistics.ts";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { AgentPort, AgentToEngine, CaptureSource, EngineToAgent } from "./agent-protocol.ts";
 import { PortBackend } from "./port-backend.ts";
@@ -23,6 +24,7 @@ export type ToEngine =
   /** `CastMirroringServiceHost::Pause` / `Resume`. */
   | { type: "pause" }
   | { type: "resume" }
+  | { type: "get-stats"; id: number }
   | { type: "stop" };
 
 /** Engine to main. */
@@ -31,7 +33,8 @@ export type FromEngine =
   | { type: "did-start" }
   | { type: "did-stop" }
   | { type: "error"; error: string; message: string }
-  | { type: "log"; message: string };
+  | { type: "log"; message: string }
+  | { type: "stats"; id: number; stats: MirroringStats | undefined };
 
 /** The slice of `process.parentPort` and of a `MessagePortMain` this file uses. */
 export interface ParentPortLike {
@@ -88,6 +91,9 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
       service?.pause?.(() => {});
     } else if (data.type === "resume") {
       service?.resume?.(() => {});
+    } else if (data.type === "get-stats") {
+      const id = data.id;
+      void (service?.getMirroringStats?.() ?? Promise.resolve(undefined)).then((stats) => parentPort.postMessage({ type: "stats", id, stats }));
     } else if (data.type === "stop") {
       service?.stop();
       service = undefined;

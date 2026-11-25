@@ -35,6 +35,8 @@ menu, `Ctrl+Shift+S/F/U`):
 Also try: `s` while frozen (the picture should move again on the new window), `f` twice quickly, closing the window that
 is not being mirrored (nothing should happen), and closing the one that is (the route ends).
 
-Options: `--extra-codecs` lets the sender also offer VP9 (VP8 is always offered, and Opus for audio).
+Options: `--extra-codecs` lets the sender also offer VP9 (VP8 is always offered, and Opus for audio). `--stats` prints
+the mirroring statistics (Chrome's "Mirroring stats") every 5 seconds, for example
+`npm run tab -- "Living Room TV" --stats`. The first lines come a few seconds in, once the receiver has sent its event log.
 
 If something fails, the log lines that start with `electron-cast mirroring:` and `engine:` say where.

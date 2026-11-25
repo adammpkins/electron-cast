@@ -11,6 +11,7 @@ import { createSocket, type Socket } from "node:dgram";
 import { isIPv6 } from "node:net";
 import { performance } from "node:perf_hooks";
 import { MAX_RTP_PACKET_SIZE_IPV4, MAX_RTP_PACKET_SIZE_IPV6 } from "../protocol/constants.ts";
+import type { StatisticsCollector } from "../stats/statistics-collector.ts";
 import type { SessionEnvironment } from "../sender/sender-session.ts";
 
 export type ReceivedPacketHandler = (arrivalTimeMs: number, packet: Buffer) => void;
@@ -23,6 +24,8 @@ export class UdpEnvironment implements SessionEnvironment {
   private closed = false;
   /** Called on a socket error that makes the stream unusable (`Environment::OnError`). */
   onSocketError: ((error: Error) => void) | undefined;
+  /** `Environment::SetStatisticsCollector`: set by the session while statistics are on. */
+  statisticsCollector: StatisticsCollector | undefined;
 
   /** `receiverAddress` decides the packet size: the receiver's address family is the path MTU assumption. */
   constructor(receiverAddress: string, socket?: Socket) {

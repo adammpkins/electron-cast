@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import type { CastDevice } from "../discovery/index.ts";
 import { MirroringActivity, type MirroringClient, type MirroringServiceFactory } from "./mirroring-activity.ts";
+import type { MirroringStats } from "./stats/statistics.ts";
 import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringType } from "./routing.ts";
 
 /** `MediaCastMode` values this library implements besides the Presentation API. */
@@ -76,7 +77,11 @@ export interface MirroringManagerOptions {
 interface Entry {
   route: MirroringRoute;
   activity: MirroringActivity;
+  stats: MirroringStats | undefined;
 }
+
+/** `MediaRouterDebugger::MirroringStatsObserver::OnMirroringStatsUpdated`, with the route the statistics are of. */
+export type MirroringStatsListener = (routeId: string, stats: MirroringStats) => void;
 
 /** `MediaRoute::kRouteIdPrefix`. */
 const ROUTE_ID_PREFIX = "urn:x-org.chromium:media:route:";
@@ -85,6 +90,9 @@ export class MirroringManager {
   private readonly options: MirroringManagerOptions;
   private readonly entries = new Map<string, Entry>();
   private readonly listeners = new Set<() => void>();
+  private readonly statsListeners = new Set<MirroringStatsListener>();
+  /** `MediaRouterDebugger` state: whether sessions that start next fetch their statistics. Off by default, as in Chrome. */
+  private fetchMirroringStats = false;
   private disposed = false;
 
   constructor(options: MirroringManagerOptions) {
@@ -134,7 +142,7 @@ export class MirroringManager {
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
-    const entry = {} as Entry;
+    const entry = { stats: undefined } as unknown as Entry;
     const client = this.options.createClient(device);
     const activity = new MirroringActivity({
       sink: device,
@@ -143,6 +151,18 @@ export class MirroringManager {
       client,
       createService: this.options.createService,
       log,
+      shouldFetchMirroringStats: () => this.fetchMirroringStats,
+      onMirroringStats: (stats) => {
+        if (this.entries.get(routeId) !== entry) return;
+        entry.stats = stats;
+        for (const l of [...this.statsListeners]) {
+          try {
+            l(routeId, structuredClone(stats));
+          } catch (err) {
+            this.options.log?.("error", `a mirroring stats observer failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      },
       onStop: () => {
         if (this.entries.get(routeId) === entry) {
           this.entries.delete(routeId);
@@ -175,6 +195,30 @@ export class MirroringManager {
     }
     if (activity.state === "stopped") throw new MirroringRouteError("unable_to_cast", "mirroring stopped while starting");
     return { ...entry.route };
+  }
+
+  /** `MediaRouterDebugger::EnableRtcpReports` / `DisableRtcpReports`: applies to sessions that start afterwards. */
+  setMirroringStatsEnabled(enabled: boolean): void {
+    this.fetchMirroringStats = enabled;
+  }
+
+  /** `MediaRouterDebugger::ShouldFetchMirroringStats`. */
+  isMirroringStatsEnabled(): boolean {
+    return this.fetchMirroringStats;
+  }
+
+  /**
+   * `MediaRouterDebugger::GetMirroringStats`: the latest statistics of the route (Chrome keeps the most recent push of
+   * any session; here each route has its own). Empty before the first fetch or when statistics were off at the start.
+   */
+  getMirroringStats(routeId: string): MirroringStats {
+    return structuredClone(this.entries.get(routeId)?.stats ?? {});
+  }
+
+  /** `MediaRouterDebugger::AddObserver`. Returns the remove function. */
+  observeMirroringStats(listener: MirroringStatsListener): () => void {
+    this.statsListeners.add(listener);
+    return () => void this.statsListeners.delete(listener);
   }
 
   /** `CastActivityManager::TerminateSession`: stops the receiver's app and the capture. */
@@ -247,6 +291,7 @@ export class MirroringManager {
     for (const entry of [...this.entries.values()]) entry.activity.stopMirroring();
     this.entries.clear();
     this.listeners.clear();
+    this.statsListeners.clear();
   }
 
   private mediaSourceFor(options: StartMirroringOptions): string {

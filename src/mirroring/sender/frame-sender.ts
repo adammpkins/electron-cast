@@ -52,6 +52,9 @@ export interface SenderEncodedFrame {
   /** -1 when not computed. */
   encoderUtilization: number;
   lossiness?: number;
+  /** `capture_begin_time` / `capture_end_time`: absent when the capture source does not provide them. */
+  captureBeginTimeMs?: number;
+  captureEndTimeMs?: number;
 }
 
 /** The parts of the openscreen `Sender` the policy needs. */
@@ -65,6 +68,8 @@ export interface SenderView {
   /** Absent on a read-only snapshot used before encoding. */
   enqueueFrame?(frame: EncodedFrame): EnqueueFrameResult;
   setObserver?(observer: SenderObserver | undefined): void;
+  /** `ReportFrameDropEvent`: feeds the statistics, when they are on. */
+  reportFrameDropEvent?(frameId: number, rtpTimestamp: number, dropTimeMs: number): void;
 }
 
 /** `FrameSender::Client`. */
@@ -200,6 +205,8 @@ export class FrameSender implements SenderObserver {
       referenceTimeMs: frame.referenceTimeMs,
       newPlayoutDelayMs,
       data: frame.data,
+      ...(frame.captureBeginTimeMs !== undefined ? { captureBeginTimeMs: frame.captureBeginTimeMs } : {}),
+      ...(frame.captureEndTimeMs !== undefined ? { captureEndTimeMs: frame.captureEndTimeMs } : {}),
     });
     if (result === "OK") {
       this.lastAccepted = { frameId: frame.frameId, openscreenFrameId };
@@ -209,6 +216,11 @@ export class FrameSender implements SenderObserver {
       this.frameRtpTimestamps[frame.frameId & 0xff] = frame.rtpTimestamp;
     }
     return toFrameDropReason(result);
+  }
+
+  /** `ReportFrameDroppedByEncoder`: the dropped frame had no id, so the one it would have been given is reported. */
+  reportFrameDroppedByEncoder(rtpTimestamp: number): void {
+    this.sender.reportFrameDropEvent?.(this.sender.nextFrameId, rtpTimestamp, this.now());
   }
 
   /** `GetOpenscreenReferencedFrameId`: producers reference either the frame itself or the one before it. */

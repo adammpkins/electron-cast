@@ -1026,6 +1026,15 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           },
     freezeRoute: (id) => mirroring?.freezeRoute(id) ?? false,
     unfreezeRoute: (id) => mirroring?.unfreezeRoute(id) ?? false,
+    mirroringStats:
+      mirroring === undefined
+        ? undefined
+        : {
+            get: (id) => mirroring.getMirroringStats(id),
+            setEnabled: (enabled) => mirroring.setMirroringStatsEnabled(enabled),
+            isEnabled: () => mirroring.isMirroringStatsEnabled(),
+            observe: (observer) => mirroring.observeMirroringStats(observer),
+          },
   }, {
     requests: defaults,
     start: (webContentsId, sinkId) => {

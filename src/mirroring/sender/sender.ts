@@ -16,6 +16,8 @@ import { buildSenderReport, type RtcpReportBlock } from "../rtcp/sender-report.t
 import { FrameCrypto } from "../rtp/frame-crypto.ts";
 import type { EncodedFrame, EncryptedFrame } from "../rtp/frame.ts";
 import { RtpPacketizer, BASE_RTP_HEADER_SIZE } from "../rtp/packetizer.ts";
+import { StatisticsDispatcher } from "../stats/statistics-dispatcher.ts";
+import type { RtcpReceiverFrameLogMessage } from "../stats/statistics-common.ts";
 import { NEVER, type RoutedSender, type SenderEnvironment, type SenderPacketRouter, type StreamType } from "./packet-router.ts";
 
 /** public/sender.h `Sender::EnqueueFrameResult`. */
@@ -74,6 +76,7 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
   private readonly rtcpParser: CompoundRtcpParser;
   private readonly packetizer: RtpPacketizer;
   private readonly crypto: FrameCrypto;
+  private readonly statistics: StatisticsDispatcher;
   private observer: SenderObserver | undefined;
 
   private readonly slots = new Map<number, PendingFrameSlot>();
@@ -103,7 +106,9 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     this.router = router;
     this.streamType = config.streamType;
     this.ntp = new NtpTimeConverter(env.now(), wallClockSeconds);
-    this.rtcpParser = new CompoundRtcpParser({ senderSsrc: config.senderSsrc, receiverSsrc: config.receiverSsrc, ntp: this.ntp }, this);
+    this.statistics = new StatisticsDispatcher(env);
+    // `RtcpSession::start_time`: the base of the timestamps in the receiver's event log.
+    this.rtcpParser = new CompoundRtcpParser({ senderSsrc: config.senderSsrc, receiverSsrc: config.receiverSsrc, ntp: this.ntp, startTimeMs: env.now() }, this);
     this.packetizer = new RtpPacketizer(rtpPayloadType, config.senderSsrc, router.maxPacketSize);
     this.crypto = new FrameCrypto(config.aesSecretKey, config.aesIvMask);
     this.targetPlayoutDelayMs = config.targetPlayoutDelayMs;
@@ -141,6 +146,11 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
   /** `Sender::NeedsKeyFrame`. */
   get needsKeyFrame(): boolean {
     return this.lastEnqueuedKeyFrameId <= this.pictureLostAtFrameId;
+  }
+
+  /** `GetLastRtpTimestamp`: the newest frame's RTP timestamp, which the statistics expand packet timestamps against. */
+  get lastRtpTimestamp(): number {
+    return this.pendingReport.rtpTimestamp;
   }
 
   get wasLastRtpPacketRetransmission(): boolean {
@@ -216,7 +226,13 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     // Until a round trip is known, get a sender report out first so the receiver can answer it.
     if (this.roundTripTimeMs === 0) this.router.requestRtcpSend(this.config.receiverSsrc);
     this.router.requestRtpSend(this.config.receiverSsrc);
+    this.statistics.dispatchEnqueueEvents(this.streamType, frame);
     return "OK";
+  }
+
+  /** `ReportFrameDropEvent`. */
+  reportFrameDropEvent(frameId: number, rtpTimestamp: number, dropTimeMs: number): void {
+    this.statistics.dispatchFrameDropEvent(this.streamType, frameId, rtpTimestamp, dropTimeMs);
   }
 
   /** `CancelInFlightData`: drop everything not yet acknowledged (session teardown). */
@@ -281,6 +297,11 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
 
   onReceiverReferenceTimeAdvanced(_referenceTimeMs: number): void {}
 
+  /** `OnCastReceiverFrameLogMessages`. */
+  onCastReceiverFrameLogMessages(messages: RtcpReceiverFrameLogMessage[]): void {
+    this.statistics.dispatchFrameLogMessages(this.streamType, messages);
+  }
+
   /** `OnReceiverReport`: round-trip time from the echoed sender report id (`SmoothRoundTripTime`). */
   onReceiverReport(report: RtcpReportBlock): void {
     if (report.lastStatusReportId === 0 || this.firstSenderReportTime === NEVER) return;
@@ -311,7 +332,11 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     if (frameId > this.lastEnqueuedFrameId) return;
     while (this.checkpointFrameId < frameId) {
       this.checkpointFrameId++;
-      if (this.activeSlot(this.checkpointFrameId) !== undefined) this.cancelPendingFrame(this.checkpointFrameId, true);
+      const slot = this.activeSlot(this.checkpointFrameId);
+      if (slot !== undefined) {
+        this.statistics.dispatchAckEvent(this.streamType, slot.frame.rtpTimestamp, this.checkpointFrameId);
+        this.cancelPendingFrame(this.checkpointFrameId, true);
+      }
     }
     this.latestExpectedFrameId = Math.max(this.latestExpectedFrameId, frameId);
     this.dispatchCancellations();
@@ -321,7 +346,11 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
   /** `OnReceiverHasFrames`: individual frames the receiver has, past the checkpoint. */
   onReceiverHasFrames(acks: number[]): void {
     if (acks[acks.length - 1]! > this.lastEnqueuedFrameId) return;
-    for (const id of acks) this.cancelPendingFrame(id, true);
+    for (const id of acks) {
+      const slot = this.activeSlot(id);
+      if (slot !== undefined) this.statistics.dispatchAckEvent(this.streamType, slot.frame.rtpTimestamp, id);
+      this.cancelPendingFrame(id, true);
+    }
     this.latestExpectedFrameId = Math.max(this.latestExpectedFrameId, acks[acks.length - 1]!);
     this.dispatchCancellations();
   }

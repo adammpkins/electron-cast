@@ -78,6 +78,7 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
       },
       // `MirroringService::SwitchMirroringSourceTab`; the new source has already been handed to the backend.
       switchMirroringSourceTab: () => host?.switchSourceTab(),
+      getMirroringStats: () => Promise.resolve(host?.getMirroringStats()),
       stop: () => {
         host?.stopSession();
         backend.stopAll?.();

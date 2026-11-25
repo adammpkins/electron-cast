@@ -11,7 +11,7 @@ import { performance } from "node:perf_hooks";
 import { ALL_PACKETS_LOST } from "../../src/mirroring/protocol/constants.ts";
 import { FrameCrypto } from "../../src/mirroring/rtp/frame-crypto.ts";
 import { NtpTimeConverter } from "../../src/mirroring/rtcp/ntp.ts";
-import { buildReceiverRtcp, parseRtpPacket } from "./receiver-wire.ts";
+import { buildReceiverRtcp, parseRtpPacket, type ReceiverLogEvent } from "./receiver-wire.ts";
 import { validateOpusPacket, validateVp8Frame } from "./media-validate.ts";
 
 export interface FakeReceiverOptions {
@@ -31,6 +31,14 @@ export interface FakeReceiverOptions {
   capabilitiesResponse?: ((seqNum: unknown) => Record<string, unknown>) | null;
   /** Run on a virtual clock and in-memory network instead of the wall clock and a UDP socket (virtual-time.ts). */
   net?: ReceiverNet;
+  /**
+   * Send the receiver's RTCP event log (packet received, ack sent, decoded, played out), on a clock that starts
+   * `eventLogClockOffsetMs` before the receiver does (so the sender has an offset to estimate).
+   */
+  eventLog?: boolean;
+  eventLogClockOffsetMs?: number;
+  /** Milliseconds a frame is reported late when played out (positive means late). Default 0. */
+  playoutDelayDeltaMs?: number;
 }
 
 /** What the receiver needs from a virtual network. */
@@ -67,6 +75,7 @@ interface StreamState {
   lastSr: { middle: number; arrivalMs: number } | undefined;
   dirty: boolean;
   lastFeedbackAt: number;
+  pendingLog: ReceiverLogEvent[];
 }
 
 export interface FakeReceiverStats {
@@ -135,6 +144,7 @@ export class FakeReceiver {
   private tokens = 8192;
   private tokensAt: number;
   private readonly random: () => number;
+  private readonly logOrigin = performance.now();
   /** The most recent OFFER's streams, for tests that want to look at them. */
   lastOffer: Record<string, unknown> | undefined;
 
@@ -236,6 +246,7 @@ export class FakeReceiver {
         lastSr: undefined,
         dirty: false,
         lastFeedbackAt: 0,
+        pendingLog: [],
       });
     }
     if (sendIndexes.length === 0) {
@@ -296,6 +307,7 @@ export class FakeReceiver {
       return;
     }
     if (frame.lastNackAt.has(rtp.packetId)) this.stats.retransmissionsReceived++;
+    this.logEvent(stream, rtp.rtpTimestamp, 14, rtp.packetId, now);
     frame.packets.set(rtp.packetId, rtp.payload);
     frame.lastPacketAt = now;
     stream.highest = Math.max(stream.highest, frameId);
@@ -314,6 +326,9 @@ export class FakeReceiver {
       stream.completed.delete(stream.checkpoint);
     }
     stream.dirty = true;
+    this.logEvent(stream, frame.rtpTimestamp, 11, 0, now);
+    this.logEvent(stream, frame.rtpTimestamp, 13, 0, now);
+    this.logEvent(stream, frame.rtpTimestamp, 12, this.opts.playoutDelayDeltaMs ?? 0, now);
     this.stats.firstFrameAt ??= now;
     this.stats.lastFrameAt = now;
     if (stream.kind === "video") {
@@ -331,6 +346,11 @@ export class FakeReceiver {
       if (validateOpusPacket(data) && this.bodyOk(frame, data, 1)) this.stats.validAudioFrames++;
       else this.stats.invalidFrames++;
     }
+  }
+
+  private logEvent(stream: StreamState, rtpTimestamp: number, wireType: number, value: number, now: number): void {
+    if (this.opts.eventLog !== true) return;
+    stream.pendingLog.push({ rtpTimestamp, timestampMs: Math.round(now - this.logOrigin + (this.opts.eventLogClockOffsetMs ?? 0)), wireType, value });
   }
 
   private bodyOk(frame: FrameAssembly, data: Buffer, headerLength: number): boolean {
@@ -393,6 +413,8 @@ export class FakeReceiver {
       playoutDelayMs: this.opts.playoutDelayMs,
       nacks,
       acks,
+      // The RTCP packet must fit one datagram: 12 bytes per event.
+      eventLog: stream.pendingLog.splice(0, 80),
     });
     stream.dirty = false;
     stream.lastFeedbackAt = now;

@@ -16,6 +16,9 @@ export interface EncodedFrame {
   /** encoded_frame.h `new_playout_delay`: non-positive means no change. */
   newPlayoutDelayMs: number;
   data: Uint8Array;
+  /** When capture of the frame began and ended, on the sender clock; absent when the source does not say. */
+  captureBeginTimeMs?: number;
+  captureEndTimeMs?: number;
 }
 
 /** `EncryptedFrame` has the same metadata and the ciphertext as `data`. */

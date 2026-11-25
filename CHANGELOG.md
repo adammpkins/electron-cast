@@ -122,7 +122,7 @@ is frozen and behaves as before for pages; it shares the device list.
   software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
   audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
   for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)), re-offering
-  when the encoder changes, session stats, hardware codecs. Like Chrome, a mirroring session sends `GET_CAPABILITIES`
+  when the encoder changes, hardware codecs. Like Chrome, a mirroring session sends `GET_CAPABILITIES`
   once after the first negotiation and keeps the receiver's remoting capabilities.
 - **Switch the mirrored tab, freeze the picture.** `switchMirroringSourceTab(routeId, webContentsId)` moves a
   `tab_mirror` route to another page without ending or renegotiating the session (Chrome's "share this tab instead":
@@ -135,6 +135,13 @@ is frozen and behaves as before for pages; it shares the device list.
   (a launch or a switch) loses the Cast SDK / Presentation API sessions it launched, and a page that launches one
   loses its mirroring routes (`CastActivityManager::routes_by_frame_`). Closing the page being mirrored ends a tab route
   (`CastMirroringServiceHost::WebContentsDestroyed`); a desktop route is unaffected.
+- **Mirroring statistics.** A debugging aid with Chrome's names and units, like `chrome://media-router-internals`
+  "Mirroring stats": `setMirroringStatsEnabled(true)` before `startCasting`, then `getMirroringStats(routeId)` and
+  `registerMirroringStatsObserver` (every 500 ms) give `{ audio, video }` with `ENQUEUE_FPS`, the latency averages and
+  histograms, bitrates, packet counts and the sender's own counters. A port of openscreen's statistics collector,
+  clock offset estimator and analyzer, with the receiver's RTCP event log parsed. Off by default; nothing is uploaded
+  (Chrome's UMA is not ported). `examples/live-mirroring` takes `--stats`. Tested against the fake
+  receiver; not yet read from a real device.
 - **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
   `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,

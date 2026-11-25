@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
+import type { MirroringStats } from "../stats/statistics.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
 import type { CaptureSource } from "./agent-protocol.ts";
@@ -106,6 +107,8 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
     let ended = false;
     const queue: ToEngine[] = [];
     let ready = false;
+    let nextStatsId = 0;
+    const pendingStats = new Map<number, (stats: MirroringStats | undefined) => void>();
 
     let unmuteTab: (() => void) | undefined;
     // The page being mirrored (`CastMirroringServiceHost::web_contents()`), the agent's own page, and whether the
@@ -138,6 +141,8 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
     const teardown = (): void => {
       if (ended) return;
       ended = true;
+      for (const resolve of pendingStats.values()) resolve(undefined);
+      pendingStats.clear();
       unmuteTab?.();
       live.delete(teardown);
       try {
@@ -243,6 +248,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
             case "did-stop": observer.didStop?.(); teardown(); break;
             case "error": observer.onError?.(m.error as never, m.message); teardown(); break;
             case "log": observer.logInfo?.(m.message); break;
+            case "stats": pendingStats.get(m.id)?.(m.stats); pendingStats.delete(m.id); break;
           }
         });
         proc.on("exit", (code) => {
@@ -290,6 +296,14 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         if (ended) return;
         post({ type: "resume" });
         onResumed();
+      },
+      getMirroringStats: () => {
+        if (ended) return Promise.resolve(undefined);
+        const id = nextStatsId++;
+        return new Promise<MirroringStats | undefined>((resolve) => {
+          pendingStats.set(id, resolve);
+          post({ type: "get-stats", id });
+        });
       },
       stop: teardown,
     };
