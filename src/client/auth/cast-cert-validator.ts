@@ -12,6 +12,7 @@ import { KEY_USAGE_BIT, keyUsageAsserts, OID, parseCertificate, type ParsedCerti
 export type CastCertError =
   | "OK"
   | "OK_FALLBACK_CRL"
+  | "OK_FALLBACK_CRL_STALE"
   | "ERR_CERTS_MISSING"
   | "ERR_CERTS_PARSE"
   | "ERR_CERTS_DATE_INVALID"
@@ -26,7 +27,7 @@ export type CastDeviceCertPolicy = "unrestricted" | "audio_only";
 
 export interface DeviceCertVerification {
   error: CastCertError;
-  /** Set when the error is OK or OK_FALLBACK_CRL (and set earlier too, as in Chromium). */
+  /** Set when the error is OK, OK_FALLBACK_CRL or OK_FALLBACK_CRL_STALE (and set earlier too, as in Chromium). */
   policy: CastDeviceCertPolicy;
   /** The device certificate's public key, for checking the challenge signature. */
   publicKey: KeyObject | undefined;
@@ -62,6 +63,11 @@ export interface DeviceCertOptions {
   crl: CastCrl | undefined;
   /** The built-in fallback CRL, if it parsed and verified. */
   fallbackCrl: CastCrl | undefined;
+  /**
+   * True when `fallbackCrl` is missing only because its 20-week window has lapsed (it otherwise verifies). Without a
+   * device CRL the revocation check is then skipped, where Chromium would fail closed; see docs/DESIGN.md.
+   */
+  fallbackCrlStale?: boolean;
 }
 
 /** VerifyDeviceCertUsingCustomTrustStore with CRLPolicy::CRL_REQUIRED_WITH_FALLBACK. */
@@ -118,6 +124,7 @@ export function verifyDeviceCert(certs: Uint8Array[], time: number, options: Dev
   if (options.fallbackCrl !== undefined) {
     if (!options.fallbackCrl.checkRevocation(path, time)) return ok("ERR_CERTS_REVOKED_BY_FALLBACK_CRL", "revoked by the fallback CRL");
   } else if (options.crl === undefined) {
+    if (options.fallbackCrlStale === true) return ok("OK_FALLBACK_CRL_STALE", "no revocation check: no CRL from the device and the built-in fallback CRL has expired");
     return ok("ERR_FALLBACK_CRL_INVALID", "no valid CRL from the device and no valid fallback CRL");
   }
   if (options.crl === undefined) return ok("OK_FALLBACK_CRL", "accepted on the fallback CRL");

@@ -72,7 +72,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node scripts/mark-cjs.mjs",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node scripts/mark-cjs.mjs && node scripts/stamp-build-time.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",

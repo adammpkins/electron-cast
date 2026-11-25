@@ -4,7 +4,7 @@ import { PayloadType } from "../../protocol/cast-message.ts";
 import { decodeDeviceAuthMessage, encodeAuthChallenge, HashAlgorithm } from "../../protocol/device-auth.ts";
 import { CastAuthError } from "../errors.ts";
 import { verifyDeviceCert, type CastCertError, type CastDeviceCertPolicy } from "./cast-cert-validator.ts";
-import { parseAndVerifyCrl, type CastCrl } from "./crl.ts";
+import { isFallbackCrlStale, parseAndVerifyCrl, type CastCrl } from "./crl.ts";
 import {
   CAST_CRL_ROOT_CA_B64,
   CAST_FALLBACK_CRL_B64,
@@ -45,6 +45,11 @@ export interface DeviceAuthResult {
   nonceEchoed: boolean;
   /** True when the device sent no usable CRL and the built-in fallback CRL was used instead. */
   usedFallbackCrl: boolean;
+  /**
+   * False only when the built-in fallback CRL had expired and the device sent no valid CRL, so the revocation check was
+   * skipped (Chromium would refuse the device). Revocation by a device CRL or a still-valid fallback CRL is always checked.
+   */
+  revocationChecked: boolean;
 }
 
 /** A challenge: the nonce and the DeviceAuthMessage bytes that go in the CastMessage's binary payload. */
@@ -79,6 +84,7 @@ export interface AuthReplyMessage {
 const REASONS: Record<CastCertError, (detail: string) => CastAuthError | undefined> = {
   OK: () => undefined,
   OK_FALLBACK_CRL: () => undefined,
+  OK_FALLBACK_CRL_STALE: () => undefined,
   ERR_CERTS_MISSING: (d) => new CastAuthError("invalid_certificate", `no device certificate: ${d}`),
   ERR_CERTS_PARSE: (d) => new CastAuthError("invalid_certificate", d),
   ERR_CERTS_DATE_INVALID: (d) => new CastAuthError("invalid_certificate", `failed date validity check: ${d}`),
@@ -142,17 +148,12 @@ export function authenticateChallengeReply(
     crl = parseAndVerifyCrl(response.crl, now, { anchors: crlAnchors, isFallback: false });
   }
   const fallbackBytes = options.fallbackCrl === undefined ? Buffer.from(CAST_FALLBACK_CRL_B64, "base64") : options.fallbackCrl;
-  const fallbackCrl =
-    fallbackBytes === null
-      ? undefined
-      : parseAndVerifyCrl(fallbackBytes, now, {
-          anchors: crlAnchors,
-          isFallback: true,
-          fallbackBuildTime: options.fallbackCrlBuildTime ?? FALLBACK_CRL_BUILD_TIME,
-        });
+  const fallbackOptions = { anchors: crlAnchors, isFallback: true, fallbackBuildTime: options.fallbackCrlBuildTime ?? FALLBACK_CRL_BUILD_TIME };
+  const fallbackCrl = fallbackBytes === null ? undefined : parseAndVerifyCrl(fallbackBytes, now, fallbackOptions);
+  const fallbackCrlStale = fallbackBytes !== null && fallbackCrl === undefined && isFallbackCrlStale(fallbackBytes, now, fallbackOptions);
 
   const chain = [response.clientAuthCertificate, ...response.intermediateCertificates];
-  const verified = verifyDeviceCert(chain, now, { anchors, crl, fallbackCrl });
+  const verified = verifyDeviceCert(chain, now, { anchors, crl, fallbackCrl, fallbackCrlStale });
   const failure = REASONS[verified.error](verified.detail);
   if (failure !== undefined) throw failure;
 
@@ -173,5 +174,11 @@ export function authenticateChallengeReply(
   }
   if (!signatureOk) throw new CastAuthError("bad_signature", "failed verifying the signature over the TLS certificate");
 
-  return { policy: verified.policy, hashAlgorithm: hash, nonceEchoed, usedFallbackCrl: verified.error === "OK_FALLBACK_CRL" };
+  return {
+    policy: verified.policy,
+    hashAlgorithm: hash,
+    nonceEchoed,
+    usedFallbackCrl: verified.error === "OK_FALLBACK_CRL",
+    revocationChecked: verified.error !== "OK_FALLBACK_CRL_STALE",
+  };
 }
