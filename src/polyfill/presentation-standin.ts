@@ -142,8 +142,14 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       const value = result.value || {};
       conn.id = value.id ?? "";
       conn.url = value.url ?? "";
-      conn.state = "connected";
-      conn.dispatchEvent(new EV("connect"));
+      // A connection to a local receiver (a wired display) starts out connecting, as Blink's does, and connects with a
+      // statechange once the receiver page is ready; one that has connected already is left as it is.
+      if (value.state === "connecting") {
+        if (conn.state === "connecting") return conn;
+      } else if (conn.state !== "connected") {
+        conn.state = "connected";
+        conn.dispatchEvent(new EV("connect"));
+      }
       maybeFlush(conn);
       return conn;
     }
@@ -231,6 +237,14 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
     if (e.type === "statechange") {
       const conn = connections.get(e.connectionId);
       if (!conn) return;
+      if (e.state === "connected") {
+        if (conn.state === "connecting") {
+          conn.state = "connected";
+          conn.dispatchEvent(new EV("connect"));
+          maybeFlush(conn);
+        }
+        return;
+      }
       const terminated = e.state === "terminated";
       conn.state = terminated ? "terminated" : "closed";
       connections.delete(e.connectionId);
