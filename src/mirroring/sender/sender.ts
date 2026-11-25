@@ -244,7 +244,7 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
 
   /** Where to write the feedback statistics (a debug aid, not in openscreen). */
   debugLog: ((message: string) => void) | undefined;
-  private feedbackStats = { since: NEVER, last: NEVER, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0 };
+  private feedbackStats = { since: NEVER, last: NEVER, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
 
   /** Every five seconds: how often the receiver's feedback arrives, how many frames it acknowledged, and the round trip. */
   private noteFeedback(arrivalTimeMs: number): void {
@@ -263,9 +263,9 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     const r = (n: number) => Math.round(n * 10) / 10;
     this.debugLog(
       `${this.streamType} feedback: ${r(s.packets / seconds)} packets/s (mean gap ${r((seconds * 1000) / s.packets)} ms, max ${r(s.maxGapMs)} ms), ` +
-        `${r(s.acked / seconds)} frames acked/s (enqueue to first packet out: mean ${r(s.sendDelaySum / Math.max(1, s.acked))} ms, max ${r(s.sendDelayMax)} ms; enqueue to ack: mean ${r(s.ackLatencySum / Math.max(1, s.acked))} ms, max ${r(s.ackLatencyMax)} ms), rtt ${r(this.roundTripTimeMs)} ms (range ${r(s.rttMin === Infinity ? 0 : s.rttMin)}-${r(s.rttMax)}), unacked ${this.numFramesInFlight}, checkpoint ${this.checkpointFrameId}`,
+        `${r(s.acked / seconds)} frames acked/s (capture to enqueue: mean ${r(s.captureToEnqueueSum / Math.max(1, s.acked))} ms, max ${r(s.captureToEnqueueMax)} ms; capture to ack: mean ${r(s.captureToAckSum / Math.max(1, s.acked))} ms, max ${r(s.captureToAckMax)} ms; enqueue to first packet out: mean ${r(s.sendDelaySum / Math.max(1, s.acked))} ms, max ${r(s.sendDelayMax)} ms; enqueue to ack: mean ${r(s.ackLatencySum / Math.max(1, s.acked))} ms, max ${r(s.ackLatencyMax)} ms), rtt ${r(this.roundTripTimeMs)} ms (range ${r(s.rttMin === Infinity ? 0 : s.rttMin)}-${r(s.rttMax)}), unacked ${this.numFramesInFlight}, checkpoint ${this.checkpointFrameId}`,
     );
-    this.feedbackStats = { since: arrivalTimeMs, last: arrivalTimeMs, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0 };
+    this.feedbackStats = { since: arrivalTimeMs, last: arrivalTimeMs, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
   }
 
   /** `GetRtcpPacketForImmediateSend`: a sender report, once a frame has been enqueued. */
@@ -432,6 +432,10 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     if (wasAcked) {
       const s = this.feedbackStats;
       s.acked++;
+      s.captureToEnqueueSum += slot.enqueuedAtMs - slot.frame.referenceTimeMs;
+      s.captureToEnqueueMax = Math.max(s.captureToEnqueueMax, slot.enqueuedAtMs - slot.frame.referenceTimeMs);
+      s.captureToAckSum += this.rtcpPacketArrivalTime - slot.frame.referenceTimeMs;
+      s.captureToAckMax = Math.max(s.captureToAckMax, this.rtcpPacketArrivalTime - slot.frame.referenceTimeMs);
       s.ackLatencySum += this.rtcpPacketArrivalTime - slot.enqueuedAtMs;
       s.ackLatencyMax = Math.max(s.ackLatencyMax, this.rtcpPacketArrivalTime - slot.enqueuedAtMs);
       if (slot.firstSentAtMs !== NEVER) {

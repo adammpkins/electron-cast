@@ -180,14 +180,18 @@ export const AGENT_SOURCE = String.raw`
       captureStats.received++;
       if (captureMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { captureStats.limited++; frame.close(); continue; }
       if (lastAcceptedAt > -1e8) captureStats.intervals.push(captureMs - lastAcceptedAt);
-      captureStats.arrivalLag.push(arrivalMs - (captureMs + captureOffsetMs(captureMs, arrivalMs)));
+      captureStats.arrivalLag.push(arrivalMs - (captureTimeOf(frame, captureMs, arrivalMs)));
       lastAcceptedAt = captureMs;
       reportCaptureStats(arrivalMs);
       const rtp = rtpFor(frame.timestamp);
       // The reference time is the capture time on the epoch clock, not the arrival time: the receiver pairs it with the
       // RTP timestamp in the sender reports, and a jittery arrival would skew that pairing (Chrome stamps frames with
       // the capture begin time, VideoFrameMetadata REFERENCE_TIME).
-      const refMs = nextRefMs(captureMs + captureOffsetMs(captureMs, arrivalMs));
+      // Chrome's frame metadata carries the true capture time (performance.now timeline) when the source has one; the
+      // smallest delay seen stands in when it does not.
+      let exact = NaN;
+      try { const md = frame.metadata ? frame.metadata() : null; if (md && typeof md.captureTime === "number") exact = performance.timeOrigin + md.captureTime; } catch { /* no metadata */ }
+      const refMs = nextRefMs(Number.isFinite(exact) ? exact : captureMs + captureOffsetMs(captureMs, arrivalMs));
       lastCapture = { timestamp: frame.timestamp, refMs };
       if (lastFrameClone) lastFrameClone.close();
       lastFrameClone = frame.clone();
@@ -204,6 +208,10 @@ export const AGENT_SOURCE = String.raw`
   function nextRefMs(ms) {
     lastRefMs = ms > lastRefMs ? ms : lastRefMs + 0.001;
     return lastRefMs;
+  }
+  function captureTimeOf(frame, captureMs, arrivalMs) {
+    try { const md = frame.metadata ? frame.metadata() : null; if (md && typeof md.captureTime === "number") return performance.timeOrigin + md.captureTime; } catch { /* no metadata */ }
+    return captureMs + captureOffsetMs(captureMs, arrivalMs);
   }
   let offsetMs = null;
   function captureOffsetMs(captureMs, arrivalMs) {

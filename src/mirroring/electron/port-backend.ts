@@ -13,6 +13,34 @@ import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.t
 
 const toLocalMs = (epochMs: number): number => epochMs - performance.timeOrigin;
 
+/** Debug aid, not in Chrome: mean and maximum of each pipeline stage, written to the log every five seconds. */
+export class StageStats {
+  private readonly stages = new Map<string, { n: number; sum: number; max: number }>();
+  private since = Number.NEGATIVE_INFINITY;
+  private readonly now: () => number;
+  private readonly log: () => ((message: string) => void) | undefined;
+
+  constructor(now: () => number, log: () => ((message: string) => void) | undefined) {
+    this.now = now;
+    this.log = log;
+  }
+
+  add(stage: string, ms: number): void {
+    const t = this.now();
+    if (this.since === Number.NEGATIVE_INFINITY) this.since = t;
+    const s = this.stages.get(stage) ?? { n: 0, sum: 0, max: 0 };
+    s.n++;
+    s.sum += ms;
+    s.max = Math.max(s.max, ms);
+    this.stages.set(stage, s);
+    if (t - this.since < 5000) return;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    this.log()?.(`latency stages (mean / max ms): ${[...this.stages].map(([k, v]) => `${k} ${r(v.sum / v.n)} / ${r(v.max)}`).join("; ")}`);
+    this.stages.clear();
+    this.since = t;
+  }
+}
+
 /** media/cast/encoding/audio_encoder.cc `kUnderrunSkipThreshold`. */
 export const UNDERRUN_SKIP_THRESHOLD = 3;
 
@@ -45,6 +73,7 @@ export class PortBackend implements MirroringBackend {
   private audioSenderConfig: FrameSenderConfig | undefined;
   private stopped = false;
   log: ((message: string) => void) | undefined;
+  private readonly stages = new StageStats(() => performance.now(), () => this.log);
 
   constructor(port: AgentPort, source: CaptureSource) {
     this.port = port;
@@ -63,12 +92,15 @@ export class PortBackend implements MirroringBackend {
         else this.videoCallbacks?.onStatus("codec_runtime_error");
         break;
       case "frame":
+        this.stages.add("video capture to engine", performance.now() - toLocalMs(m.refMs));
         this.videoSink?.insertVideoFrame({ rtpTimestamp: m.rtp, referenceTimeMs: toLocalMs(m.refMs), visibleRectEmpty: false });
         break;
       case "video-chunk": {
         const ref = this.pendingVideo.get(m.rtp);
         this.pendingVideo.delete(m.rtp);
         if (ref === undefined) return;
+        this.stages.add("video encode (agent)", m.encodeMs);
+        this.stages.add("video capture to encoded", performance.now() - ref);
         const frameId = this.nextVideoFrameId++;
         const referenced = m.key ? frameId : this.lastVideoFrameId;
         this.lastVideoFrameId = frameId;
@@ -114,6 +146,7 @@ export class PortBackend implements MirroringBackend {
       }
       case "audio-buffer": {
         this.currentAudioSeq = m.seq;
+        this.stages.add("audio capture to engine", performance.now() - toLocalMs(m.recMs));
         const accepted = this.audioSink?.insertAudio(m.frames, toLocalMs(m.recMs)) ?? false;
         if (!accepted) this.port.postMessage({ t: "drop-audio", seq: m.seq });
         break;

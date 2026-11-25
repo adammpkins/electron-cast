@@ -11,7 +11,7 @@ import type { AgentPort, AgentToEngine, EngineToAgent } from "../../src/mirrorin
  * reordered outputs a real encoder can produce are simulated.
  */
 
-interface FakeFrame { timestamp: number; displayWidth: number; displayHeight: number; closed: boolean; close(): void; clone(): FakeFrame }
+interface FakeFrame { metadata?: () => { captureTime?: number }; timestamp: number; displayWidth: number; displayHeight: number; closed: boolean; close(): void; clone(): FakeFrame }
 const frame = (timestamp: number): FakeFrame => ({
   timestamp, displayWidth: 640, displayHeight: 360, closed: false,
   close() { this.closed = true; },
@@ -61,9 +61,10 @@ function startAgent() {
     sent, encoders, settle,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
-    capture: async (ts: number, gapMs = 33) => {
+    capture: async (ts: number, gapMs = 33, captureTime?: number) => {
       now += gapMs;
       const f = frame(ts);
+      if (captureTime !== undefined) f.metadata = () => ({ captureTime });
       const w = waiters.shift();
       if (w) w({ value: f, done: false }); else queued.push(f);
       await settle();
@@ -235,4 +236,14 @@ test("agent: capture statistics are reported every five seconds", async () => {
   const logs = a.sent.filter((m) => m.t === "log") as { message: string }[];
   assert.ok(logs.length >= 1);
   assert.match(logs[0]!.message, /^capture: [\d.]+ fps delivered, [\d.]+ fps kept, 0 dropped by the rate limit; capture interval p50 133\.3 ms/);
+});
+
+test("agent: frames are stamped with the capture time from the frame metadata when the source gives one", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0, 33, 1000); // read at 1033, captured at 1000
+  await a.capture(33_333, 33, 1033.3);
+  const frames = a.sent.filter((m) => m.t === "frame") as { refMs: number }[];
+  assert.equal(frames[0]!.refMs, 1000);
+  assert.ok(Math.abs(frames[1]!.refMs - 1033.3) < 1e-6);
 });

@@ -146,7 +146,7 @@ test("each stream logs how its feedback arrives every five seconds", async () =>
     for (const kind of ["audio", "video"]) {
       const lines = h.logs.filter((l) => l.startsWith(`${kind} feedback:`));
       assert.ok(lines.length >= 2, `${kind}: ${lines.length} lines`);
-      assert.match(lines[0]!, /packets\/s \(mean gap [\d.]+ ms, max [\d.]+ ms\), [\d.]+ frames acked\/s \(enqueue to first packet out: mean [\d.]+ ms, max [\d.]+ ms; enqueue to ack: mean [\d.]+ ms, max [\d.]+ ms\), rtt 3\d(\.\d)? ms/);
+      assert.match(lines[0]!, /packets\/s \(mean gap [\d.]+ ms, max [\d.]+ ms\), [\d.]+ frames acked\/s \(capture to enqueue: mean [\d.]+ ms, max [\d.]+ ms; capture to ack: mean [\d.]+ ms, max [\d.]+ ms; enqueue to first packet out: mean [\d.]+ ms, max [\d.]+ ms; enqueue to ack: mean [\d.]+ ms, max [\d.]+ ms\), rtt 3\d(\.\d)? ms/);
     }
   } finally {
     h.close();
