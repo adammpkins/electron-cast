@@ -5,11 +5,14 @@ on:
     branches: [main]
     paths:
       - "site/**"
-      - "docs/**"
-      - "README.md"
-      - "CHANGELOG.md"
-      - "SECURITY.md"
-      - "examples/electron-app/README.md"
+      - "**/*.md"
+      - "package.json"
+      - ".github/workflows/pages.yml"
+  # The site builds every Markdown file in the repository, so a pull request that changes one builds it too (no deploy).
+  pull_request:
+    paths:
+      - "site/**"
+      - "**/*.md"
       - "package.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -20,8 +23,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  # Deploys queue one at a time; a pull request's build check runs in its own group.
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -34,17 +38,20 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
       - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
       - name: Build the site
         working-directory: site
         run: |
           npm ci
           npm run build
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: site/.vitepress/dist
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

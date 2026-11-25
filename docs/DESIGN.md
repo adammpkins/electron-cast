@@ -827,7 +827,7 @@ Where Chrome raises an issue, and where this library does:
 | Chrome | Issue | Here |
 |---|---|---|
 | `CastActivityManager::SendFailedToCastIssue` (a failed launch, `HandleLaunchSessionResponseFailures`) | warning "Failed to cast. Please try again." (not for a declined request or disabled notifications) | A failed launch in `session-service.ts` (page and `startCasting` paths) and in `mirroring-manager.ts` |
-| `SendPendingUserAuthNotification`, and `kUserAllowed` clearing it (`ClearTopIssueForSink`) | notification "Accept cast request on <device>" | `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` / `USER_ALLOWED` of the launch |
+| `SendPendingUserAuthNotification`, and `kUserAllowed` clearing it (`ClearTopIssueForSink`) | notification "Accept cast request on &lt;device&gt;" | `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` / `USER_ALLOWED` of the launch |
 | `MediaRouterUI::SendIssueForRouteTimeout`, `SendIssueForUserNotAllowed`, `SendIssueForNotificationDisabled` | notification (timeout), warnings | The same launch failures, by `extendedError` (`USER_NOT_ALLOWED`, `USER_NOTIFICATIONS_DISABLED`) or a timeout; a DIAL launch that times out raises the timeout one |
 | `MediaRouterUI::SendIssueForUnableToCast` | warning | `startCasting` rejecting with `unable_to_cast` |
 | `MediaRouterUI::SendIssueForScreenPermission` (macOS) | warning | `startCasting` for `desktop_mirror` when `getMediaAccessStatus("screen")` is not `granted`; see S12 below |

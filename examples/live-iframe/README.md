@@ -39,14 +39,14 @@ Expectations come from `docs/API.md` (Frames and iframes), README (Iframes) and 
 and the cast state stays `NO_DEVICES_AVAILABLE`: an iframe has no cast without the option.
 
 **1. Each frame is its own sender, with its own origin.** Click **Cast** in the same-origin iframe.
-- The dialog says "Asked by origin http://127.0.0.1:<A>" and "sender id <n> (an iframe)", n at or above 1073741824
+- The dialog says "Asked by origin http://127.0.0.1:&lt;A&gt;" and "sender id &lt;n&gt; (an iframe)", n at or above 1073741824
   (2^30). (Here it equals the top page's origin; check 2 shows a frame whose origin differs from the top page's.)
 - Pick device 1. In that iframe: session state `SESSION_STARTED`, a session id, the device name, and the test stream
   starts on the TV; its event log shows `presentation.start`, then `presentation.message` lines (`new_session`,
   `update_session`, `v2_message`...). `allowOrigin(...) -> true` is logged once per origin in the terminal.
 - The cross-origin iframe stays at `NOT_CONNECTED`, session state `null`, and its event count does not rise while the
   other frame's does (media status updates keep arriving in the casting frame).
-- Main process view: one route, `origin` http://127.0.0.1:<A>, `members` holding the one window id, `parked` false.
+- Main process view: one route, `origin` http://127.0.0.1:&lt;A&gt;, `members` holding the one window id, `parked` false.
 
 **2. The cross-origin frame has its own origin and session.** Click **Cast** in the cross-origin iframe and pick device 2.
 - The dialog says origin `http://localhost:<B>` and a different sender id (also 2^30 or more).
