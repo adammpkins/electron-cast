@@ -111,9 +111,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       contents.delete(wc.id);
       service.senderGone(wc.id);
     });
+    // A navigation ends the page's connections, but its sessions stay open (parked) so the next page can rejoin them
     wc.on("did-navigate", () => {
       presentation?.senderGone(wc.id);
-      service.senderGone(wc.id);
+      service.senderNavigated(wc.id);
     });
   };
 

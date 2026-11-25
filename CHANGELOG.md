@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which
+  closed them on the device, so the reloaded page's auto-join found nothing. Now they stay open (parked) and the next
+  page rejoins them, as in Chrome. Closing the page still leaves them.
+
 ## 0.3.0
 
 - **Changed default: pages now run Google's own Cast SDK.** `installCastBridge` installs a stand-in Presentation API

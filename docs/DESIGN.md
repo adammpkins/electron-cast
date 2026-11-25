@@ -138,8 +138,12 @@ one:
   `close`, `terminate`, `onmessage` and `onclose`) is the one proposed to Electron as a native hook
   (`docs/upstream/`, not shipped). With that hook the stand-in would go away.
 
-Known gaps: a session does not survive a page reload (the service drops a sender's sessions when it navigates), and
-events go to the main frame only, so Google's SDK inside an iframe gets nothing.
+A navigation (a reload, say) ends the page's connections but parks its sessions instead of leaving them: they stay
+open on the device, get no events, and the sender's next page rejoins them through auto-join or `joinSession`, as with
+Chrome's Media Router. A parked session ends when the receiver app stops or the device drops, and is left for good when
+the webContents is destroyed.
+
+Known gap: events go to the main frame only, so Google's SDK inside an iframe gets nothing.
 
 ## Electron layer (`src/electron/`)
 

@@ -161,13 +161,19 @@ test("a destroyed webContents leaves its sessions", async () => {
   assert.equal(clients[0]?.closed, true);
 });
 
-test("a main-frame navigation (reload or new page) also leaves its sessions", async () => {
+test("a main-frame navigation (reload or new page) keeps the session open for the next page to rejoin", async () => {
   const { call, clients } = setup();
   const wc = new FakeWebContents(5);
   await call(wc, "initialize", INIT);
-  const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { transportId: string } };
+  const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { sessionId: string; transportId: string } };
   wc.emit("did-navigate");
+  assert.ok(!clients[0]?.calls.includes(`closeTransport ${r.value.transportId}`));
+  assert.equal(clients[0]?.closed, false);
+  const again = (await call(wc, "initialize", INIT)) as { ok: true; value: { sessions: { sessionId: string }[] } };
+  assert.deepEqual(again.value.sessions.map((s) => s.sessionId), [r.value.sessionId]);
+  wc.destroy();
   assert.ok(clients[0]?.calls.includes(`closeTransport ${r.value.transportId}`));
+  assert.equal(clients[0]?.closed, true);
 });
 
 test("each webContents is watched once, however many calls it makes", async () => {

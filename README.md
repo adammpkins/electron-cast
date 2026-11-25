@@ -65,10 +65,9 @@ Electron Google's Cast SDK finds no devices. By default electron-cast fills in t
 stand-in Presentation API backed by the main process, and **Google's own `cast_sender.js` and `cast.framework` load
 and run unmodified**, as they do in Chrome. electron-cast never replaces Google's SDK.
 
-A cast has to start from a user gesture (a click on the page's cast button), as in Chrome. Current limits:
-
-- A session doesn't survive a page reload, so auto-join after a reload starts a new session.
-- Google's SDK running inside an iframe gets no events, because messages go to the main frame.
+A cast has to start from a user gesture (a click on the page's cast button), as in Chrome. As in Chrome, a session
+belongs to the app rather than the page, so a page that reloads gets its session back through auto-join. Current
+limit: Google's SDK running inside an iframe gets no events, because messages go to the main frame.
 
 **Fallback: `mode: "chromecast"`.** This installs electron-cast's own implementation of `chrome.cast` and
 `chrome.cast.media` and blocks Google's loader scripts. Use it for pages that call `chrome.cast` without loading
@@ -83,7 +82,9 @@ The main process serves both modes. `createCastManager({ ..., presentation: fals
 ## What works
 
 - Device discovery over mDNS on every network interface, with devices coming and going live.
-- Several pages or windows at once. A page that reloads or closes leaves its sessions without stopping playback.
+- Several pages or windows at once. A page that reloads keeps its sessions open on the device and rejoins them
+  (auto-join, `origin_scoped` or `tab_and_origin_scoped`). A page that closes leaves its sessions without stopping
+  playback.
 
 **Default mode (Google's SDK):**
 

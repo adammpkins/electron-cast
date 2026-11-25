@@ -89,6 +89,11 @@ interface SessionRecord {
   origin: string;
   appId: string;
   members: Set<number>;
+  /**
+   * Senders whose page navigated away (a reload, say) while a member. Like Chrome's Media Router, the session outlives
+   * the page: it stays open on the device so the sender's next page can rejoin it. Parked senders get no events.
+   */
+  parked: Set<number>;
   lastVolume: ReceiverVolume;
   lastSnapshot: SessionSnapshot | null;
   /** Set while a stopSession is in flight; onClientStatus skips this sender when it ends the session. */
@@ -276,14 +281,32 @@ export class CastSessionService {
 
   /** Detach a sender that went away: cancel its pending request, leave its sessions, drop its bookkeeping. */
   senderGone(senderId: number): void {
+    this.forgetSender(senderId);
+    for (const rec of [...this.sessions.values()]) {
+      if (!rec.members.has(senderId) && !rec.parked.has(senderId)) continue;
+      this.leave(rec, senderId);
+    }
+  }
+
+  /**
+   * The sender's page navigated (a reload or a new page): cancel its pending request and drop its bookkeeping, but
+   * keep its sessions open on the device, parked, so the next page can rejoin them (auto-join or joinSession) as it
+   * would in Chrome. A parked session ends as usual if the receiver app stops or the device drops; senderGone ends
+   * the sender's share of it for good.
+   */
+  senderNavigated(senderId: number): void {
+    this.forgetSender(senderId);
+    for (const rec of this.sessions.values()) {
+      if (!rec.members.delete(senderId)) continue;
+      rec.parked.add(senderId);
+    }
+  }
+
+  private forgetSender(senderId: number): void {
     const pending = this.pendingRequests.get(senderId);
     if (pending !== undefined) pending.cancelled.value = true;
     this.pendingRequests.delete(senderId);
     this.senders.delete(senderId);
-    for (const rec of [...this.sessions.values()]) {
-      if (!rec.members.has(senderId)) continue;
-      this.leave(rec, senderId);
-    }
   }
 
   /** Unsubscribe, close every client and clear all state. */
@@ -310,10 +333,11 @@ export class CastSessionService {
     const joined: SessionSnapshot[] = [];
     for (const rec of this.sessions.values()) {
       if (rec.appId !== p.appId || rec.origin !== sender.origin) continue;
-      if (p.autoJoinPolicy === "origin_scoped") {
+      // tab_and_origin_scoped: this sender (the same tab) is a member, or was one before its page navigated
+      const sameTab = rec.members.has(sender.id) || rec.parked.has(sender.id);
+      if (p.autoJoinPolicy === "origin_scoped" || (p.autoJoinPolicy === "tab_and_origin_scoped" && sameTab)) {
+        rec.parked.delete(sender.id);
         rec.members.add(sender.id);
-        joined.push(this.snapshotOf(rec));
-      } else if (p.autoJoinPolicy === "tab_and_origin_scoped" && rec.members.has(sender.id)) {
         joined.push(this.snapshotOf(rec));
       }
     }
@@ -387,6 +411,7 @@ export class CastSessionService {
     if (p === null) return bad("invalid_parameter");
     const rec = this.sessions.get(p.sessionId);
     if (rec === undefined || rec.origin !== sender.origin) return bad("session_error");
+    rec.parked.delete(sender.id);
     rec.members.add(sender.id);
     return good(this.snapshotOf(rec));
   }
@@ -559,6 +584,7 @@ export class CastSessionService {
         origin: sender.origin,
         appId,
         members: new Set([sender.id]),
+        parked: new Set(),
         lastVolume: status.volume,
         lastSnapshot: null,
       };
@@ -576,7 +602,8 @@ export class CastSessionService {
   /** Remove a sender from a session; when it was the last one, tear the session down. */
   private leave(rec: SessionRecord, senderId: number): void {
     rec.members.delete(senderId);
-    if (rec.members.size === 0) {
+    rec.parked.delete(senderId);
+    if (rec.members.size === 0 && rec.parked.size === 0) {
       rec.client.closeTransport(rec.app.transportId);
       this.sessions.delete(rec.app.sessionId);
       this.cleanupIdle(rec.device.id, rec.client);

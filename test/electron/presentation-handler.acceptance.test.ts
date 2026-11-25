@@ -276,6 +276,20 @@ test("reconnect: auto-join follows the URL's policy, cast-session_<id> joins, _r
   await assert.rejects(h.handler.reconnectPresentation({ ...req(URL_P, PAGE3), presentationId: "cast-session_unknown" }), { name: "NotFoundError" });
 });
 
+test("after a reload the page's auto-join gets its session back, and messages flow again", async () => {
+  const h = setup();
+  const { closes, transport, client } = await started(h);
+  h.handler.senderGone(PAGE.id);
+  h.service.senderNavigated(PAGE.id);
+  assert.deepEqual(closes, ["closed"]);
+  const back = await h.handler.reconnectPresentation({ ...req(URL_O, PAGE), presentationId: "auto-join" });
+  const b = open(back);
+  assert.deepEqual(b.got.map((m) => m.type), ["new_session"]);
+  client.pushMessage(transport, MDX, '{"type":"x"}');
+  await tick();
+  assert.equal(b.got.at(-1)?.type, "app_message");
+});
+
 test("senderGone closes the sender's connections and later events are ignored", async () => {
   const h = setup();
   const { got, closes, transport, client } = await started(h);

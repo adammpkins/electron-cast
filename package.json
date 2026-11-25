@@ -1,6 +1,6 @@
 {
   "name": "electron-cast",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Chromecast for Electron: lets pages run Google's own Cast SDK by supplying the Media Router Electron lacks, with device discovery and the Cast v2 protocol in the main process.",
   "keywords": [
     "electron",

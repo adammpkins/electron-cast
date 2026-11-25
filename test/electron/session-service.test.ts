@@ -350,6 +350,89 @@ test("senderGone detaches the sender everywhere", async () => {
   assert.deepEqual(log.events, []);
 });
 
+// --- A page that navigates (a reload): like Chrome, the session outlives the page and the next page rejoins it.
+
+test("senderNavigated parks the session: it stays open on the device and the parked page gets no events", async () => {
+  const { service, clients, log } = setup();
+  const s = await session(service);
+  service.senderNavigated(PAGE.id);
+  assert.ok(!clients[0]?.calls.includes(`closeTransport ${s.transportId}`));
+  assert.equal(clients[0]?.closed, false);
+  log.clear();
+  clients[0]?.pushMessage(s.transportId, MDX, "while parked");
+  assert.deepEqual(log.events, []);
+  const send = await service.handle(PAGE, "sendMessage", { sessionId: s.sessionId, namespace: MDX, message: "x" });
+  assert.equal(!send.ok && send.code, "session_error", "a parked sender is not a member");
+});
+
+test("after a navigation the same page rejoins with origin_scoped or tab_and_origin_scoped; another tab only with origin_scoped", async () => {
+  for (const policy of ["origin_scoped", "tab_and_origin_scoped"]) {
+    const { service, clients, log } = setup();
+    const s = await session(service);
+    service.senderNavigated(PAGE.id);
+    const other = await init(service, PAGE2, { autoJoinPolicy: "tab_and_origin_scoped" });
+    assert.deepEqual(other.ok && (other.value as { sessions: unknown[] }).sessions, [], `${policy}: another tab`);
+    const again = await init(service, PAGE, { autoJoinPolicy: policy });
+    assert.deepEqual(again.ok && (again.value as { sessions: SessionSnapshot[] }).sessions.map((x) => x.sessionId), [s.sessionId], policy);
+    log.clear();
+    clients[0]?.pushMessage(s.transportId, MDX, "after rejoin");
+    assert.deepEqual(log.of(PAGE.id, "message").length, 1, `${policy}: events flow again`);
+  }
+});
+
+test("page_scoped does not rejoin after a navigation, and the session stays parked", async () => {
+  const { service, clients } = setup();
+  const s = await session(service);
+  service.senderNavigated(PAGE.id);
+  const again = await init(service, PAGE, { autoJoinPolicy: "page_scoped" });
+  assert.deepEqual(again.ok && (again.value as { sessions: unknown[] }).sessions, []);
+  assert.equal(clients[0]?.closed, false);
+  const join = await service.handle(PAGE, "joinSession", { sessionId: s.sessionId });
+  assert.equal(join.ok, true, "joinSession still finds it");
+});
+
+test("a parked session is left for good when the page goes away, and ends when the receiver app stops", async () => {
+  const gone = setup();
+  const s = await session(gone.service);
+  gone.service.senderNavigated(PAGE.id);
+  gone.service.senderGone(PAGE.id);
+  assert.ok(gone.clients[0]?.calls.includes(`closeTransport ${s.transportId}`));
+  assert.equal(gone.clients[0]?.closed, true);
+
+  const stopped = setup();
+  await session(stopped.service);
+  stopped.service.senderNavigated(PAGE.id);
+  stopped.clients[0]!.apps = [];
+  stopped.clients[0]?.pushStatus();
+  assert.equal(stopped.clients[0]?.closed, true, "the idle client is closed");
+  const again = await init(stopped.service, PAGE);
+  assert.deepEqual(again.ok && (again.value as { sessions: unknown[] }).sessions, []);
+});
+
+test("a parked session stays open while another member is still using it", async () => {
+  const { service, clients, log } = setup();
+  const s = await session(service);
+  await init(service, PAGE2);
+  await service.handle(PAGE2, "joinSession", { sessionId: s.sessionId });
+  service.senderNavigated(PAGE.id);
+  service.senderGone(PAGE.id);
+  assert.equal(clients[0]?.closed, false);
+  log.clear();
+  clients[0]?.pushMessage(s.transportId, MDX, "still here");
+  assert.equal(log.of(PAGE2.id, "message").length, 1);
+  assert.equal(log.of(PAGE.id, "message").length, 0);
+});
+
+test("senderNavigated while its request is launching cancels the request", async () => {
+  const { service } = setup({ tweak: (c) => (c.launchDelayMs = 20) });
+  await init(service, PAGE);
+  const pending = service.handle(PAGE, "requestSession", { appId: YT, capabilities: ["audio_out"], timeoutMs: 5000 });
+  await tick(5);
+  service.senderNavigated(PAGE.id);
+  const r = await pending;
+  assert.equal(!r.ok && r.code, "cancel");
+});
+
 test("dispose closes every client and stops listening for devices", async () => {
   const devices = new FakeDevices();
   const { service, clients, log } = setup({ devices });
