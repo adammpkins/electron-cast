@@ -166,7 +166,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
           throw new DE("Invalid URL: " + String(u), "SyntaxError");
         }
       }
-      this.urls = Object.freeze(list);
+      this.urls = Object.freeze(list) as string[];
     }
     start(): Promise<any> {
       const nav = g.navigator;

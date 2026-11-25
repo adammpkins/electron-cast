@@ -54,7 +54,7 @@ async function started(h: ReturnType<typeof setup>, url = URL_O) {
   const conn = await h.handler.startPresentation(req(url));
   const { got, closes } = open(conn);
   const session = got.find((m) => m.type === "new_session").message;
-  return { conn, got, closes, sid: session.sessionId as string, transport: session.transportId as string, client: h.clients[0] };
+  return { conn, got, closes, sid: session.sessionId as string, transport: session.transportId as string, client: h.clients[0]! };
 }
 
 const out = (conn: PresentationConnectionHandle, o: Record<string, unknown>) =>
@@ -92,7 +92,7 @@ test("startPresentation launches and queues receiver_action cast then new_sessio
   assert.equal(s.receiver.receiverType, "cast");
   assert.ok(s.namespaces.some((n: { name: string }) => n.name === MEDIA_NAMESPACE));
   assert.deepEqual(got[0].message, { receiver: s.receiver, action: "cast" });
-  const gs = h.clients[0].sent.find((x) => x.namespace === MEDIA_NAMESPACE);
+  const gs = h.clients[0]!.sent.find((x) => x.namespace === MEDIA_NAMESPACE);
   assert.ok(gs, "a GET_STATUS goes to the receiver");
   assert.equal(gs.destinationId, s.transportId);
   const body = JSON.parse(gs.payload as string);
