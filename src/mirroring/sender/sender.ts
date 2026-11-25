@@ -260,14 +260,17 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
 
   /** Where to write the feedback statistics (a debug aid, not in openscreen). */
   debugLog: ((message: string) => void) | undefined;
-  private feedbackStats = { since: NEVER, last: NEVER, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
+  private feedbackStats = { since: NEVER, last: NEVER, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0, longGaps: 0, rawRtt: [] as number[] };
 
   /** Every five seconds: how often the receiver's feedback arrives, how many frames it acknowledged, and the round trip. */
   private noteFeedback(arrivalTimeMs: number): void {
     const s = this.feedbackStats;
     if (this.debugLog === undefined) return;
     if (s.since === NEVER) s.since = arrivalTimeMs;
-    if (s.last !== NEVER) s.maxGapMs = Math.max(s.maxGapMs, arrivalTimeMs - s.last);
+    if (s.last !== NEVER) {
+      s.maxGapMs = Math.max(s.maxGapMs, arrivalTimeMs - s.last);
+      if (arrivalTimeMs - s.last > 100) s.longGaps++;
+    }
     s.last = arrivalTimeMs;
     s.packets++;
     if (this.roundTripTimeMs > 0) {
@@ -277,11 +280,15 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     if (arrivalTimeMs - s.since < 5000) return;
     const seconds = (arrivalTimeMs - s.since) / 1000;
     const r = (n: number) => Math.round(n * 10) / 10;
+    // The round trips as measured, before `SmoothRoundTripTime`, which follows a rise at once and a fall slowly: a low
+    // minimum under a high estimate is feedback that arrives in bunches, a high minimum is a slow path.
+    const raw = s.rawRtt.sort((a, b) => a - b);
+    const rawRtt = raw.length === 0 ? "none" : `min ${r(raw[0]!)} ms, median ${r(raw[raw.length >> 1]!)} ms, max ${r(raw[raw.length - 1]!)} ms`;
     this.debugLog(
-      `${this.streamType} feedback: ${r(s.packets / seconds)} packets/s (mean gap ${r((seconds * 1000) / s.packets)} ms, max ${r(s.maxGapMs)} ms), ` +
+      `${this.streamType} feedback: ${r(s.packets / seconds)} packets/s (mean gap ${r((seconds * 1000) / s.packets)} ms, max ${r(s.maxGapMs)} ms, ${s.longGaps} over 100 ms), measured round trips: ${rawRtt}, ` +
         `${r(s.acked / seconds)} frames acked/s (capture to enqueue: mean ${r(s.captureToEnqueueSum / Math.max(1, s.acked))} ms, max ${r(s.captureToEnqueueMax)} ms; capture to ack: mean ${r(s.captureToAckSum / Math.max(1, s.acked))} ms, max ${r(s.captureToAckMax)} ms; enqueue to first packet out: mean ${r(s.sendDelaySum / Math.max(1, s.acked))} ms, max ${r(s.sendDelayMax)} ms; enqueue to ack: mean ${r(s.ackLatencySum / Math.max(1, s.acked))} ms, max ${r(s.ackLatencyMax)} ms), rtt ${r(this.roundTripTimeMs)} ms (range ${r(s.rttMin === Infinity ? 0 : s.rttMin)}-${r(s.rttMax)}), unacked ${this.numFramesInFlight}, checkpoint ${this.checkpointFrameId}`,
     );
-    this.feedbackStats = { since: arrivalTimeMs, last: arrivalTimeMs, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
+    this.feedbackStats = { since: arrivalTimeMs, last: arrivalTimeMs, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0, longGaps: 0, rawRtt: [] };
   }
 
   /** `GetRtcpPacketForImmediateSend`: a sender report, once a frame has been enqueued. */
@@ -344,6 +351,7 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     // delay_since_last_report is in 1/65536 s units.
     const nonNetworkDelay = (report.delaySinceLastReport * 1000) / 65536;
     const measurement = Math.max(totalDelay - nonNetworkDelay, NEAR_ZERO_ROUND_TRIP_TIME_MS);
+    if (this.debugLog !== undefined) this.feedbackStats.rawRtt.push(measurement);
     const clamped = Math.min(measurement, this.targetPlayoutDelayMs);
     this.roundTripTimeMs = smoothRoundTripTime(this.roundTripTimeMs, clamped);
   }
