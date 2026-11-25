@@ -17,6 +17,7 @@ import type { NetworkMonitor } from "./network-monitor.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 import { CastAppDiscovery, type CastAppSource } from "./app-discovery.ts";
 import { EventEmitter } from "node:events";
+import { setSentHook } from "../client/sent-hook.ts";
 import type { CastMessageLog, LoggedActivity, LoggedCastMessage } from "./message-logging.ts";
 import {
   AccessCodeSinks, type AccessCodeDevice, type AccessCodeOptions, type AccessCodeRememberedSink, type AddSinkResult,
@@ -143,7 +144,7 @@ export interface CastSessionServiceOptions {
   ownsSession?(sessionId: string, sinkId: string): boolean;
   /**
    * `CastMessageLogging`: where the messages of a session's channel are written, given only when the feature is on. A client
-   * that does not emit `messageSent` (a custom one) reports no sent messages.
+   * that the manager did not create (a custom `createClient`) reports no sent messages.
    */
   messageLog?: CastMessageLog;
   /**
@@ -1209,7 +1210,7 @@ export class CastSessionService {
   private bindClient(client: CastClientLike, _device: CastDevice): void {
     client.on("message", (msg) => this.onClientMessage(client, msg));
     if (this.options.messageLog !== undefined) {
-      (client as unknown as { on?(event: "messageSent", listener: (msg: LoggedCastMessage) => void): unknown }).on?.("messageSent", (msg) => this.logMessageSent(client, msg));
+      setSentHook(client, (msg) => this.logMessageSent(client, msg));
     }
     client.on("receiverStatus", (status) => this.onClientStatus(client, status));
     client.on("transportClosed", (transportId) => this.onTransportClosed(client, transportId));
