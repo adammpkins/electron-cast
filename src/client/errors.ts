@@ -30,3 +30,32 @@ export class CastRequestError extends Error {
     this.response = response;
   }
 }
+
+/** Why a device failed authentication; see {@link CastAuthError}. */
+export type CastAuthReason =
+  | "timeout"
+  | "no_tls_certificate"
+  | "tls_certificate_invalid"
+  | "device_error"
+  | "malformed_reply"
+  | "unsupported_algorithm"
+  | "invalid_certificate"
+  | "untrusted_chain"
+  | "revoked"
+  | "crl_invalid"
+  | "bad_signature";
+
+/** The device did not prove it is a genuine, Google-certified Cast device, so it was not used. */
+export class CastAuthError extends Error {
+  readonly reason: CastAuthReason;
+  /** The device's address, when the client added it. */
+  readonly host: string | undefined;
+
+  constructor(reason: CastAuthReason, detail: string, options?: { host?: string }) {
+    const where = options?.host === undefined ? "" : ` for ${options.host}`;
+    super(`Cast device authentication failed${where}: ${detail}`);
+    this.name = "CastAuthError";
+    this.reason = reason;
+    this.host = options?.host;
+  }
+}

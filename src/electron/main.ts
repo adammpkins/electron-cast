@@ -55,6 +55,11 @@ export interface CastManagerOptions {
    * the preload's `mode: "chromecast"`.
    */
   presentation?: boolean;
+  /**
+   * Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (CastClient's
+   * `verifyDevice`). Default true; false allows uncertified receivers. Ignored when `createClient` is given.
+   */
+  verifyDevices?: boolean;
 }
 /** The main-process cast manager. */
 export interface CastManager {
@@ -95,7 +100,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
   const discovery = options.discovery ?? new CastDiscovery();
-  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port }));
+  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false }));
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
    * the frame's lifetime (across its navigations, so a reloaded iframe can rejoin its session). The frame is looked up
