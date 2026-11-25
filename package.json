@@ -20,24 +20,48 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
     },
     "./main": {
-      "types": "./dist/electron/main.d.ts",
-      "default": "./dist/electron/main.js"
+      "import": {
+        "types": "./dist/electron/main.d.ts",
+        "default": "./dist/electron/main.js"
+      },
+      "require": {
+        "types": "./dist/cjs/electron/main.d.ts",
+        "default": "./dist/cjs/electron/main.js"
+      }
     },
     "./preload": {
-      "types": "./dist/electron/preload.d.ts",
-      "default": "./dist/electron/preload.js"
+      "import": {
+        "types": "./dist/electron/preload.d.ts",
+        "default": "./dist/electron/preload.js"
+      },
+      "require": {
+        "types": "./dist/cjs/electron/preload.d.ts",
+        "default": "./dist/cjs/electron/preload.js"
+      }
     },
     "./polyfill": {
-      "types": "./dist/polyfill/install.d.ts",
-      "default": "./dist/polyfill/install.js"
+      "import": {
+        "types": "./dist/polyfill/install.d.ts",
+        "default": "./dist/polyfill/install.js"
+      },
+      "require": {
+        "types": "./dist/cjs/polyfill/install.d.ts",
+        "default": "./dist/cjs/polyfill/install.js"
+      }
     },
     "./package.json": "./package.json"
   },
-  "main": "./dist/index.js",
+  "main": "./dist/cjs/index.js",
   "types": "./dist/index.d.ts",
   "engines": {
     "node": ">=20"
@@ -48,7 +72,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node scripts/mark-cjs.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",

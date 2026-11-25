@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a CommonJS build (`dist/cjs`, no new dependencies) with `import` / `require` conditions on every entry point, so a
+  non-sandboxed CommonJS preload or main process can `require("electron-cast/preload")` and `require("electron-cast/main")`.
+  The ESM build is unchanged.
 - Presentation mode now matches Chrome's Media Router for v2 requests: `QUEUE_NEXT`, `QUEUE_PREV` and `PRECACHE` are
   forwarded to the receiver (they were dropped, so their callbacks never fired); a failed `SET_VOLUME` or `STOP`
   reports `internal_error` / "unknown error"; a media request that cannot be sent gets no reply; an app message for a
