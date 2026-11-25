@@ -355,6 +355,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       (utilization) => this.deps.backend.processFeedback(utilization),
     );
     frameSender.onDropLog = (message) => this.deps.observer.logInfo?.(message);
+    videoSender.onKeyFrameRequest = (reason) => this.deps.observer.logInfo?.(`video key frame requested (${reason})`);
     this.videoFrameSender = frameSender;
     this.videoSender = videoSender;
     this.activeVideoConfig = config;

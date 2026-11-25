@@ -102,6 +102,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   const receiver = await FakeReceiver.create({ verifyBody: false, videoPreference: hardware === "vp9" ? ["vp9"] : ["h264", "vp8"] });
   const calls = [];
   let encodersLine = "";
+  let keyFrameRequests = 0;
   const client = new (class extends EventEmitter {
     senderId = "sender-smoke01";
     lastSource = "";
@@ -135,7 +136,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     mirroring: {
       electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app },
       engineModulePath,
-      log: (l, m) => { if (m.startsWith("encoders:")) encodersLine = m; console.log(`smoke: [${name}] mirroring ${l}: ${m}`); },
+      log: (l, m) => { if (m.startsWith("encoders:")) encodersLine = m; if (m.includes("video key frame requested")) keyFrameRequests++; console.log(`smoke: [${name}] mirroring ${l}: ${m}`); },
     },
   });
   await cast.start();
@@ -205,9 +206,12 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   // A key frame is asked for once at the start; more would be bitrate spikes. (libvpx VP9 cuts a key frame by itself at a
   // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.) A new
   // capture size starts with a key frame too: on a slow machine the encoder is overloaded and the capture size steps
-  // down (VideoCaptureOracle). So: one key frame per picture size seen, and one spare.
-  const keyFrameLimit = Math.max(1, s.videoSizes.size) + 1;
-  assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= keyFrameLimit, `${s.videoKeyFrames} key frames reached the receiver (sizes ${[...s.videoSizes].join(" ")})`);
+  // down (VideoCaptureOracle). And a frame the sender drops after encoding, or a picture loss the receiver reports, asks
+  // for one (VideoSender::OnEncodedVideoFrame and InsertRawVideoFrame call GenerateKeyFrame), which a slow runner hits.
+  // The first request is the session's opening key frame (Sender::NeedsKeyFrame is true until one is sent). So: one key
+  // frame per picture size seen, one per later key frame the sender asked for, and one spare.
+  const keyFrameLimit = Math.max(1, s.videoSizes.size) + Math.max(0, keyFrameRequests - 1) + 1;
+  assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= keyFrameLimit, `${s.videoKeyFrames} key frames reached the receiver (sizes ${[...s.videoSizes].join(" ")}, ${keyFrameRequests} asked for by the sender)`);
   pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder)${audioWanted ? " and Opus" : ""} frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
 
   let page2;

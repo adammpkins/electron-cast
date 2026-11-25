@@ -196,9 +196,12 @@ test("VideoSender drops a frame whose timestamps do not increase", () => {
 
 test("VideoSender requests a key frame on a PLI at most once per max(500 ms, 6 * playout delay)", () => {
   const { vs, encoder, sender } = makeVideo({ v: 1_000_000 });
+  const requests: string[] = [];
+  vs.onKeyFrameRequest = (reason) => requests.push(reason);
   sender.needsKeyFrame = true;
   vs.insertRawVideoFrame(raw(0), 0);
   assert.equal(encoder.keyFrames, 1);
+  assert.deepEqual(requests, ["the receiver needs one: the session start or a picture loss"]);
   vs.insertRawVideoFrame(raw(1), 600);
   assert.equal(encoder.keyFrames, 1, "6 * 200 ms playout delay = 1200 ms is the interval");
   vs.insertRawVideoFrame(raw(2), 1300);
@@ -228,10 +231,13 @@ test("interactive content drops to the minimum playout delay and prefers droppin
 
 test("a frame refused after encoding makes the encoder produce a key frame", () => {
   const { vs, encoder, sender } = makeVideo({ v: 1_000_000 });
+  const requests: string[] = [];
+  vs.onKeyFrameRequest = (reason) => requests.push(reason);
   vs.insertRawVideoFrame(raw(0), 0);
   sender.result = "MAX_DURATION_IN_FLIGHT";
   vs.onEncodedVideoFrame(0, frame(0));
   assert.equal(encoder.keyFrames, 1);
+  assert.deepEqual(requests, ["frame dropped after encoding, kInFlightDurationTooHighAfterEncoding"]);
   assert.equal(vs.framesDroppedAfterEncoding, 1);
   assert.deepEqual([...vs.dropReasons], [["kInFlightDurationTooHighAfterEncoding", 1]]);
 });

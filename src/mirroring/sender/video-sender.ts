@@ -70,6 +70,8 @@ export class VideoSender implements FrameSenderClient {
   framesDroppedByEncoder = 0;
   /** Drops by reason, the counterpart of the `CastStreaming.Sender.Video.FrameDropped` histogram (video_sender.cc `kHistogramFrameDropped`). */
   readonly dropReasons = new Map<FrameDropReason, number>();
+  /** Debug aid, not in Chromium: each key frame the sender asks the encoder for, with why. */
+  onKeyFrameRequest: ((reason: string) => void) | undefined;
 
   constructor(
     frameSender: FrameSender,
@@ -134,6 +136,7 @@ export class VideoSender implements FrameSenderClient {
       const minAttemptInterval = Math.max(MIN_KEY_FRAME_REQUEST_INTERVAL_MS, MIN_KEY_FRAME_REQUEST_FRAME_INTERVAL * this.frameSender.targetPlayoutDelay);
       if (this.lastTimeAttemptedToResolvePli === undefined || referenceTimeMs - this.lastTimeAttemptedToResolvePli > minAttemptInterval) {
         this.encoder.generateKeyFrame();
+        this.onKeyFrameRequest?.("the receiver needs one: the session start or a picture loss");
         this.lastTimeAttemptedToResolvePli = referenceTimeMs;
       }
     }
@@ -214,6 +217,7 @@ export class VideoSender implements FrameSenderClient {
       this.dropReasons.set(reason, (this.dropReasons.get(reason) ?? 0) + 1);
       // The encoder's reference chain is broken, so the next frame must be a key frame.
       this.encoder.generateKeyFrame();
+      this.onKeyFrameRequest?.(`frame dropped after encoding, ${reason}`);
     }
   }
 
