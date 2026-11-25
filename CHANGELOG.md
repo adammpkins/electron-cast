@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Main-process API on the cast manager, modelled on Chrome's Media Router: sinks and routes observers, `terminateRoute`, `detachRoute`, route volume control, and a third `selectDevice` argument that streams devices found while the picker is open. See docs/MAIN-API.md.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which

@@ -117,6 +117,8 @@ The package root exports every layer, if you want to use them without Electron:
 
 See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
 
+To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
+
 ## License
 
 MIT

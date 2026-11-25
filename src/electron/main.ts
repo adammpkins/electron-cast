@@ -3,9 +3,15 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
+import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
 
 export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
+export { MediaRouteError } from "./manager-api.ts";
+export type {
+  CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
+  MediaSinksQuery, SinkIconType,
+} from "./manager-api.ts";
 
 /** The subset of an Electron `WebFrameMain` the manager needs. */
 export interface FrameLike { url: string; origin?: string }
@@ -31,7 +37,8 @@ export interface IpcMainLike {
 /** Dependencies of {@link createCastManager}; the Electron objects are passed in, never imported. */
 export interface CastManagerOptions {
   ipcMain: IpcMainLike;
-  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<DeviceChoice>;
+  /** `picker` (optional to declare) streams device changes while the picker is open; see {@link DevicePickerContext}. */
+  selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   discovery?: DeviceSource & { start(): Promise<void>; stop(): void };  // default new CastDiscovery()
   createClient?(device: CastDevice): CastClientLike;                     // default new CastClient({ host, port })
@@ -43,8 +50,8 @@ export interface CastManagerOptions {
    */
   presentation?: boolean;
 }
-/** The main-process cast manager. */
-export interface CastManager {
+/** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
+export interface CastManager extends CastManagerApi {
   start(): Promise<void>;
   devices(): CastDevice[];
   dispose(): Promise<void>;
@@ -280,13 +287,16 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   };
   const presentation = options.presentation !== false ? setUpPresentation() : undefined;
 
+  const api = createManagerApi(createSinksObservers(discovery), service);
   let disposed = false;
   return {
+    ...api,
     start: () => discovery.start(),
     devices: () => discovery.devices(),
     async dispose() {
       if (disposed) return;
       disposed = true;
+      api.dispose();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
       discovery.stop();
