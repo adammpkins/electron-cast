@@ -56,7 +56,8 @@ installCastBridge({ contextBridge, ipcRenderer });
 Import from `electron-cast/preload`, not the package root: the root also exports the main-process code, which needs
 Node's `tls` and `dgram` and cannot load in a sandboxed preload. The preload entry imports nothing Node-only, but a
 sandboxed preload cannot load other files either, so bundle it into your preload (esbuild, for example, as
-`smoke/build-preloads.mjs` does).
+`smoke/build-preloads.mjs` does). A non-sandboxed CommonJS preload can `require("electron-cast/preload")` directly:
+the package ships a CommonJS build next to the ESM one.
 
 That's all. The page loads Google's Cast SDK as usual, and its cast button drives sessions through IPC to the main
 process.
