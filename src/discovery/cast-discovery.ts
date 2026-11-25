@@ -78,6 +78,7 @@ function ifaceKey(iface: NetworkInterfaceInfo): string {
   return iface.family === "IPv6" ? `${iface.address}%${iface.scopeId ?? iface.name}` : iface.address;
 }
 
+/** Options of {@link CastDiscovery}. Every field is optional; the comments name the defaults. */
 export interface CastDiscoveryOptions {
   serviceName?: string;          // default "_googlecast._tcp.local"
   interfaces?: () => NetworkInterfaceInfo[];   // default () => listMdnsInterfaces() (IPv4, plus IPv6 link-local)
@@ -89,6 +90,7 @@ export interface CastDiscoveryOptions {
   resumeGapMs?: number;          // default 3 x interfaceCheckMs: a check this late means the machine slept
 }
 
+/** The events a {@link CastDiscovery} emits. `socketError` is one interface failing; the others carry on. */
 export interface CastDiscoveryEvents {
   deviceUp: [device: CastDevice];
   deviceDown: [device: CastDevice];

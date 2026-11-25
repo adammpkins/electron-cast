@@ -676,7 +676,7 @@ export class CastSessionService {
    * in the session tracker, which knows what every device with an open channel runs: Chrome's CastActivityManager adds
    * a non-local activity for each session its CastSessionTracker learns (AddNonLocalActivity) and
    * FindActivityForSessionJoin finds it by id alone; auto-join skips it and no origin is checked. `appId`, when given,
-   * must be the session's app (CastActivity::CanJoinSession). Joining makes the route local, as in Chrome.
+   * must be the session's app (AppActivity::CanJoinSession). Joining makes the route local, as in Chrome.
    */
   private async handleJoinRunningSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
     const p = parseSessionId(params);

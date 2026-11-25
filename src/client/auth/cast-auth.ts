@@ -25,6 +25,7 @@ const MAX_SELF_SIGNED_CERT_LIFETIME_MS = 4 * 24 * 60 * 60 * 1000;
 /** Chromium's kNonceSizeInBytes. */
 const NONCE_SIZE = 16;
 
+/** Replacements for the trust anchors and the clock in device authentication. For tests and private Cast deployments. */
 export interface DeviceAuthOptions {
   /** Verification time, epoch milliseconds. Defaults to now. */
   now?: number;
@@ -38,6 +39,7 @@ export interface DeviceAuthOptions {
   fallbackCrlBuildTime?: number;
 }
 
+/** What device authentication established about a device, available as `CastClient.deviceAuth` once connected. */
 export interface DeviceAuthResult {
   policy: CastDeviceCertPolicy;
   hashAlgorithm: "sha1" | "sha256";

@@ -17,6 +17,10 @@
     "type": "git",
     "url": "git+https://github.com/adammpkins/electron-cast.git"
   },
+  "homepage": "https://github.com/adammpkins/electron-cast#readme",
+  "bugs": {
+    "url": "https://github.com/adammpkins/electron-cast/issues"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -69,7 +73,10 @@
   "files": [
     "dist",
     "src",
-    "CHANGELOG.md"
+    "docs",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node scripts/mark-cjs.mjs && node scripts/stamp-build-time.mjs",
@@ -77,7 +84,9 @@
     "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.ts\"",
     "lint": "oxlint src test",
     "canary": "node tools/sdk-canary.mjs",
-    "check": "npm run typecheck && npm run lint && npm test",
+    "docs:check": "node tools/docs-check.mjs",
+    "docs:check:chromium": "node tools/docs-check-chromium.mjs",
+    "check": "npm run typecheck && npm run lint && npm test && npm run docs:check",
     "prepack": "npm run build",
     "smoke": "npm run build && node smoke/run.mjs"
   },

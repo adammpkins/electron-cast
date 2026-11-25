@@ -38,6 +38,7 @@ Contents: [`electron-cast/main`](#electron-castmain) · [`electron-cast/preload`
 
 ### `createCastManager(options)`
 
+<!-- no-check -->
 ```ts
 function createCastManager(options: CastManagerOptions): CastManager
 ```
@@ -72,7 +73,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `channel` | `string` | `"electron-cast"` | Prefix of the IPC channel names. Must match the preload's `channel`. |
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
 | `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is never listed (see [sinks](MAIN-API.md#sinks)). |
-| `sinks` | `CastSinkOptions` | Chrome's values | When and how channels to devices open and the list is reported: `openDelayMaxMs` (5000), `reportDelayMs` (3000), `retry` (`initialDelayMs` 15000, `maxAttempts` 3, `multiplyFactor` 1, `jitter` 0.5, `maxDelayMs` 30000), `dynamicTimeoutDeltaMs` (0, as in Chrome: added to the 10 s connect and liveness timeouts per failed attempt, up to 30 s and 60 s) and `allowAllIps` (false: public and loopback addresses are skipped, as Chrome does). Channels are opened to IP addresses only; a device whose `host` is a name is skipped with one `console.warn`. Each is Chrome's own setting (see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts)); mostly for tests. |
+| `sinks` | `CastSinkOptions` | Chrome's values | When and how channels to devices open and the list is reported: `openDelayMaxMs` (5000), `reportDelayMs` (3000), `retry` (a `SinkRetryOptions`: `initialDelayMs` 15000, `maxAttempts` 3, `multiplyFactor` 1, `jitter` 0.5, `maxDelayMs` 30000), `dynamicTimeoutDeltaMs` (0, as in Chrome: added to the 10 s connect and liveness timeouts per failed attempt, up to 30 s and 60 s) and `allowAllIps` (false: public and loopback addresses are skipped, as Chrome does). Channels are opened to IP addresses only; a device whose `host` is a name is skipped with one `console.warn`. Each is Chrome's own setting (see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts)); mostly for tests. |
 | `allowAllIPs` | `boolean` | `false` | Connect to devices at any address. Chrome opens no Cast channel to a publicly routable or loopback address unless its `MediaRouterCastAllowAllIPs` policy is set, so by default such a device is not listed, offered or connected to (see [SECURITY.md](../SECURITY.md#device-addresses)). Applies to a `discovery` you pass too. |
 
 #### `CastManager`
@@ -215,6 +216,7 @@ Electron's `ipcMain`, `WebContents` and `WebFrameMain` satisfy these. The main e
 
 ### `installCastBridge(options)`
 
+<!-- no-check -->
 ```ts
 function installCastBridge(options: CastBridgeOptions): void
 ```
@@ -265,6 +267,7 @@ interface IpcRendererLike {
 
 ### `installChromeCast(bridgeKey)`
 
+<!-- no-check -->
 ```ts
 function installChromeCast(bridgeKey: string): boolean
 ```
@@ -327,6 +330,7 @@ have no Electron dependency, so they run in plain Node.
 
 ### Session service
 
+<!-- no-check -->
 ```ts
 class CastSessionService {
   constructor(options: CastSessionServiceOptions)
@@ -397,12 +401,14 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 | `ClientMessage` | `{ namespace, sourceId, destinationId, data: string \| Buffer }`. |
 | `SenderInfo` | `{ id: number, origin: string }`: a frame (the webContents id for a main frame; the manager gives each iframe its own id) and its origin. |
 | `CastRequestInfo`, `DeviceChoice` | As above. |
+| `APP_AVAILABILITY_REFRESH_MS` | `60000`: how long a device's "unavailable" answer to `GET_APP_AVAILABILITY` stands before it is asked again (Chrome's `kRefreshThreshold` in `cast_app_discovery_service.cc`). |
 
 The service also has `mediaRoutes()`, `observeSessions(listener)`, `terminateSession(id)`, `setSessionVolume(id, volume)`
 and `detachSession(id)`, the hooks the manager's [main-process API](MAIN-API.md) is built on.
 
 ### `CastClient`
 
+<!-- no-check -->
 ```ts
 class CastClient extends EventEmitter<CastClientEvents> {
   constructor(options: CastClientOptions)
@@ -512,6 +518,16 @@ Returned by the `deviceAuth` getter. Exported as a type.
 | `usedFallbackCrl` | `boolean` | The device sent no usable CRL and the built-in fallback CRL was used. |
 | `revocationChecked` | `boolean` | `false` only in the stale-fallback case above. |
 
+`CastDeviceCertPolicy` (an exported type) is the type of `policy`: `"unrestricted"` or `"audio_only"`.
+
+`CastCertError` (an exported type) is the outcome of the certificate-chain check that device authentication runs, named after
+Chromium's `CastCertError`: `OK`, `OK_FALLBACK_CRL`, `OK_FALLBACK_CRL_STALE`, `ERR_CERTS_MISSING`, `ERR_CERTS_PARSE`,
+`ERR_CERTS_DATE_INVALID`, `ERR_CERTS_VERIFY_GENERIC`, `ERR_CERTS_RESTRICTIONS`, `ERR_CERTS_REVOKED`,
+`ERR_CERTS_REVOKED_BY_FALLBACK_CRL` and `ERR_FALLBACK_CRL_INVALID`. A client reports it through `CastAuthError.reason`, never
+directly: the `ERR_CERTS_MISSING`, `_PARSE`, `_DATE_INVALID` and `_RESTRICTIONS` outcomes become `invalid_certificate`,
+`ERR_CERTS_VERIFY_GENERIC` becomes `untrusted_chain`, both `REVOKED` outcomes become `revoked`, and `ERR_FALLBACK_CRL_INVALID`
+becomes `crl_invalid`. The three `OK` outcomes pass; `OK_FALLBACK_CRL_STALE` is the stale-fallback case above.
+
 ##### `DeviceAuthOptions`
 
 The `deviceAuth` client option, exported as the type `DeviceAuthOptions`. All fields are optional.
@@ -557,6 +573,7 @@ Through the manager, any `connect()` failure, `CastAuthError` included, reaches 
 
 #### `CastDiscovery`
 
+<!-- no-check -->
 ```ts
 class CastDiscovery extends EventEmitter<CastDiscoveryEvents> {
   constructor(options?: CastDiscoveryOptions)
@@ -629,6 +646,9 @@ users see:
 | `formatIPv6(bytes)` | 16 bytes to an RFC 5952 string. |
 | `RecordType` | `{ A: 1, PTR: 12, TXT: 16, AAAA: 28, SRV: 33 }` |
 | `DnsFormatError`, `DnsQuestion`, `DnsRecord`, `DnsPacket` | DNS types. `DnsRecord` is a union discriminated by `type` (`A`, `AAAA`, `PTR`, `TXT`, `SRV`, `UNKNOWN`). |
+| `isPubliclyRoutable(address)`, `isLoopback(address)` | Ports of `net::IPAddress::IsPubliclyRoutable` and `IsLoopback` (`net/base/ip_address.cc`), byte for byte: an IPv4-mapped IPv6 address is judged by its IPv4 part, a string that is not an IP address counts as publicly routable. |
+| `isCastAddressAllowed(address, allowAllIPs?)` | Whether a Cast channel may be opened to `address`: neither publicly routable nor loopback, unless `allowAllIPs` (Chrome's `CastMediaSinkServiceImpl::OpenChannel` rule). |
+| `parseIpBytes(address)` | An IPv4 or IPv6 literal (zone ignored, brackets allowed) as its 4 or 16 bytes, or `null`. |
 
 ### Protocol
 

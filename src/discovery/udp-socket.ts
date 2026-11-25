@@ -1,8 +1,11 @@
 import dgram from "node:dgram";
 import type { MdnsSocket, MdnsSocketHandlers, NetworkInterfaceInfo } from "./cast-discovery.ts";
 
+/** The IPv4 multicast group mDNS uses (RFC 6762). */
 export const MDNS_GROUP = "224.0.0.251";
+/** The IPv6 link-local multicast group mDNS uses (RFC 6762). */
 export const MDNS_GROUP_V6 = "ff02::fb";
+/** The UDP port mDNS uses (RFC 6762). */
 export const MDNS_PORT = 5353;
 
 type CreateSocket = (options: dgram.SocketOptions) => dgram.Socket;

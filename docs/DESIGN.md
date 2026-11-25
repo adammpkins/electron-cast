@@ -39,7 +39,7 @@ main process            CastManager: sessions, picker, IPC     src/electron/main
 
 ## Protocol layer (`src/protocol/`)
 
-### CastMessage (protobuf, from Chromium `cast_channel.proto`)
+### CastMessage (protobuf, from `cast_channel.proto` in the Open Screen library)
 
 | Field | No. | Wire type | Tag byte | Notes |
 |---|---|---|---|---|
@@ -57,7 +57,7 @@ The encoder writes fields in ascending order and writes the required fields even
 ### Framing
 
 Each message on the TLS socket is a 4-byte big-endian unsigned length followed by that many bytes of encoded
-CastMessage. The maximum body is 65536 bytes (Chromium's `kMaxMessageSize`); a larger declared length is a protocol
+CastMessage. The maximum body is 65536 bytes (Chromium's `MessageFramer::MessageHeader::max_body_size()`); a larger declared length is a protocol
 error and the connection must be closed.
 
 ## Client layer (`src/client/`)
@@ -213,7 +213,7 @@ one:
   (`auto-join` and `cast-session_<id>`), app and media messages with request id mapping, volume, leave and stop.
   Its interface (`getAvailability`, `startPresentation`, `reconnectPresentation`, and a connection with `send`,
   `close`, `terminate`, `onmessage` and `onclose`) is the one proposed to Electron as a native hook
-  (`docs/upstream/`, not shipped). With that hook the stand-in would go away.
+  (not shipped). With that hook the stand-in would go away.
 
 A navigation (a reload, say) ends the page's connections but parks its sessions instead of leaving them: they stay
 open on the device, get no events, and the sender's next page rejoins them through auto-join or `joinSession`, as with
@@ -239,8 +239,9 @@ as the request origin for start and reconnect, requires transient user activatio
 the frame is destroyed or commits a non-same-document navigation (`DidFinishNavigation`). The controller delegate
 (`components/media_router/browser/presentation/controller_presentation_service_delegate_impl.cc`) keeps one
 `PresentationFrame` per `GlobalRenderFrameHostId`, and `PresentationFrame::Reset` detaches its routes rather than
-terminating them, which is the "park" here. Only `SetDefaultPresentationUrls` is limited to the outermost document
-(`is_outermost_document_`); electron-cast keeps the same rule for the default request (see [Default presentation request](#default-presentation-request)).
+terminating them, which is the "park" here. On the controller side only `SetDefaultPresentationUrls` is limited to the
+outermost document (`is_outermost_document_`); electron-cast keeps the same rule for the default request (see
+[Default presentation request](#default-presentation-request)).
 
 electron-cast does the same:
 
@@ -365,6 +366,7 @@ interfaces, so the library has no Electron dependency and runs in plain Node.
 
 Main process:
 
+<!-- no-check -->
 ```ts
 import { ipcMain, BrowserWindow } from "electron";
 import { createCastManager } from "electron-cast/main";

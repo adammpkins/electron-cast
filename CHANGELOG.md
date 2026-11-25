@@ -62,6 +62,7 @@
   `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
   `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
   images). See docs/MAIN-API.md.
+- **Documentation.** A rewritten README, a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING. `npm run check` now also checks the docs: every public export is mentioned, the TypeScript examples typecheck against the sources, and relative links and anchors resolve; `npm run docs:check:chromium` (network) rechecks the Chromium citations. Comment fixes only in `src/`.
 
 ## 0.4.0
 

@@ -55,6 +55,7 @@ Where electron-cast differs from Chrome:
 
 ## Sinks
 
+<!-- no-check -->
 ```ts
 import { createCastManager, type MediaSink } from "electron-cast/main";
 
@@ -84,6 +85,7 @@ addresses, which Chrome refuses by default.
 
 ## Routes
 
+<!-- no-check -->
 ```ts
 manager.registerMediaRoutesObserver({
   onRoutesUpdated(routes) {
@@ -118,11 +120,13 @@ apps running on the devices.
 
 ## Media control
 
+<!-- no-check -->
 ```ts
 const controller = manager.getMediaController(routeId, {
   onMediaStatusUpdated(status) {
-    // title, secondaryTitle, playState ("playing" | "paused" | "buffering"), currentTime, duration (seconds),
-    // volume, isMuted, canPlayPause, canSeek, canMute, canSetVolume, canSkipToNextTrack, canSkipToPreviousTrack, images
+    // title, secondaryTitle, playState (a MediaPlayState: "playing" | "paused" | "buffering"), currentTime,
+    // duration (seconds), volume, isMuted, canPlayPause, canSeek, canMute, canSetVolume, canSkipToNextTrack,
+    // canSkipToPreviousTrack, images (MediaImage[]: { url, size: { width, height } | null })
   },
 });
 await controller.play();
@@ -160,6 +164,7 @@ Where it differs from Chrome:
 works like Chrome's dialog watching sinks while it is open. mDNS often needs a few seconds, so devices can appear
 after the picker opens:
 
+<!-- no-check -->
 ```ts
 selectDevice: (devices, request, picker) =>
   new Promise((resolve) => {
@@ -182,6 +187,7 @@ In Chrome a page that wants to be castable from the browser's Cast dialog sets
 source, and when the user picks a device Chrome starts the presentation and fires `connectionavailable` on the default
 request with the new connection; the SDK adopts the session. The app's own cast UI does the same here:
 
+<!-- no-check -->
 ```ts
 const id = win.webContents.id;
 

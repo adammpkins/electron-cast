@@ -1,6 +1,6 @@
 import { CastProtocolError } from "./errors.ts";
 
-/** Maximum Cast v2 message body in bytes (Chromium's kMaxMessageSize). */
+/** Maximum Cast v2 message body in bytes (Chromium's MessageFramer::MessageHeader::max_body_size()). */
 export const MAX_MESSAGE_SIZE = 65536;
 
 const HEADER_SIZE = 4;

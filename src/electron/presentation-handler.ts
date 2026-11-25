@@ -56,7 +56,7 @@ interface SenderState {
   watches: Map<number, Watch>;
 }
 
-/** The pending-media table is bounded like Chromium's (kMaxPendingMediaRequests, best known value). */
+/** The pending-media table is bounded as Chromium's is (CastSessionClientImpl::kMaxPendingMediaRequests, 1024 there; this cap is smaller). */
 const MAX_PENDING_MEDIA = 100;
 /** Request ids wrap back to 1 past this value. */
 const REQUEST_ID_MAX = 2 ** 31;
