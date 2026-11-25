@@ -496,6 +496,9 @@ for (const echo of [false, true]) {
     const r = await service.handle(PAGE, "requestSession", REQ);
     assert.deepEqual(r, { ok: false, code: "cancel" });
     assert.deepEqual(clients[0]?.calls.filter((c) => c.startsWith("stop")), [`stop ${s.sessionId}`]);
+    const stop = { type: "receiverAction", sessionId: s.sessionId, action: "stop" };
+    assert.deepEqual(log.of(PAGE.id, "receiverAction"), [stop], "the caller hears the stop before the session ends");
+    assert.deepEqual(log.of(PAGE2.id, "receiverAction"), [], "only the caller gets the receiverAction event");
     const ended = { type: "sessionEnded", sessionId: s.sessionId, status: "stopped" };
     assert.deepEqual(log.of(PAGE.id, "sessionEnded"), [ended], "the caller did not call stop itself, so it is told");
     assert.deepEqual(log.of(PAGE2.id, "sessionEnded"), [ended]);

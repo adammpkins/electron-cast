@@ -63,12 +63,18 @@ sessions through IPC to the main process.
 - `chrome.cast.initialize`, `requestSession`, `session.stop`, `session.leave`, receiver availability, volume and
   mute, and messages on custom namespaces (`sendMessage` and `addMessageListener`). That is all YouTube
   Music's cast button needs, and it works end to end.
+- `chrome.cast.media`: load and queue media (`loadMedia`, `queueLoad`), control playback (play, pause, seek, stop,
+  volume, tracks, queue operations), receive media status updates, and watch for media with media listeners. Pages
+  can drive the Default Media Receiver.
+- Google's Cast Application Framework (`cast.framework`, loaded by `cast_sender.js?loadCastFramework=1`): `CastContext`,
+  sessions, `RemotePlayer` and `RemotePlayerController`. Electron exposes
+  `navigator.presentation`, so Google's loader would normally inject its own Presentation API based `chrome.cast`,
+  which overwrites the polyfill and finds no devices in Electron; the polyfill blocks that script and tells the page's
+  `__onGCastApiAvailable` callback once.
 - Several pages or windows at once; a page that reloads or closes leaves its sessions without stopping playback.
 
-Not yet: `chrome.cast.media` (`loadMedia` fails with `session_error`), and the newer `cast.framework` API. Pages
-that load media through the Default Media Receiver need those.
-
-Casting is tested end to end with a Chromecast (YouTube Music). Discovery and connections are tested with Chromecast
+Casting is tested end to end with a Chromecast (YouTube Music), and media through `cast.framework` with a Nest Hub
+(load, play, pause, seek, volume, and stopping from the picker). Discovery and connections are tested with Chromecast
 Ultra, Google Home Mini, Nest Hub, Nest Hub Max and speaker groups.
 
 ## Lower layers

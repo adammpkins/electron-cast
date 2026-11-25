@@ -1,4 +1,6 @@
-export type BridgeResult<T = unknown> = { ok: true; value: T } | { ok: false; code: string; description?: string };
+export type BridgeResult<T = unknown> =
+  | { ok: true; value: T }
+  | { ok: false; code: string; description?: string };
 export type BridgeMethod = "initialize" | "requestSession" | "joinSession" | "sendMessage" | "stopSession"
   | "leaveSession" | "setReceiverVolume" | "setReceiverMuted";
 export interface CastBridge {
@@ -20,6 +22,7 @@ export type BridgeEvent =
   | { type: "receiverAvailability"; available: boolean }
   | { type: "sessionUpdated"; session: SessionSnapshot }
   | { type: "sessionEnded"; sessionId: string; status: "stopped" | "disconnected" }
+  | { type: "receiverAction"; sessionId: string; action: "stop" }
   | { type: "message"; sessionId: string; namespace: string; message: string };
 export interface InitializeParams { appId: string; capabilities: string[]; autoJoinPolicy: string }
 export interface InitializeResult { available: boolean; sessions: SessionSnapshot[] }

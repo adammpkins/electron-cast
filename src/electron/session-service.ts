@@ -350,6 +350,8 @@ export class CastSessionService {
       if (choice === "stop") {
         const rec = request.session !== undefined ? this.sessions.get(request.session.sessionId) : undefined;
         if (rec === undefined) return bad("cancel");
+        // Like Chrome, tell the caller's receiver action listeners about the stop before the session ends.
+        this.emitTo(sender.id, { type: "receiverAction", sessionId: rec.app.sessionId, action: "stop" });
         const stopped = await this.stopSessionRecord(rec, sender.id, true);
         return stopped.ok ? bad("cancel") : stopped;
       }

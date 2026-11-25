@@ -4,6 +4,12 @@ import { createHarness, install, tick, plain, snapshot, BRIDGE_KEY, type Harness
 import { installChromeCast } from "../../src/polyfill/install.ts";
 
 const MDX = "urn:x-cast:com.google.youtube.mdx";
+const MEDIA = "urn:x-cast:com.google.cast.media";
+
+/** Bridge calls minus the polyfill's own media-namespace traffic (e.g. the GET_STATUS sent when a session is created). */
+function nonMediaCalls(h: Harness) {
+  return h.calls.filter((c) => !(c.method === "sendMessage" && c.params.namespace === MEDIA));
+}
 
 /** Initialize with a standard config inside the page realm; collects listener calls on window.__log. */
 async function initialized(h: Harness, initValue: unknown = { available: true, sessions: [] }) {
@@ -213,7 +219,7 @@ test("requestSession resolves a Session, notifies receiver action listeners, and
     __order.push(["returned"]);`);
   await tick(5);
   assert.deepEqual(plain(h.win.__order), [["returned"], ["action", "Lounge Cast TV", "cast"], ["ok", "session-1"]]);
-  assert.deepEqual(plain(h.calls.at(-1)), { method: "requestSession", params: { appId: "233637DE", capabilities: ["audio_out"], timeoutMs: 60000 } });
+  assert.deepEqual(plain(nonMediaCalls(h).at(-1)), { method: "requestSession", params: { appId: "233637DE", capabilities: ["audio_out"], timeoutMs: 60000 } });
 });
 
 test("requestSession uses opt_sessionRequest when given", async () => {
@@ -223,7 +229,7 @@ test("requestSession uses opt_sessionRequest when given", async () => {
   h.run(`chrome.cast.requestSession((s) => { window.__app = s.appId; }, () => {}, new chrome.cast.SessionRequest("CC1AD845", ["video_out"], 5000));`);
   await tick(5);
   assert.equal(h.win.__app, "CC1AD845");
-  assert.deepEqual(plain(h.calls.at(-1)?.params), { appId: "CC1AD845", capabilities: ["video_out"], timeoutMs: 5000 });
+  assert.deepEqual(plain(nonMediaCalls(h).at(-1)?.params), { appId: "CC1AD845", capabilities: ["video_out"], timeoutMs: 5000 });
 });
 
 test("a cancelled picker reports cancel", async () => {
@@ -272,7 +278,7 @@ test("sendMessage serializes objects to JSON, passes strings through, and report
     __s.sendMessage("urn:x-cast:bad", {}, () => __m.push("ok3"), (e) => __m.push(e.code));`);
   await tick(5);
   assert.deepEqual(plain(h.win.__m).sort(), ["channel_error", "ok1", "ok2"]);
-  const sent = h.calls.filter((c) => c.method === "sendMessage").map((c) => c.params);
+  const sent = nonMediaCalls(h).filter((c) => c.method === "sendMessage").map((c) => c.params);
   assert.deepEqual(sent.slice(0, 2), [
     { sessionId: "session-1", namespace: MDX, message: '{"type":"getMdxSessionStatus"}' },
     { sessionId: "session-1", namespace: MDX, message: "plain text" },
@@ -356,16 +362,17 @@ test("requestSessionById joins through the bridge and reports via the session li
   h.handlers.joinSession = (p) => ({ ok: true, value: snapshot({ sessionId: p.sessionId }) });
   h.run(`chrome.cast.requestSessionById("session-42");`);
   await tick(5);
-  assert.deepEqual(plain(h.calls.at(-1)), { method: "joinSession", params: { sessionId: "session-42" } });
+  assert.deepEqual(plain(nonMediaCalls(h).at(-1)), { method: "joinSession", params: { sessionId: "session-42" } });
   assert.deepEqual(plain(h.win.__log).at(-1), ["session", "session-42"]);
 });
 
-test("unimplemented media calls fail cleanly through the error callback", async () => {
+test("loadMedia and queueLoad reject requests without media or items with invalid_parameter", async () => {
   const h = createHarness();
   await withSession(h);
   h.run(`window.__e = []; __s.loadMedia({}, () => __e.push("ok"), (e) => __e.push(e.code)); __s.queueLoad({}, () => __e.push("ok"), (e) => __e.push(e.code));`);
   await tick(5);
-  assert.deepEqual(plain(h.win.__e), ["session_error", "session_error"]);
+  assert.deepEqual(plain(h.win.__e), ["invalid_parameter", "invalid_parameter"]);
+  assert.equal(nonMediaCalls(h).filter((c) => c.method === "sendMessage").length, 0, "invalid requests are not sent");
 });
 
 test("setCustomReceivers, setReceiverDisplayStatus, logMessage, precache and unescape are harmless", async () => {

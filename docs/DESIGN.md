@@ -96,8 +96,19 @@ Observed on real devices (fixtures in `test/fixtures/mdns/`):
 Implements the legacy Chrome sender API (`chrome.cast`, API version `[1, 2]`), as documented at
 https://developers.google.com/cast/docs/reference/web_sender/chrome.cast. String enums use the official lowercase
 values (`"available"`, `"tab_and_origin_scoped"`, `"cancel"`, …). After install it sets `chrome.cast.isAvailable =
-true` and calls `window.__onGCastApiAvailable(true)` if the page defined it. v0.1 covers sessions and custom
-namespace messages; `chrome.cast.media` comes after.
+true` and calls `window.__onGCastApiAvailable(true)` if the page defined it. It covers sessions, custom namespace
+messages, and `chrome.cast.media`: load and queue requests, playback commands, queue operations, media status
+updates (applied to `Media` objects with update listeners), and media listeners on the session. Media traffic rides
+the same bridge as everything else — JSON messages on `urn:x-cast:com.google.cast.media` — so no main-process change
+was needed; joining a session sends a `GET_STATUS` when the receiver supports the media namespace.
+
+Google's `cast_sender.js` loader checks for `navigator.presentation`, which Electron exposes, and then loads a
+Presentation API based `chrome.cast` (`www.gstatic.com/eureka/clank/<version>/cast_sender.js`, or one of the Cast
+extension URLs). That script replaces the polyfill's `chrome.cast` and finds no devices, because Electron has no Media
+Router behind the Presentation API. The polyfill refuses those script URLs (through the `src` setter and
+`setAttribute` on script elements) so the loader falls through to loading only `cast_framework.js`, and it calls
+`__onGCastApiAvailable` once, after `DOMContentLoaded` if the page is still loading, for whichever function the page
+assigns. The Cast Application Framework then runs on the polyfill.
 
 ## Electron layer (`src/electron/`)
 
