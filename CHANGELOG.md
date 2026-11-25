@@ -16,6 +16,10 @@
 - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009), requests
   have timeouts (Chrome sets none), and a DIAL route has no volume control (`BindMediaController` is not implemented
   there either).
+- DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
+  thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see, the
+  monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its POST), and a
+  `start()` without an earlier availability watch waits (up to 5 s) for the devices' app answers.
 - API: `MediaSink` and `MediaRoute` gain `providerId` (`"cast"` or `"dial"`), `SinkIconType` gains `"generic"`, and
   `CastDevice` gains an optional `dial` field that marks a DIAL sink. The sinks observer without a query now also
   reports DIAL sinks (they have no capabilities, so a `capabilities` query never does); `manager.devices()` still lists

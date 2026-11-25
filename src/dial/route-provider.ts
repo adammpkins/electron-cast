@@ -58,6 +58,8 @@ interface Activity {
   appInstanceUrl: string | null;
   pendingLaunch: boolean;
   pendingStop: boolean;
+  /** Cancels the launch POST: the record owning the fetcher is erased on a stop (`DialActivityManager::StopApp`). */
+  launchAbort: AbortController | null;
 }
 
 export interface DialRouteProviderOptions {
@@ -178,7 +180,7 @@ export class DialRouteProvider extends EventEmitter<DialRouteProviderEvents> {
       if (other.route.sinkId === sinkId) void this.terminateRoute(other.route.id).catch(() => undefined);
     }
     this.activities.set(route.id, {
-      route, appLaunchUrl, postData: launch.postData, state: "created", appInstanceUrl: null, pendingLaunch: false, pendingStop: false,
+      route, appLaunchUrl, postData: launch.postData, state: "created", appInstanceUrl: null, pendingLaunch: false, pendingStop: false, launchAbort: null,
     });
     // The messages that start the SDK's launch sequence follow the reply: RECEIVER_ACTION, then NEW_SESSION.
     const messages = [
@@ -303,9 +305,12 @@ export class DialRouteProvider extends EventEmitter<DialRouteProviderEvents> {
     // The launch parameter replaces the POST data of the source.
     const postData = launchParameter ?? activity.postData;
     activity.pendingLaunch = true;
-    void this.opts.http.post(activity.appLaunchUrl, postData).then((res) => {
+    const abort = new AbortController();
+    activity.launchAbort = abort;
+    void this.opts.http.post(activity.appLaunchUrl, postData, abort.signal).then((res) => {
       if (this.activities.get(activity.route.id) !== activity) return;
       activity.pendingLaunch = false;
+      activity.launchAbort = null;
       if (!res.ok) {
         this.activities.delete(activity.route.id);
         this.onLaunchResult(activity, false);
@@ -329,7 +334,11 @@ export class DialRouteProvider extends EventEmitter<DialRouteProviderEvents> {
     if (activity.pendingStop) throw new DialRouteError("REDUNDANT_REQUEST", "A pending request already exists");
     this.emit("messages", routeId, [dialEnvelope("receiver_action", { receiver: this.receiver(sink), action: "stop" }, activity.route.clientId)]);
     let failure: DialRouteError | null = null;
-    // A launch that has not been confirmed is treated as never made: nothing to stop on the device.
+    // A launch that has not been confirmed is treated as never made: nothing to stop on the device. Chrome erases the
+    // record, which destroys the launch fetcher: the POST is cancelled and its answer is never read. The device may
+    // still have started the app (a gap Chrome has too).
+    activity.launchAbort?.abort();
+    activity.launchAbort = null;
     if (activity.state === "launched") {
       activity.pendingStop = true;
       const target = activity.appInstanceUrl ?? `${activity.appLaunchUrl}/run`;
@@ -387,6 +396,7 @@ export class DialRouteProvider extends EventEmitter<DialRouteProviderEvents> {
 
   /** Forget everything; nothing is stopped on any device. */
   dispose(): void {
+    for (const activity of this.activities.values()) activity.launchAbort?.abort();
     this.activities.clear();
     this.pendingLaunches = [];
     this.removeAllListeners();

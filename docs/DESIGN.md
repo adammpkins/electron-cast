@@ -296,6 +296,22 @@ Differences from Chrome, and why:
 - **Stop failures.** Chrome posts an issue (`IDS_MEDIA_ROUTER_ISSUE_CANNOT_TERMINATE`); the provider emits an `issue`
   event and rejects `terminateRoute`, and the connection still ends.
 - **Volume.** A DIAL route has none, as in Chrome (`BindMediaController` is `NOTIMPLEMENTED`).
+- **Errors never throw.** Chrome only logs a DIAL discovery error (`DialMediaSinkServiceImpl::OnDialError`) and a failed
+  socket is closed while the others carry on (`DialSocket::CheckResult`, `DialServiceImpl::NotifyOnError`, which
+  reports `DIAL_SERVICE_NO_INTERFACES` when no socket is left). The registry does the same, `DialService` logs through
+  `dial.log`, and an empty interface list ends the cycle without an error (`DiscoverOnAddresses`).
+- **Origins and bounds.** Chrome starts the app query for any page and filters the answer by origin on delivery
+  (`StartObservingMediaSinks`, then `MediaSinksObserver::OnSinksUpdated`). Here nothing is queried for an origin that
+  could not see the answer, at most 32 apps are monitored at once and 2048 app statuses are kept. A page can still make
+  the devices answer app-info requests for app names no allowlist covers, as in Chrome.
+- **A request waits for the devices.** Chrome's dialog observes the sinks of the source while it is open; a `start()`
+  that finds no sink yet waits up to 5 s for the app answers instead of failing at once (and only when something is
+  being asked, see above).
+- **Cancelled requests.** Stopping the service aborts every request in flight. A route terminated while its launch
+  `POST` is in flight cancels it, as erasing the record destroys the fetcher in `DialActivityManager::StopApp`; the
+  device may still have started the app, which Chrome cannot tell either.
+- **`mode: "chromecast"`.** Its sinks observers list DIAL sinks too (port 0, no capabilities); `createClient` and Cast
+  sessions refuse such a device with an error.
 - **The XML reader** (`xml.ts`) stands in for Chromium's out-of-process `data_decoder`: it refuses entity
   declarations, caps the depth and ignores namespaces.
 

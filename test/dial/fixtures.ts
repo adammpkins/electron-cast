@@ -32,7 +32,7 @@ export function appInfoXml(state: "running" | "stopped" | "installable" = "stopp
     + `${state === "running" ? `<link rel="run" href="run"/>` : ""}${extra}</service>`;
 }
 
-export interface Call { method: "GET" | "POST" | "DELETE"; url: string; body?: string | null; setOrigin?: boolean }
+export interface Call { method: "GET" | "POST" | "DELETE"; url: string; body?: string | null; setOrigin?: boolean; signal?: AbortSignal }
 type Reply = DialHttpResult | ((call: Call) => DialHttpResult | Promise<DialHttpResult>);
 
 /** A DialHttp that answers from a table keyed by `"METHOD url"`; anything unlisted fails like a refused connection. */
@@ -52,14 +52,18 @@ export class FakeHttp implements DialHttp {
     return typeof reply === "function" ? reply(call) : reply;
   }
 
-  get(url: string, setOrigin: boolean): Promise<DialHttpResult> {
-    return this.answer({ method: "GET", url, setOrigin });
+  get(url: string, setOrigin: boolean, signal?: AbortSignal): Promise<DialHttpResult> {
+    return this.answer({ method: "GET", url, setOrigin, ...(signal !== undefined ? { signal } : {}) });
   }
-  post(url: string, body: string | null): Promise<DialHttpResult> {
-    return this.answer({ method: "POST", url, body });
+  post(url: string, body: string | null, signal?: AbortSignal): Promise<DialHttpResult> {
+    return this.answer({ method: "POST", url, body, ...(signal !== undefined ? { signal } : {}) });
   }
-  delete(url: string): Promise<DialHttpResult> {
-    return this.answer({ method: "DELETE", url });
+  delete(url: string, signal?: AbortSignal): Promise<DialHttpResult> {
+    return this.answer({ method: "DELETE", url, ...(signal !== undefined ? { signal } : {}) });
+  }
+  aborted = false;
+  abortAll(): void {
+    this.aborted = true;
   }
 }
 
@@ -74,3 +78,17 @@ export function healthyDevice(state: "running" | "stopped" = "stopped"): FakeHtt
 }
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Lets every promise chain that needs no timer run to its end (the fakes answer from microtasks). */
+export async function flush(rounds = 10): Promise<void> {
+  for (let i = 0; i < rounds; i++) await new Promise<void>((r) => setImmediate(r));
+}
+
+/** Waits until `condition` holds, polling between event-loop turns; fails the test on `timeoutMs` instead of racing a fixed delay. */
+export async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise<void>((r) => setImmediate(r));
+  }
+}

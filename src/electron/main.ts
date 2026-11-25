@@ -84,9 +84,13 @@ export interface CastManagerOptions {
   /**
    * DIAL (SSDP discovery, `cast-dial:` sources), which Chrome runs next to Cast discovery. Default true, except that a
    * custom `discovery` turns it off unless this is given. `false` disables it; an object replaces its network layers
-   * (tests, mostly).
+   * (tests, mostly). `log` receives discovery problems (a socket that failed, ...), which are never thrown.
+   *
+   * In `mode: "chromecast"` the sinks observers of the manager API still list DIAL sinks (they have port 0 and no Cast
+   * capabilities); only the Presentation API path can start a DIAL route, and a DIAL sink handed to `createClient`
+   * or to a Cast session fails with an error instead of connecting to port 0.
    */
-  dial?: boolean | { registry?: DialRegistryOptions; http?: DialHttp; httpOptions?: DialHttpOptions; settleMs?: number };
+  dial?: boolean | { registry?: DialRegistryOptions; http?: DialHttp; httpOptions?: DialHttpOptions; settleMs?: number; log?: (message: string) => void };
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -147,7 +151,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     on: (event, listener) => (event === "deviceChanged" ? dial.on("change", listener as () => void) : undefined),
     off: (event, listener) => (event === "deviceChanged" ? dial.off("change", listener as () => void) : undefined),
   };
-  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false }));
+  const createClient = options.createClient ?? ((d: CastDevice) => {
+    if (d.dial !== undefined) throw new Error("A DIAL device has no Cast port; it cannot be connected to as a Cast receiver");
+    return new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false });
+  });
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
    * the frame's lifetime (across its navigations, so a reloaded iframe can rejoin its session). The frame is looked up
@@ -247,7 +254,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       dial: {
         source: dialSource,
         available: (app: string, origin: string) => dial.availableFor(app, origin),
-        monitor: (app: string) => dial.monitorApp(app),
+        monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     } : {}),
     emit(senderId, event) {

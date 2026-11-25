@@ -72,6 +72,11 @@ export class DialService extends EventEmitter<{ change: [] }> {
       ...(options.log !== undefined ? { log: options.log } : {}),
     });
     this.sinks.on("change", () => this.emit("change"));
+    // DialMediaSinkServiceImpl::OnDialError only logs. Without a listener the registry's "error" would throw out of a
+    // timer or a socket callback.
+    this.registry.on("error", (code, detail) => {
+      options.log?.(`DIAL discovery error: ${code}${detail !== undefined ? ` (${detail.message})` : ""}`);
+    });
   }
 
   start(): void {
@@ -82,6 +87,7 @@ export class DialService extends EventEmitter<{ change: [] }> {
 
   stop(): void {
     this.started = false;
+    this.http.abortAll?.();
     this.registry.stop();
     this.sinks.stop();
     this.provider.dispose();
@@ -103,8 +109,15 @@ export class DialService extends EventEmitter<{ change: [] }> {
     return this.sinks.availableSinks(appName).map(dialSinkToDevice);
   }
 
-  /** Starts working out which sinks have `appName`; call the result to stop. */
-  monitorApp(appName: string): () => void {
+  /**
+   * Starts working out which sinks have `appName` for a page at `origin`; call the result to stop, or null when the
+   * origin may not see the app and nothing is started. Nothing is asked of
+   * the devices for an origin that could not see the answer anyway: Chrome starts the query whatever the origin and
+   * filters on delivery (`MediaSinksObserver::OnSinksUpdated`), which would let any page make the devices answer
+   * app-info requests for names of its choosing.
+   */
+  monitorApp(appName: string, origin: string): (() => void) | null {
+    if (!dialOriginAllowed(appName, origin)) return null;
     return this.sinks.monitorApp(appName);
   }
 }

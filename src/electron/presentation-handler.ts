@@ -165,6 +165,11 @@ class Conn implements PresentationConnectionHandle {
 export class CastPresentationHandler {
   private readonly service: Pick<CastSessionService, "handle">;
   private readonly dial: DialService | undefined;
+  /** What each live DIAL availability watch does when the DIAL sinks change. */
+  private readonly dialRecomputes = new Set<() => void>();
+  private readonly onDialChange = (): void => {
+    for (const recompute of [...this.dialRecomputes]) recompute();
+  };
   private readonly dialRoutesChanged: (() => void) | undefined;
   private readonly token: string;
   private readonly senders = new Map<number, SenderState>();
@@ -256,16 +261,20 @@ export class CastPresentationHandler {
     const dial = this.dial;
     if (dial !== undefined && dialApp !== null) {
       // The sink service only asks devices about apps somebody monitors.
-      const release = dial.monitorApp(dialApp);
+      const release = dial.monitorApp(dialApp, req.origin) ?? (() => undefined);
       const recompute = (): void => {
         watch.dialAvailable = dial.availableFor(dialApp, req.origin).length > 0;
         this.reportWatch(watch, false);
       };
-      dial.on("change", recompute);
+      // One listener on the service for all watches: a page may hold many, and each listener of its own would trip
+      // EventEmitter's limit of ten.
+      this.dialRecomputes.add(recompute);
+      if (this.dialRecomputes.size === 1) dial.on("change", this.onDialChange);
       watch.dialAvailable = dial.availableFor(dialApp, req.origin).length > 0;
       const unwatch = (): void => {
         release();
-        dial.off("change", recompute);
+        this.dialRecomputes.delete(recompute);
+        if (this.dialRecomputes.size === 0) dial.off("change", this.onDialChange);
       };
       if (signal.aborted) unwatch();
       else signal.addEventListener("abort", unwatch, { once: true });

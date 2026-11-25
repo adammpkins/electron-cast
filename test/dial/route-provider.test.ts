@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type { DialSink } from "../../src/dial/dial-sink-service.ts";
 import { DialRouteError, DialRouteProvider, dialEnvelope, parseDialMessage } from "../../src/dial/route-provider.ts";
 import { parseAppInfo, type DialAppInfoResult } from "../../src/dial/parse.ts";
-import { APP_URL, DEVICE_IP, FakeHttp, SINK_ID, appInfoXml, httpError, ok, sleep } from "./fixtures.ts";
+import { APP_URL, DEVICE_IP, FakeHttp, SINK_ID, appInfoXml, httpError, ok, flush } from "./fixtures.ts";
 
 const SOURCE = "cast-dial:YouTube?dialPostData=pair%3D1&clientId=client-1";
 const ORIGIN = "https://www.youtube.com";
@@ -83,7 +83,7 @@ test("client_connect asks the page whether to launch, with the app's state; its 
   const { provider, messages } = setup({ http });
   const { route: r } = route(provider);
   provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   assert.equal(messages.length, 1);
   const ask = messages[0]!.message;
   assert.equal(ask.type, "custom_dial_launch");
@@ -95,17 +95,17 @@ test("client_connect asks the page whether to launch, with the app's state; its 
 
   // An answer to a number that was never asked is ignored.
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", 999999));
-  await sleep(10);
+  await flush();
   assert.equal(http.calls.filter((c) => c.method === "POST").length, 0);
 
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true, launchParameter: "v=abc" }, "client-1", ask.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   const posts = http.calls.filter((c) => c.method === "POST");
   assert.deepEqual(posts.map((c) => [c.url, c.body]), [[RUN_URL, "v=abc"]]);
 
   // Answering again does nothing: the number is spent, and the app is launched.
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", ask.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   assert.equal(http.calls.filter((c) => c.method === "POST").length, 1);
 });
 
@@ -114,9 +114,9 @@ test("without a launch parameter the source's dialPostData is posted as written"
   const { provider, messages } = setup({ http });
   const { route: r } = route(provider);
   provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", null, "client-1", messages[0]!.message.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   assert.deepEqual(http.calls.filter((c) => c.method === "POST").map((c) => c.body), ["pair%3D1"]);
 });
 
@@ -125,9 +125,9 @@ test("doLaunch false marks the app launched without a request", async () => {
   const { provider, messages } = setup({ http });
   const { route: r } = route(provider);
   provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: false }, "client-1", messages[0]!.message.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   assert.equal(http.calls.filter((c) => c.method === "POST").length, 0);
   await provider.terminateRoute(r.id);
   assert.deepEqual(http.calls.filter((c) => c.method === "DELETE").map((c) => c.url), [`${RUN_URL}/run`], "stop falls back to <app url>/run");
@@ -138,15 +138,15 @@ test("a failed launch removes the route, and a failed app info fetch at client_c
   const first = setup({ http });
   const { route: r } = route(first.provider);
   first.provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   first.provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", first.messages[0]!.message.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   assert.deepEqual(first.provider.routes(), []);
 
   const second = setup({ appInfo: () => ({ appInfo: null, resultCode: "network_error", errorMessage: "x" }) });
   const { route: r2 } = route(second.provider);
   second.provider.sendRouteMessage(r2.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   assert.deepEqual(second.messages, []);
   assert.equal(second.provider.routes().length, 1, "the route is left as it was, as in Chrome");
 });
@@ -156,7 +156,7 @@ test("dial_app_info is answered with the app state, or with an error carrying th
   const { route: r } = route(provider);
   setAppInfo(() => ({ appInfo: parseAppInfo(appInfoXml("running", "<additionalData><k>v</k></additionalData>")), resultCode: "ok", errorMessage: "" }));
   provider.sendRouteMessage(r.id, dialEnvelope("dial_app_info", null, "client-1", 7));
-  await sleep(10);
+  await flush();
   assert.equal(messages[0]?.message.type, "dial_app_info");
   assert.equal(messages[0]?.message.sequenceNumber, 7);
   assert.equal((messages[0]!.message.message as Record<string, unknown>).appState, "running");
@@ -164,7 +164,7 @@ test("dial_app_info is answered with the app state, or with an error carrying th
 
   setAppInfo(() => ({ appInfo: null, resultCode: "http_error", errorMessage: "Internal net::Error: -379", httpErrorCode: 404 }));
   provider.sendRouteMessage(r.id, dialEnvelope("dial_app_info", null, "client-1", 8));
-  await sleep(10);
+  await flush();
   assert.deepEqual(messages[1]?.message, {
     type: "error", message: { code: "http_error", description: "Internal net::Error: -379", details: { http_error_code: 404 } },
     clientId: "client-1", sequenceNumber: 8, timeoutMillis: 0,
@@ -172,7 +172,7 @@ test("dial_app_info is answered with the app state, or with an error carrying th
 
   setAppInfo(() => ({ appInfo: null, resultCode: "network_error", errorMessage: "down" }));
   provider.sendRouteMessage(r.id, dialEnvelope("dial_app_info", null, "client-1", 9));
-  await sleep(10);
+  await flush();
   assert.deepEqual(messages[2]?.message.message, { code: "network_error", description: "down" });
 });
 
@@ -183,11 +183,11 @@ test("a STOP v2_message tells the page receiver_action stop, deletes the run URL
   const { provider, messages, terminated } = setup({ http });
   const { route: r } = route(provider);
   provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", messages[0]!.message.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   provider.sendRouteMessage(r.id, dialEnvelope("v2_message", { type: "STOP", requestId: 3 }, "client-1", 12));
-  await sleep(20);
+  await flush();
   assert.deepEqual(http.calls.filter((c) => c.method === "DELETE").map((c) => c.url), [`http://${DEVICE_IP}:8008/apps/YouTube/web-1`], "the Location of the launch");
   const stop = messages.at(-1)?.message;
   assert.equal(stop?.type, "receiver_action");
@@ -203,9 +203,9 @@ test("a LOCATION that is not on the device is not used as the stop target", asyn
   const { provider, messages } = setup({ http });
   const { route: r } = route(provider);
   provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-  await sleep(10);
+  await flush();
   provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", messages[0]!.message.sequenceNumber as number));
-  await sleep(10);
+  await flush();
   await provider.terminateRoute(r.id);
   assert.deepEqual(http.calls.filter((c) => c.method === "DELETE").map((c) => c.url), [`${RUN_URL}/run`]);
 });
@@ -216,9 +216,9 @@ test("a stop that fails raises an issue unless the app is already gone; the rout
     const { provider, messages, terminated, issues, setAppInfo } = setup({ http });
     const { route: r } = route(provider);
     provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
-    await sleep(10);
+    await flush();
     provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", messages[0]!.message.sequenceNumber as number));
-    await sleep(10);
+    await flush();
     setAppInfo(() => ({ appInfo: parseAppInfo(appInfoXml(state)), resultCode: "ok", errorMessage: "" }));
     const result = provider.terminateRoute(r.id);
     if (state === "running") await assert.rejects(result, (e) => e instanceof DialRouteError && e.code === "UNKNOWN_ERROR");
@@ -242,7 +242,7 @@ test("a new route on a sink terminates the sink's earlier one", async () => {
   const { provider, terminated } = setup();
   const { route: a } = route(provider, "mr_1");
   const { route: b } = route(provider, "mr_2");
-  await sleep(10);
+  await flush();
   assert.deepEqual(terminated, [a.id]);
   assert.deepEqual(provider.routes().map((x) => x.id), [b.id]);
 });
@@ -253,4 +253,38 @@ test("router messages need a known type and a clientId, and a v2_message that is
   assert.equal(parseDialMessage(JSON.stringify({ type: "client_connect", message: {} })), null, "clientId is required");
   assert.equal(parseDialMessage(JSON.stringify({ type: "client_connect", clientId: "c" }))?.sequenceNumber, -1);
   assert.equal(parseDialMessage(JSON.stringify({ type: "v2_message", clientId: "other", message: { type: "STOP" }, sequenceNumber: 4 }))?.sequenceNumber, 4);
+});
+
+test("terminating a route whose launch POST is still in flight cancels the POST, as erasing the record does in Chrome", async () => {
+  // DialActivityManager::StopApp erases a record that is not yet kLaunched; its pending launch fetcher goes with it.
+  let release: (r: ReturnType<typeof ok>) => void = () => undefined;
+  const http = new FakeHttp().reply("POST", RUN_URL, () => new Promise((r) => { release = r; }));
+  const { provider, messages, terminated } = setup({ http });
+  const { route: r } = route(provider);
+  provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
+  await flush();
+  provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", messages[0]!.message.sequenceNumber as number));
+  await flush();
+  const post = http.calls.find((c) => c.method === "POST");
+  assert.equal(post?.signal?.aborted, false);
+  await provider.terminateRoute(r.id);
+  assert.equal(post?.signal?.aborted, true, "the POST is cancelled");
+  assert.deepEqual(http.calls.filter((c) => c.method === "DELETE"), [], "nothing is deleted: the launch is treated as never made");
+  release(ok("", {}, 201));
+  await flush();
+  assert.deepEqual(terminated, [r.id]);
+  assert.deepEqual(provider.routes(), []);
+});
+
+test("dispose cancels a launch POST that is in flight", async () => {
+  const http = new FakeHttp().reply("POST", RUN_URL, () => new Promise(() => undefined));
+  const { provider, messages } = setup({ http });
+  const { route: r } = route(provider);
+  provider.sendRouteMessage(r.id, dialEnvelope("client_connect", {}, "client-1"));
+  await flush();
+  provider.sendRouteMessage(r.id, dialEnvelope("custom_dial_launch", { doLaunch: true }, "client-1", messages[0]!.message.sequenceNumber as number));
+  await flush();
+  const post = http.calls.find((c) => c.method === "POST");
+  provider.dispose();
+  assert.equal(post?.signal?.aborted, true);
 });

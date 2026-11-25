@@ -1,16 +1,16 @@
 // SSDP discovery over real UDP on localhost, and the sink service on top of the registry (dial_service_impl.cc,
 // dial_registry.cc, dial_media_sink_service_impl.cc).
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import dgram from "node:dgram";
 import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import { DialRegistry } from "../../src/dial/dial-registry.ts";
 import { DialSinkService } from "../../src/dial/dial-sink-service.ts";
-import { openUdpSsdpSocket } from "../../src/dial/ssdp-socket.ts";
+import { openUdpSsdpSocket, type SsdpSocketHandlers } from "../../src/dial/ssdp-socket.ts";
 import type { DialDeviceData } from "../../src/dial/parse.ts";
 import {
-  APP_URL, DESCRIPTION_URL, DEVICE_IP, SINK_ID, UDN, FakeHttp, appInfoXml, descriptionXml, healthyDevice, httpError, ok, sleep, ssdpAnswer,
+  APP_URL, DESCRIPTION_URL, DEVICE_IP, SINK_ID, UDN, FakeHttp, appInfoXml, descriptionXml, healthyDevice, httpError, ok, flush, ssdpAnswer, until,
 } from "./fixtures.ts";
 
 /** A UDP responder standing in for the SSDP group: it answers every M-SEARCH it hears. */
@@ -40,7 +40,7 @@ test("a search goes out four times per cycle and a device that answers is regist
   const lists: DialDeviceData[][] = [];
   registry.on("deviceList", (l) => lists.push(l));
   registry.start();
-  await sleep(300);
+  await until(() => fake.requests.length === 4 && (lists.at(-1)?.length ?? 0) === 1);
   registry.stop();
   fake.close();
 
@@ -58,13 +58,19 @@ test("an answer whose LOCATION does not name the sender is ignored, and so is on
   const wrongHost = await responder(ssdpAnswer({ location: "http://192.168.9.9/desc.xml" }));
   const truncated = await responder("HTTP/1.1 200 OK\r\nUSN: x\r\n");
   for (const fake of [wrongHost, truncated]) {
+    let heard = 0;
     const registry = new DialRegistry({
       interfaces: () => LOOPBACK,
-      openSocket: (iface, handlers) => openUdpSsdpSocket(iface, handlers, { target: { address: "127.0.0.1", port: fake.port } }),
+      openSocket: (iface, handlers) => openUdpSsdpSocket(
+        iface,
+        { ...handlers, message: (packet, from) => { heard++; handlers.message(packet, from); } },
+        { target: { address: "127.0.0.1", port: fake.port } },
+      ),
       requestIntervalMs: 10, responseTimeoutMs: 40, maxRequests: 2,
     });
     registry.start();
-    await sleep(150);
+    // Both answers have reached the registry (and been dropped) when the count says so.
+    await until(() => heard === 2);
     assert.deepEqual(registry.devices(), []);
     registry.stop();
     fake.close();
@@ -94,25 +100,82 @@ test("a device that stops answering is dropped after its lifetime, and a new cyc
   const lists: number[] = [];
   registry.on("deviceList", (l) => lists.push(l.length));
   registry.start();
-  await sleep(60);
-  assert.equal(registry.devices().length, 1);
+  await until(() => registry.devices().length === 1);
   answering = false;
+  // discoverNow refuses while the first cycle runs, so this also waits for that cycle to end.
+  await until(() => registry.discoverNow());
   clock += 241_000;
-  assert.ok(registry.discoverNow());
-  await sleep(60);
+  await until(() => lists.at(-1) === 0);
   assert.equal(registry.devices().length, 0, "not heard from for longer than 240 s");
   assert.equal(lists.at(-1), 0, "the changed list is published");
   assert.equal(sent.length, 2);
   registry.stop();
 });
 
-test("the registry reports no interfaces and keeps going", async () => {
-  const codes: string[] = [];
-  const registry = new DialRegistry({ interfaces: () => [], refreshMs: 60_000 });
-  registry.on("error", (code) => codes.push(code));
+test("with no interfaces the registry starts without throwing, publishes the empty list and searches again at each refresh", () => {
+  // DialServiceImpl::DiscoverOnAddresses finishes at once for an empty address list, and reports no error.
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    let looked = 0;
+    const lists: number[] = [];
+    const registry = new DialRegistry({ interfaces: () => { looked++; return []; }, refreshMs: 60_000 });
+    registry.on("deviceList", (l) => lists.push(l.length));
+    assert.doesNotThrow(() => registry.start(), "no \"error\" listener is needed");
+    assert.equal(looked, 1);
+    assert.deepEqual(lists, [0]);
+    mock.timers.tick(60_000);
+    assert.equal(looked, 2, "the refresh timer is installed");
+    registry.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a socket that fails is closed and reported, and the registry never throws for it", async () => {
+  // DialSocket::CheckResult closes the socket and DialServiceImpl::NotifyOnError reports socket_error while another
+  // socket is open and no_interfaces when none is.
+  const handlers = new Map<string, SsdpSocketHandlers>();
+  const closed: string[] = [];
+  const registry = new DialRegistry({
+    interfaces: () => [{ name: "a", address: "10.0.0.1" }, { name: "b", address: "10.0.0.2" }, { name: "c", address: "10.0.0.3" }],
+    openSocket: async (iface, h) => {
+      if (iface.address === "10.0.0.3") throw new Error("EADDRNOTAVAIL");
+      handlers.set(iface.address, h);
+      return { send() {}, close() { closed.push(iface.address); } };
+    },
+    refreshMs: 60_000,
+  });
+  // No listener yet: a failure must not throw out of the socket callback.
   registry.start();
-  await sleep(20);
-  assert.deepEqual(codes, ["no_interfaces"]);
+  await until(() => handlers.size === 2);
+  await flush();
+  assert.doesNotThrow(() => handlers.get("10.0.0.1")?.error(new Error("socket a failed")));
+  const seen: Array<[string, string | undefined]> = [];
+  registry.on("error", (code, detail) => seen.push([code, detail?.message]));
+  handlers.get("10.0.0.2")?.error(new Error("socket b failed"));
+  assert.deepEqual(seen, [["no_interfaces", "socket b failed"]]);
+  assert.deepEqual(closed.sort(), ["10.0.0.1", "10.0.0.2"]);
+  registry.stop();
+});
+
+test("a socket that cannot be bound is reported as a socket error while another is open", async () => {
+  const seen: string[] = [];
+  const registry = new DialRegistry({
+    interfaces: () => [{ name: "a", address: "10.0.0.1" }, { name: "b", address: "10.0.0.2" }],
+    openSocket: async (iface) => {
+      if (iface.address === "10.0.0.2") {
+        // b fails after a is open, as the sockets are bound one after another.
+        await flush();
+        throw new Error("EADDRNOTAVAIL");
+      }
+      return { send() {}, close() {} };
+    },
+    refreshMs: 60_000,
+  });
+  registry.on("error", (code) => seen.push(code));
+  registry.start();
+  await until(() => seen.length === 1);
+  assert.deepEqual(seen, ["socket_error"]);
   registry.stop();
 });
 
@@ -130,11 +193,25 @@ const DEVICE: DialDeviceData = {
   descriptionUrl: DESCRIPTION_URL, responseTime: 0, maxAge: null, configId: null,
 };
 
+/**
+ * The settle timer is mocked: `settle()` lets the fake HTTP answers through, fires the timer, and lets the app-info
+ * answers that follow through. Tests call `mock.timers.reset()` in a finally.
+ */
 function sinkService(http: FakeHttp, over: { isCastSink?: (uuid: string) => boolean } = {}) {
+  mock.timers.reset();
+  mock.timers.enable({ apis: ["setTimeout"] });
   const registry = new FakeRegistry();
   const sinks = new DialSinkService({ source: registry, http, settleMs: 10, ...over });
   return { registry, sinks };
 }
+
+async function settle(): Promise<void> {
+  await flush();
+  mock.timers.tick(10);
+  await flush();
+}
+
+test.afterEach(() => mock.timers.reset());
 
 test("a device becomes a sink named from its description after the settle delay", async () => {
   const { registry, sinks } = sinkService(healthyDevice());
@@ -142,7 +219,7 @@ test("a device becomes a sink named from its description after the settle delay"
   sinks.on("change", () => changes.push(sinks.sinks().length));
   registry.emit("deviceList", [DEVICE]);
   assert.equal(sinks.sinks().length, 0, "published only after the timer");
-  await sleep(60);
+  await settle();
   assert.deepEqual(sinks.sinks(), [{ id: SINK_ID, name: "Living Room TV", modelName: "Smart TV", ipAddress: DEVICE_IP, appUrl: APP_URL }]);
   assert.deepEqual(changes, [1]);
   const [description] = sinks["http"] instanceof FakeHttp ? (sinks["http"] as FakeHttp).calls : [];
@@ -158,7 +235,7 @@ test("a device whose description fails validation is not a sink", async () => {
   for (const http of [wrongAppUrl, noHeader, garbage, unreachable]) {
     const { registry, sinks } = sinkService(http);
     registry.emit("deviceList", [DEVICE]);
-    await sleep(40);
+    await settle();
     assert.deepEqual(sinks.sinks(), []);
     sinks.stop();
   }
@@ -167,10 +244,10 @@ test("a device whose description fails validation is not a sink", async () => {
 test("a sink loses its place when the next device list leaves it out", async () => {
   const { registry, sinks } = sinkService(healthyDevice());
   registry.emit("deviceList", [DEVICE]);
-  await sleep(40);
+  await settle();
   assert.equal(sinks.sinks().length, 1);
   registry.emit("deviceList", []);
-  await sleep(40);
+  await settle();
   assert.equal(sinks.sinks().length, 0);
   sinks.stop();
 });
@@ -184,7 +261,7 @@ test("a monitored app is available when app info says running or stopped, and no
   sinks.monitorApp("Missing");
   sinks.monitorApp("Broken");
   registry.emit("deviceList", [DEVICE]);
-  await sleep(60);
+  await settle();
   assert.deepEqual(sinks.availableSinks("YouTube").map((s) => s.id), [SINK_ID]);
   assert.deepEqual(sinks.availableSinks("Missing"), []);
   assert.deepEqual(sinks.availableSinks("Broken"), []);
@@ -198,13 +275,13 @@ test("a network error leaves the app status unknown and discoverNow asks again",
   const { registry, sinks } = sinkService(http);
   sinks.monitorApp("YouTube");
   registry.emit("deviceList", [DEVICE]);
-  await sleep(60);
+  await settle();
   assert.deepEqual(sinks.availableSinks("YouTube"), []);
   const asked = http.calls.filter((c) => c.url === `${APP_URL}/YouTube`).length;
   assert.equal(asked, 1);
   http.reply("GET", `${APP_URL}/YouTube`, ok(appInfoXml("running")));
   sinks.discoverNow();
-  await sleep(40);
+  await flush();
   assert.equal(registry.discovered, 1);
   assert.deepEqual(sinks.availableSinks("YouTube").map((s) => s.id), [SINK_ID]);
   sinks.stop();
@@ -215,7 +292,7 @@ test("apps are not queried on a discovery-only model", async () => {
   const { registry, sinks } = sinkService(http);
   sinks.monitorApp("YouTube");
   registry.emit("deviceList", [DEVICE]);
-  await sleep(60);
+  await settle();
   assert.equal(sinks.sinks().length, 1, "it is still a sink");
   assert.equal(http.calls.some((c) => c.url.endsWith("/YouTube")), false);
   sinks.stop();
@@ -226,12 +303,30 @@ test("a DIAL sink that is also a Cast device is hidden, the way Chrome leaves it
   const { registry, sinks } = sinkService(healthyDevice(), { isCastSink: (uuid) => cast && uuid === "aaaa1111222233334444555566667777" });
   sinks.monitorApp("YouTube");
   registry.emit("deviceList", [DEVICE]);
-  await sleep(60);
+  await settle();
   assert.deepEqual(sinks.sinks(), []);
   assert.deepEqual(sinks.availableSinks("YouTube"), []);
   cast = false;
   sinks.refilter();
-  await sleep(30);
+  await settle();
   assert.equal(sinks.sinks().length, 1);
   sinks.stop();
+});
+
+test("the monitored apps and the remembered statuses are bounded, and stop forgets them", async () => {
+  const http = healthyDevice("stopped");
+  for (let i = 0; i < 40; i++) http.reply("GET", `${APP_URL}/App${i}`, httpError(404));
+  const { registry, sinks } = sinkService(http);
+  registry.emit("deviceList", [DEVICE]);
+  await settle();
+  // 32 apps are monitored at once; the next one is ignored, and releasing it changes nothing.
+  const releases = Array.from({ length: 40 }, (_, i) => sinks.monitorApp(`App${i}`));
+  await flush();
+  const asked = new Set(http.calls.filter((c) => c.url.startsWith(`${APP_URL}/App`)).map((c) => c.url));
+  assert.equal(asked.size, 32);
+  assert.equal((sinks as unknown as { statuses: Map<string, string> }).statuses.size, 32);
+  releases.forEach((release) => release());
+  sinks.stop();
+  assert.equal((sinks as unknown as { statuses: Map<string, string> }).statuses.size, 0);
+  assert.equal((sinks as unknown as { cache: Map<string, unknown> }).cache.size, 0);
 });

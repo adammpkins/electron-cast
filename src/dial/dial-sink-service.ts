@@ -56,6 +56,12 @@ type SinkAppStatus = "available" | "unavailable";
 /** `kDiscoveryOnlyModelNames` (dial_media_sink_service_impl.cc): found by SSDP but not DIAL servers. */
 const DISCOVERY_ONLY_MODELS = new Set(["eureka dongle", "chromecast audio", "chromecast ultra"]);
 const CACHE_MAX_ENTRIES = 256;
+/**
+ * Bounds Chromium does not have (its page-facing queries are limited by the Media Router UI alone): how many apps are
+ * monitored at once and how many app statuses are remembered, so a page cannot grow them without end.
+ */
+const MAX_MONITORED_APPS = 32;
+const MAX_STATUSES = 2048;
 
 function sameSink(a: DialSink, b: DialSink): boolean {
   return a.id === b.id && a.name === b.name && a.modelName === b.modelName && a.ipAddress === b.ipAddress && a.appUrl === b.appUrl;
@@ -121,6 +127,7 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
    */
   monitorApp(appName: string): () => void {
     const count = this.queries.get(appName) ?? 0;
+    if (count === 0 && this.queries.size >= MAX_MONITORED_APPS) return () => undefined;
     this.queries.set(appName, count + 1);
     if (count === 0) for (const sink of this.sinks()) this.fetchAppInfoForSink(sink, appName);
     let released = false;
@@ -176,6 +183,9 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
     this.all.clear();
     this.latest.clear();
     this.queries.clear();
+    this.statuses.clear();
+    this.cache.clear();
+    this.fetching.clear();
   }
 
   private hidden(sink: DialSink): boolean {
@@ -294,6 +304,11 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
       const status = statusOf(result);
       if (status === null) return;
       const old = this.statuses.get(key);
+      if (old === undefined && this.statuses.size >= MAX_STATUSES) {
+        // Oldest first; a dropped status is asked for again the next time its app is monitored.
+        const first = this.statuses.keys().next();
+        if (!first.done) this.statuses.delete(first.value);
+      }
       this.statuses.set(key, status);
       if (old === status) return;
       // The sink may be gone by now: the status is kept for later, but nobody is told.

@@ -310,3 +310,74 @@ test("dial: false switches DIAL off, and a custom discovery leaves it off by def
 });
 
 void UDN;
+
+test("start survives a machine with no IPv4 interface: no throw, no unhandled error, the empty list is the answer", async () => {
+  const { manager, pcall } = await setup({
+    warm: false,
+    dial: { http: dialHttp(), settleMs: 5, registry: { interfaces: () => [], refreshMs: 60_000 } },
+  });
+  const wc = new FakeWebContents(1);
+  assert.deepEqual(await pcall(wc, "getAvailability", { watchId: "a", urls: [DIAL_URL] }), { ok: true, value: { available: false } });
+  await manager.dispose();
+});
+
+test("a socket that fails is logged, and does not throw out of the socket's callback", async () => {
+  const logged: string[] = [];
+  let fail: (error: Error) => void = () => undefined;
+  const { manager } = await setup({
+    warm: false,
+    dial: {
+      http: dialHttp(),
+      settleMs: 5,
+      log: (m) => logged.push(m),
+      registry: {
+        interfaces: () => [{ name: "lo", address: "127.0.0.1" }],
+        openSocket: async (_iface, handlers) => {
+          fail = handlers.error;
+          return { send() {}, close() {} };
+        },
+        refreshMs: 60_000,
+        maxRequests: 1,
+      },
+    },
+  });
+  assert.doesNotThrow(() => fail(new Error("EADDRNOTAVAIL")));
+  assert.deepEqual(logged, ["DIAL discovery error: no_interfaces (EADDRNOTAVAIL)"]);
+  await manager.dispose();
+});
+
+test("a direct start with no earlier availability watch still finds the DIAL sink", async () => {
+  // Chrome's dialog starts observing the source when it opens; the request waits for the devices' answers.
+  const { manager, pcall, picked } = await setup({ warm: false });
+  const wc = new FakeWebContents(1);
+  const r = await pcall(wc, "start", { connectionId: "k1", urls: [DIAL_URL] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(picked[0]?.length, 1);
+  await manager.dispose();
+});
+
+test("an origin that may not see the app makes no device request for it", async () => {
+  const { manager, pcall, http } = await setup();
+  const evil = new FakeWebContents(7);
+  await pcall(evil, "getAvailability", { watchId: "e", urls: [DIAL_URL] }, "https://evil.example");
+  await pcall(evil, "start", { connectionId: "kx", urls: [DIAL_URL] }, "https://evil.example");
+  await tick(30);
+  assert.equal(http.calls.filter((c) => c.url === RUN_URL).length, 1, "only the warm-up's own query");
+  await manager.dispose();
+});
+
+test("many availability watches share one listener on the DIAL service", async () => {
+  const warnings: string[] = [];
+  const onWarning = (w: Error): void => void warnings.push(w.name);
+  process.on("warning", onWarning);
+  try {
+    const { manager, pcall } = await setup();
+    const wc = new FakeWebContents(1);
+    for (let i = 0; i < 25; i++) await pcall(wc, "getAvailability", { watchId: `m${i}`, urls: [DIAL_URL] });
+    await tick(20);
+    assert.deepEqual(warnings, []);
+    await manager.dispose();
+  } finally {
+    process.off("warning", onWarning);
+  }
+});

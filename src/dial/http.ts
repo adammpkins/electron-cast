@@ -9,13 +9,19 @@ export type DialHttpResult =
   | { ok: true; status: number; headers: Record<string, string>; body: string }
   | { ok: false; message: string; status?: number };
 
+/**
+ * Each call takes an optional signal; aborting it cancels the request, which then ends with `net::ERR_ABORTED` (-3).
+ * Chromium cancels a fetch by destroying its `DialURLFetcher`, which is what an abort stands for.
+ */
 export interface DialHttp {
   /** `DialURLFetcher::Get`. `setOrigin` is false only for the device description. */
-  get(url: string, setOrigin: boolean): Promise<DialHttpResult>;
+  get(url: string, setOrigin: boolean, signal?: AbortSignal): Promise<DialHttpResult>;
   /** `DialURLFetcher::Post`; a null body posts nothing. */
-  post(url: string, body: string | null): Promise<DialHttpResult>;
+  post(url: string, body: string | null, signal?: AbortSignal): Promise<DialHttpResult>;
   /** `DialURLFetcher::Delete`. */
-  delete(url: string): Promise<DialHttpResult>;
+  delete(url: string, signal?: AbortSignal): Promise<DialHttpResult>;
+  /** Cancels every request in flight and every one made afterwards fails the same way; the service is being stopped. */
+  abortAll?(): void;
 }
 
 /** `kMaxRetries` (dial_url_fetcher.cc): GET is retried this often after a 5xx answer. */
@@ -61,8 +67,16 @@ type Raw =
   | { kind: "response"; status: number; headers: Record<string, string>; body: string; tooBig: boolean; location: boolean }
   | { kind: "error"; message: string };
 
-function once(method: string, urlString: string, headers: Record<string, string>, body: string | null, timeoutMs: number): Promise<Raw> {
+const ABORTED = "Internal net::Error: -3";
+
+function once(
+  method: string, urlString: string, headers: Record<string, string>, body: string | null, timeoutMs: number, signal: AbortSignal,
+): Promise<Raw> {
   return new Promise<Raw>((resolve) => {
+    if (signal.aborted) {
+      resolve({ kind: "error", message: ABORTED });
+      return;
+    }
     let url: URL;
     try {
       url = new URL(urlString);
@@ -76,7 +90,12 @@ function once(method: string, urlString: string, headers: Record<string, string>
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
       resolve(raw);
+    };
+    const onAbort = (): void => {
+      finish({ kind: "error", message: ABORTED });
+      req.destroy();
     };
     const req = lib.request(url, { method, headers, agent: false }, (res) => {
       const chunks: Buffer[] = [];
@@ -112,6 +131,7 @@ function once(method: string, urlString: string, headers: Record<string, string>
       req.destroy();
     }, timeoutMs);
     timer.unref?.();
+    signal.addEventListener("abort", onAbort, { once: true });
     req.on("error", (e: NodeJS.ErrnoException) => finish({ kind: "error", message: `Internal net::Error: ${netErrorCode(e)}` }));
     if (body !== null) req.write(body);
     req.end();
@@ -124,7 +144,12 @@ export function createDialHttp(options: DialHttpOptions = {}): DialHttp {
   const getTimeout = options.getTimeoutMs ?? 10_000;
   const actionTimeout = options.actionTimeoutMs ?? 30_000;
 
-  async function run(method: string, url: string, setOrigin: boolean, body: string | null, retries: number, timeoutMs: number): Promise<DialHttpResult> {
+  const all = new AbortController();
+
+  async function run(
+    method: string, url: string, setOrigin: boolean, body: string | null, retries: number, timeoutMs: number, own?: AbortSignal,
+  ): Promise<DialHttpResult> {
+    const signal = own === undefined ? all.signal : AbortSignal.any([all.signal, own]);
     const headers: Record<string, string> = { Connection: "close" };
     if (setOrigin) headers.Origin = origin;
     if (method === "POST") {
@@ -132,7 +157,7 @@ export function createDialHttp(options: DialHttpOptions = {}): DialHttp {
       if (body !== null) headers["Content-Type"] = "text/plain";
     }
     for (let attempt = 0; ; attempt++) {
-      const raw = await once(method, url, headers, method === "POST" ? (body ?? "") : null, timeoutMs);
+      const raw = await once(method, url, headers, method === "POST" ? (body ?? "") : null, timeoutMs, signal);
       if (raw.kind === "error") return { ok: false, message: raw.message };
       // Section 5.4 of the DIAL spec prohibits redirects; Chromium reports one as an error with no answer.
       if (raw.status >= 300 && raw.status < 400 && raw.location) return { ok: false, message: "Redirect not allowed" };
@@ -145,15 +170,18 @@ export function createDialHttp(options: DialHttpOptions = {}): DialHttp {
   }
 
   return {
-    async get(url, setOrigin) {
-      const result = await run("GET", url, setOrigin, null, MAX_GET_RETRIES, getTimeout);
+    async get(url, setOrigin, signal) {
+      const result = await run("GET", url, setOrigin, null, MAX_GET_RETRIES, getTimeout, signal);
       return checkBody(result, true);
     },
-    async post(url, body) {
-      return checkBody(await run("POST", url, true, body, 0, actionTimeout), false);
+    async post(url, body, signal) {
+      return checkBody(await run("POST", url, true, body, 0, actionTimeout, signal), false);
     },
-    async delete(url) {
-      return checkBody(await run("DELETE", url, true, null, 0, actionTimeout), false);
+    async delete(url, signal) {
+      return checkBody(await run("DELETE", url, true, null, 0, actionTimeout, signal), false);
+    },
+    abortAll() {
+      all.abort();
     },
   };
 }

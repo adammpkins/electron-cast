@@ -83,11 +83,12 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
-    this.discover();
+    // The timer first: a cycle that cannot start leaves the periodic search in place, which tries again.
     this.refreshTimer = setInterval(() => this.discover(), this.refreshMs);
     this.refreshTimer.unref?.();
     // The current list goes out with the next request even if it is empty, as in Chromium.
     this.generation++;
+    this.discover();
   }
 
   /** `DialRegistry::DiscoverNow`: starts a cycle unless one is running; the list is then sent even if unchanged. */
@@ -124,29 +125,29 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
     } catch {
       ifaces = [];
     }
+    // DiscoverOnAddresses: no address means FinishDiscovery at once, without an error.
     if (ifaces.length === 0) {
-      this.emit("error", "no_interfaces");
       this.finish(cycle);
       return true;
     }
     this.timers.push(setTimeout(() => this.finish(cycle), this.finishDelayMs));
     void Promise.allSettled(ifaces.map((iface) => this.bind(iface, cycle))).then(() => {
       if (cycle !== this.cycle || !this.active) return;
-      if (this.sockets.length === 0) this.emit("error", "no_interfaces");
       this.sendOne(cycle);
     });
     return true;
   }
 
   private async bind(iface: NetworkInterfaceInfo, cycle: number): Promise<void> {
-    let socket: SsdpSocket;
+    let socket: SsdpSocket | undefined;
     try {
       socket = await this.openSocketFn(iface, {
         message: (packet, from) => this.onPacket(packet, from, cycle),
-        error: (error) => this.emit("error", "socket_error", error),
+        error: (error) => this.socketFailed(socket, error),
       });
     } catch (error) {
-      this.emit("error", "socket_error", error instanceof Error ? error : new Error(String(error)));
+      // BindAndAddSocket: a socket that cannot be bound is dropped, the others carry on.
+      this.socketFailed(undefined, error);
       return;
     }
     if (cycle !== this.cycle || !this.active) {
@@ -165,11 +166,29 @@ export class DialRegistry extends EventEmitter<DialRegistryEvents> {
       try {
         socket.send(this.request);
       } catch (error) {
-        this.emit("error", "socket_error", error instanceof Error ? error : new Error(String(error)));
+        this.socketFailed(socket, error);
       }
     }
     this.maybeSendList();
     if (this.sent < this.maxRequests) this.timers.push(setTimeout(() => this.sendOne(cycle), this.requestIntervalMs));
+  }
+
+  /**
+   * DialSocket::CheckResult: a failed socket is closed and NotifyOnError reports it, as a socket error while other
+   * sockets are open and as "no interfaces" when none is left. Discovery goes on with what remains.
+   */
+  private socketFailed(socket: SsdpSocket | undefined, error: unknown): void {
+    if (socket !== undefined) {
+      try {
+        socket.close();
+      } catch {
+        // already closed
+      }
+      this.sockets = this.sockets.filter((s) => s !== socket);
+    }
+    const detail = error instanceof Error ? error : new Error(String(error));
+    // An EventEmitter throws on "error" without a listener; a failed socket must never take the process down.
+    if (this.listenerCount("error") > 0) this.emit("error", this.sockets.length > 0 ? "socket_error" : "no_interfaces", detail);
   }
 
   private onPacket(packet: Buffer, from: { address: string; port: number }, cycle: number): void {

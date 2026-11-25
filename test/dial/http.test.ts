@@ -114,3 +114,20 @@ test("a refused connection is a network error with no status", async () => {
   assert.equal(res.ok, false);
   assert.equal(res.ok ? undefined : res.status, undefined);
 });
+
+test("a request is cancelled by its signal and ends as net::ERR_ABORTED", async () => {
+  const controller = new AbortController();
+  const pending = createDialHttp({ getTimeoutMs: 60_000, actionTimeoutMs: 60_000 }).post(`${base}/hang`, "x", controller.signal);
+  controller.abort();
+  assert.deepEqual(await pending, { ok: false, message: "Internal net::Error: -3" });
+  const already = await createDialHttp().get(`${base}/ok`, true, AbortSignal.abort());
+  assert.deepEqual(already, { ok: false, message: "Internal net::Error: -3" });
+});
+
+test("abortAll cancels what is in flight and everything started afterwards", async () => {
+  const client = createDialHttp({ getTimeoutMs: 60_000, actionTimeoutMs: 60_000 });
+  const inFlight = [client.get(`${base}/hang`, true), client.delete(`${base}/hang`)];
+  client.abortAll?.();
+  for (const result of await Promise.all(inFlight)) assert.deepEqual(result, { ok: false, message: "Internal net::Error: -3" });
+  assert.deepEqual(await client.get(`${base}/ok`, true), { ok: false, message: "Internal net::Error: -3" });
+});

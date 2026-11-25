@@ -259,7 +259,7 @@ DIAL is on by default, as in Chrome. `dial: false` removes everything in this se
   chose the device in `selectDevice`. These requests are plain HTTP, as the DIAL specification has it; they carry
   `Origin: package:Google-Chrome.<major>.<OS>`, follow no redirect, send no cookies and use no proxy.
 - **What a page can do.** It can ask for the availability of any app name (letters, digits and `-._~`) and so learn
-  whether any of the user's DIAL devices has that app, unless the app is one Chrome limits to certain origins and the
+  whether any of the user's DIAL devices has that app (at most 32 apps are asked about at once), unless the app is one Chrome limits to certain origins and the
   page's origin is not one of them. It can launch only on a device the user picked, with any `dialPostData` and launch
   parameter it likes, which the device's app receives. It can send `STOP`, which stops its own route's app. As in Chrome,
   closing a page does not stop a launched app.

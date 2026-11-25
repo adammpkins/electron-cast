@@ -85,8 +85,28 @@ export interface CastSessionServiceOptions {
   dial?: {
     source: DeviceSource;
     available(appName: string, origin: string): CastDevice[];
-    monitor(appName: string): () => void;
+    monitor(appName: string, origin: string): (() => void) | null;
   };
+}
+
+/** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
+const DIAL_PROBE_WAIT_MS = 5000;
+
+/** Resolves when `done()` is true after a device change, or after `ms`. */
+function waitForDevices(source: DeviceSource, ms: number, done: () => boolean): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (done()) return resolve();
+    const finish = (): void => {
+      clearTimeout(timer);
+      source.off("deviceChanged", onChange);
+      resolve();
+    };
+    const onChange = (): void => {
+      if (done()) finish();
+    };
+    const timer = setTimeout(finish, ms);
+    source.on("deviceChanged", onChange);
+  });
 }
 
 interface SenderRecord {
@@ -419,8 +439,17 @@ export class CastSessionService {
     const cancelled = { value: false };
     const pending: PendingRequest = { discard, cancelled };
     this.pendingRequests.set(sender.id, pending);
+    // Chrome's dialog starts observing the sinks of the source when it opens (StartObservingMediaSinks), and the
+    // observer then waits for the answers; so the monitor starts before the first look, and a request with no sink
+    // yet waits a while for the devices' app info instead of failing on a page that never watched availability.
+    const stopMonitoring = dial !== undefined && dialApp !== null ? dial.monitor(dialApp, sender.origin) ?? undefined : undefined;
     try {
-      const eligible = [...castEligible(), ...dialAvailable()];
+      let eligible = [...castEligible(), ...dialAvailable()];
+      if (eligible.length === 0 && dial !== undefined && stopMonitoring !== undefined) {
+        await waitForDevices(dial.source, Math.min(p.timeoutMs, DIAL_PROBE_WAIT_MS), () => cancelled.value || discard.value || dialAvailable().length > 0);
+        if (cancelled.value) return bad("cancel");
+        eligible = [...castEligible(), ...dialAvailable()];
+      }
       if (eligible.length === 0) return bad("receiver_unavailable");
       const request: CastRequestInfo = {
         appId: appId ?? "",
@@ -437,14 +466,12 @@ export class CastSessionService {
       const pick = createPickerContext(this.sinks, (d) =>
         d.dial !== undefined ? dialAvailable().some((x) => x.id === d.id) : appId !== null && deviceMatches(d, capabilities));
       pending.picker = pick;
-      const stopMonitoring = dial !== undefined && dialApp !== null ? dial.monitor(dialApp) : undefined;
       try {
         choice = await this.options.selectDevice(eligible, request, pick.context);
       } catch (err) {
         return bad("session_error", describe(err));
       } finally {
         pick.close();
-        stopMonitoring?.();
       }
       if (choice === null) return bad("cancel");
       if (choice !== "stop" && choice.dial !== undefined) {
@@ -484,6 +511,7 @@ export class CastSessionService {
         if (timer !== undefined) clearTimeout(timer);
       }
     } finally {
+      stopMonitoring?.();
       this.pendingRequests.delete(sender.id);
     }
   }
@@ -711,6 +739,8 @@ export class CastSessionService {
     discard: { value: boolean },
     cancelled: { value: boolean },
   ): Promise<SessionSnapshot> {
+    // A DIAL sink has no Cast port: it is launched by the presentation handler's DIAL route, never as a Cast session.
+    if (device.dial !== undefined) throw new MappedError("session_error", "A DIAL device cannot host a Cast session");
     const entry = this.clientFor(device);
     const client = entry.client;
     entry.opening += 1;
