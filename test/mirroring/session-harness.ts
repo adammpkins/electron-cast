@@ -5,6 +5,7 @@ import { SenderPacketRouter } from "../../src/mirroring/sender/packet-router.ts"
 import { UdpEnvironment } from "../../src/mirroring/transport/udp-environment.ts";
 import { FakeBackend } from "./fake-backend.ts";
 import { FakeReceiver, type FakeReceiverOptions } from "./fake-receiver.ts";
+import { VirtualClock, VirtualEnvironment } from "./virtual-time.ts";
 
 /** A whole mirroring session, sender and fake receiver, over real localhost UDP. */
 export interface Harness {
@@ -67,3 +68,60 @@ export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?
 }
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export interface VirtualHarness {
+  clock: VirtualClock;
+  host: OpenscreenSessionHost;
+  receiver: FakeReceiver;
+  backend: FakeBackend;
+  errors: Harness["errors"];
+  close(): void;
+}
+
+/**
+ * The same session over a VirtualClock and an in-memory network: nothing here waits on wall time, so the outcome of a
+ * run is a function of the code and the options only. `Date.now` (the sender's wall-clock origin for its NTP
+ * timestamps) is pinned for the length of the run.
+ */
+export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType } = {}): Promise<VirtualHarness> {
+  const clock = new VirtualClock();
+  const env = new VirtualEnvironment(clock);
+  const realNow = Date.now;
+  Date.now = () => 1_700_000_000_000 + clock.now();
+  const receiver = await FakeReceiver.create({
+    ...opts.receiver,
+    random: opts.receiver?.random ?? (() => 0.5),
+    net: { now: clock.now, setInterval: clock.setInterval, toSender: (packet) => env.fromReceiver(packet) },
+  });
+  env.receiver = receiver;
+  const router = new SenderPacketRouter(env);
+  const backend = new FakeBackend(clock.now, { setTimeout: clock.setTimeout, setInterval: clock.setInterval });
+  const errors: Harness["errors"] = [];
+  const host = new OpenscreenSessionHost(
+    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0" },
+    {
+      environment: env,
+      router,
+      backend,
+      encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(["vp8"]) }),
+      env: {},
+      messagePort: { postMessage: (_dest, ns, message) => void clock.schedule(clock.now(), () => receiver.onControlMessage(ns, message)) },
+      observer: { onError: (error, message) => errors.push({ error, message }), logInfo: () => {} },
+    },
+  );
+  receiver.sendControl = (json) => void clock.schedule(clock.now(), () => host.onMessage("receiver-0", CAST_WEBRTC_NAMESPACE, json));
+  host.start();
+  return {
+    clock,
+    host,
+    receiver,
+    backend,
+    errors,
+    close() {
+      host.stopSession();
+      backend.stopAll();
+      receiver.close();
+      Date.now = realNow;
+    },
+  };
+}
