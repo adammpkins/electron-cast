@@ -42,6 +42,11 @@ export interface CastManagerOptions {
    * the preload's `mode: "chromecast"`.
    */
   presentation?: boolean;
+  /**
+   * Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (CastClient's
+   * `verifyDevice`). Default true; false allows uncertified receivers. Ignored when `createClient` is given.
+   */
+  verifyDevices?: boolean;
 }
 /** The main-process cast manager. */
 export interface CastManager {
@@ -78,7 +83,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
   const discovery = options.discovery ?? new CastDiscovery();
-  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port }));
+  const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false }));
   const contents = new Map<number, WebContentsLike>();
   let handler: CastPresentationHandler | undefined;
   const service = new CastSessionService({

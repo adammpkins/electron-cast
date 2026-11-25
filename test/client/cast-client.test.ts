@@ -15,7 +15,7 @@ afterEach(async () => {
 async function setup(opts: Partial<ConstructorParameters<typeof CastClient>[0]> = {}) {
   const fake = new FakeReceiver();
   const port = await fake.listen();
-  const client = new CastClient({ host: "127.0.0.1", port, ...opts });
+  const client = new CastClient({ host: "127.0.0.1", port, verifyDevice: false, ...opts });
   cleanups.push(() => fake.close(), () => client.close());
   return { fake, client, port };
 }
@@ -413,7 +413,7 @@ test("connect rejects with CastConnectionError when nothing listens", async () =
   await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
   const port = (probe.address() as net.AddressInfo).port;
   await new Promise<void>((r) => probe.close(() => r()));
-  const client = new CastClient({ host: "127.0.0.1", port });
+  const client = new CastClient({ host: "127.0.0.1", port, verifyDevice: false });
   await assert.rejects(client.connect(), CastConnectionError);
   assert.equal(client.connected, false);
 });
@@ -426,7 +426,7 @@ test("connect times out when the TLS handshake never completes", async () => {
     for (const s of sockets) s.destroy();
     silent.close(() => r());
   }));
-  const client = new CastClient({ host: "127.0.0.1", port: (silent.address() as net.AddressInfo).port, connectTimeoutMs: 100 });
+  const client = new CastClient({ host: "127.0.0.1", port: (silent.address() as net.AddressInfo).port, connectTimeoutMs: 100, verifyDevice: false });
   const t0 = Date.now();
   await assert.rejects(client.connect(), CastTimeoutError);
   assert.ok(Date.now() - t0 < 2000);

@@ -5,7 +5,9 @@ import type { TLSSocket } from "node:tls";
 import { decodeCastMessage, encodeCastMessage, frame, FrameDecoder, PayloadType } from "../protocol/index.ts";
 import type { CastMessage } from "../protocol/index.ts";
 import { NS, PLATFORM_RECEIVER_ID } from "./namespaces.ts";
-import { CastConnectionError, CastRequestError, CastTimeoutError } from "./errors.ts";
+import { CastAuthError, CastConnectionError, CastRequestError, CastTimeoutError } from "./errors.ts";
+import { authenticateChallengeReply, createAuthChallenge } from "./auth/cast-auth.ts";
+import type { DeviceAuthOptions, DeviceAuthResult } from "./auth/cast-auth.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "./types.ts";
 
 /** Options for {@link CastClient}. */
@@ -20,6 +22,16 @@ export interface CastClientOptions {
   heartbeatTimeoutMs?: number;
   tls?: Omit<tls.ConnectionOptions, "host" | "port">;
   connectPayload?: Record<string, unknown>;
+  /**
+   * Verify the device is a genuine Google-certified Cast device before use, as Chrome does (default true). A device
+   * that fails makes {@link CastClient.connect} reject with a {@link CastAuthError}. Set false to talk to
+   * uncertified receivers such as open-source ones.
+   */
+  verifyDevice?: boolean;
+  /** How long to wait for the device's authentication reply after the TLS handshake. Default 10000. */
+  authTimeoutMs?: number;
+  /** Trust roots and clock overrides for device authentication; for tests and private Cast deployments. */
+  deviceAuth?: DeviceAuthOptions;
 }
 
 /** Events emitted by {@link CastClient}. */
@@ -84,6 +96,10 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private livenessTimer: NodeJS.Timeout | null = null;
   private connectTimer: NodeJS.Timeout | null = null;
+  private authNonce: Buffer | null = null;
+  private authPeerCert: Buffer | null = null;
+  private authResult: DeviceAuthResult | undefined;
+  private authFinish: ((err?: Error) => void) | null = null;
 
   constructor(options: CastClientOptions) {
     super();
@@ -96,7 +112,12 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     return this.state === "connected";
   }
 
-  /** Open the TLS connection and send CONNECT to the platform receiver. */
+  /** What device authentication established; undefined when it did not run (verifyDevice false). */
+  get deviceAuth(): DeviceAuthResult | undefined {
+    return this.authResult;
+  }
+
+  /** Open the TLS connection, authenticate the device (unless disabled) and send CONNECT to the platform receiver. */
   connect(): Promise<void> {
     if (this.state !== "idle") {
       return Promise.reject(new CastConnectionError(`cannot connect: client is ${this.state}`));
@@ -136,7 +157,26 @@ export class CastClient extends EventEmitter<CastClientEvents> {
 
       socket.on("secureConnect", () => {
         socket.on("data", (chunk: Buffer) => this.onData(chunk));
-        settle();
+        if (this.options.verifyDevice === false) {
+          settle();
+          return;
+        }
+        const peer = socket.getPeerCertificate(false) as { raw?: Buffer };
+        if (peer.raw === undefined || peer.raw.length === 0) {
+          settle(new CastAuthError("no_tls_certificate", "the device presented no TLS certificate", { host }));
+          return;
+        }
+        const challenge = createAuthChallenge();
+        this.authNonce = challenge.nonce;
+        this.authPeerCert = peer.raw;
+        this.authFinish = settle;
+        // The TLS handshake timer is replaced by one for the authentication reply.
+        if (this.connectTimer !== null) clearTimeout(this.connectTimer);
+        const authTimeoutMs = this.options.authTimeoutMs ?? 10000;
+        this.connectTimer = setTimeout(() => {
+          settle(new CastAuthError("timeout", `no authentication reply within ${authTimeoutMs} ms`, { host }));
+        }, authTimeoutMs);
+        this.write(buildMessage("sender-0", NS.DEVICE_AUTH, PLATFORM_RECEIVER_ID, challenge.payload));
       });
       socket.on("error", (err: Error) => {
         if (this.state === "connecting") {
@@ -280,6 +320,10 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   }
 
   private onData(chunk: Buffer): void {
+    if (this.state === "connecting" && this.authFinish !== null) {
+      this.onAuthData(chunk);
+      return;
+    }
     if (this.state !== "connected") return;
     this.resetLiveness();
     let bodies: Buffer[];
@@ -299,6 +343,44 @@ export class CastClient extends EventEmitter<CastClientEvents> {
       }
       this.handleMessage(msg);
       if (this.state !== "connected") return;
+    }
+  }
+
+  /** Frames received while the device is still being authenticated: only its deviceauth reply is acceptable. */
+  private onAuthData(chunk: Buffer): void {
+    const finish = this.authFinish as (err?: Error) => void;
+    const host = this.options.host;
+    let bodies: Buffer[];
+    try {
+      bodies = this.decoder.push(chunk);
+    } catch (err) {
+      finish(new CastAuthError("malformed_reply", `protocol error: ${describe(err)}`, { host }));
+      return;
+    }
+    for (const body of bodies) {
+      let msg: CastMessage;
+      try {
+        msg = decodeCastMessage(body);
+      } catch (err) {
+        finish(new CastAuthError("malformed_reply", `protocol error: ${describe(err)}`, { host }));
+        return;
+      }
+      if (msg.namespace !== NS.DEVICE_AUTH) continue;
+      try {
+        this.authResult = authenticateChallengeReply(
+          { payloadType: msg.payloadType, payloadBinary: msg.payloadBinary },
+          this.authPeerCert as Buffer,
+          this.authNonce as Buffer,
+          this.options.deviceAuth,
+        );
+      } catch (err) {
+        if (err instanceof CastAuthError) finish(new CastAuthError(err.reason, err.message.replace(/^Cast device authentication failed: /, ""), { host }));
+        else finish(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+      this.authFinish = null;
+      finish();
+      return;
     }
   }
 

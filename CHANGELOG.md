@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge
+  after TLS and before CONNECT, checking the device's certificate chain against Google's Cast roots (a port of
+  Chromium's checks, including revocation with the built-in fallback CRL). A device that fails makes `connect()`
+  reject with the new `CastAuthError` (with a `reason`) and the page sees it as an unreachable device. Not tested yet
+  against real hardware.
+- New options: `verifyDevice` on `CastClient` and `verifyDevices` on `createCastManager`, both on by default. Set them
+  to `false` for receivers that are not Google-certified.
+- The protocol layer gains `DeviceAuthMessage` encoding and decoding.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which
