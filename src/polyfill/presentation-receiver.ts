@@ -49,6 +49,17 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
   };
 
   const connections = new Map<string, any>();
+
+  // PresentationConnection::send overloads (presentation_connection.cc): a string, an ArrayBuffer, an ArrayBufferView or a
+  // Blob; anything else is converted to a string, as WebIDL resolves the DOMString overload. Cross-realm safe (no instanceof).
+  const tagOf = (v: any): string => Object.prototype.toString.call(v);
+  const copyView = (v: any): any => new g.Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+  // Bytes from the bridge become what binaryType names: an ArrayBuffer, or a Blob (DidReceiveBinaryMessage)
+  const binaryMessage = (conn: any, bytes: any): any => {
+    const view = g.ArrayBuffer.isView(bytes) ? bytes : new g.Uint8Array(bytes);
+    const buffer = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+    return conn.binaryType === "blob" ? new g.Blob([buffer]) : buffer;
+  };
   const listState: { property: any; resolve: any; resolved: boolean; list: any } = { property: null, resolve: null, resolved: false, list: null };
 
   class PresentationConnectionAvailableEvent extends EV {
@@ -89,19 +100,63 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
     __url: string;
     __state: string;
     __connectionId: string;
-    binaryType: string;
+    __binaryType: string;
+    __out: any[];
+    __reading: boolean;
+    __gen: number;
     constructor(connectionId: string, id: string, url: string) {
       super();
       this.__connectionId = connectionId;
       this.__id = id;
       this.__url = url;
       this.__state = "connected";
-      this.binaryType = "arraybuffer";
+      this.__binaryType = "arraybuffer";
+      this.__out = [];
+      this.__reading = false;
+      this.__gen = 0;
     }
     send(data: any): void {
       if (this.__state !== "connected") throw new DE("The presentation connection is not connected.", "InvalidStateError");
-      if (typeof data !== "string") throw new TypeError("send() accepts strings only; binary data is not supported.");
-      bridge.send(this.__connectionId, data);
+      let item: any;
+      if (typeof data === "string") item = data;
+      else if (tagOf(data) === "[object ArrayBuffer]") item = { buffer: data };
+      else if (g.ArrayBuffer.isView(data)) item = { bytes: copyView(data) };
+      else if (tagOf(data) === "[object Blob]") item = { blob: data };
+      else item = String(data);
+      this.__out.push(item);
+      this.__pump();
+    }
+    // HandleMessageQueue, as in the controller stand-in
+    __pump(): void {
+      while (this.__out.length > 0 && !this.__reading) {
+        const item = this.__out[0];
+        if (typeof item === "string") {
+          this.__out.shift();
+          bridge.send(this.__connectionId, item);
+        } else if (item.buffer !== undefined) {
+          this.__out.shift();
+          bridge.send(this.__connectionId, new g.Uint8Array(item.buffer.slice(0)));
+        } else if (item.bytes !== undefined) {
+          this.__out.shift();
+          bridge.send(this.__connectionId, item.bytes);
+        } else {
+          this.__reading = true;
+          const gen = this.__gen;
+          Promise.resolve(item.blob.arrayBuffer()).then((buffer: any) => buffer, () => null).then((buffer: any) => {
+            if (gen !== this.__gen) return;
+            this.__out.shift();
+            this.__reading = false;
+            if (buffer !== null) bridge.send(this.__connectionId, new g.Uint8Array(buffer));
+            this.__pump();
+          });
+        }
+      }
+    }
+    // TearDown
+    __teardown(): void {
+      this.__gen += 1;
+      this.__out.length = 0;
+      this.__reading = false;
     }
     // PresentationConnection::DoClose, then ReceiverPresentationConnection::DidClose removes it from the list
     close(): void {
@@ -114,11 +169,13 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
       if (this.__state !== "connected") return;
       bridge.call("terminate", { connectionId: this.__connectionId });
       this.__state = "terminated";
+      this.__teardown();
       connections.delete(this.__connectionId);
     }
     __didClose(reason: string): void {
       if (this.__state === "closed" || this.__state === "terminated") return;
       this.__state = "closed";
+      this.__teardown();
       connections.delete(this.__connectionId);
       ST(() => this.dispatchEvent(new PresentationConnectionCloseEvent("close", { reason })), 0);
       const list = listState.list;
@@ -132,6 +189,15 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
       get(this: any) { return this["__" + key]; },
     });
   }
+  Object.defineProperty(PresentationConnection.prototype, "binaryType", {
+    configurable: true,
+    enumerable: true,
+    get(this: any) { return this.__binaryType; },
+    set(this: any, value: any) {
+      const v = String(value);
+      if (v === "blob" || v === "arraybuffer") this.__binaryType = v;
+    },
+  });
   wireEvents(PresentationConnection.prototype, ["message", "close", "terminate", "connect"]);
 
   class PresentationConnectionList extends ET {
@@ -211,7 +277,7 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
     const conn = connections.get(e.connectionId);
     if (!conn) return;
     if (e.type === "message") {
-      if (conn.__state === "connected") conn.dispatchEvent(new ME("message", { data: e.data }));
+      if (conn.__state === "connected") conn.dispatchEvent(new ME("message", { data: e.bytes !== undefined ? binaryMessage(conn, e.bytes) : e.data }));
       return;
     }
     if (e.type === "closed") conn.__didClose("closed");

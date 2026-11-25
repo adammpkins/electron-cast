@@ -312,7 +312,7 @@ and `LocalPresentationManager`, with the receiver side of Blink's `PresentationR
 
 - **Sinks** (`displays.ts`): one per display, id `wired_display_<id>`, name "Display N" (N counts from 1 over the sorted
   list: primary first, then by y, then x). Displays that mirror the primary are dropped, so a single or mirrored setup has
-  no sinks. The display the controller window is on is hidden only in the picker (`displayOf`), as Chrome's dialog does;
+  no sinks. The display the controller window is on is hidden only in the picker (see "The picker's display" below), as Chrome's dialog does;
   availability and `getSinks` still list it.
 - **Sources**: https that is not the legacy Cast URL, or http on localhost. Anything else is not served.
 - **Routes** (`provider.ts`): one per presentation, description `Presenting (<host>)`. Creating a route on a display first
@@ -327,12 +327,27 @@ and `LocalPresentationManager`, with the receiver side of Blink's `PresentationR
   session per presentation, popups, dialogs and downloads refused, only fullscreen permitted, and the first main-frame
   navigation is the only one allowed (`PresentationNavigationPolicy`). F11 toggles fullscreen (Control+Command+F on macOS).
 - **Receiver page API** (`presentation-receiver.ts`): `navigator.presentation.receiver.connectionList`,
-  `connectionavailable`, strings over `send`, `close`, `terminate`; it registers lazily on first use.
+  `connectionavailable`, `send`, `close`, `terminate`; it registers lazily on first use.
+- **Binary messages** (`presentation_connection.cc`, `presentation.mojom`'s `PresentationConnectionMessage` union of `message` and
+  `data`): on both stand-ins `send()` takes a string, an ArrayBuffer, an ArrayBufferView or a Blob (anything else is converted
+  to a string, as WebIDL picks the DOMString overload). Sends leave through one queue, in order; while a Blob is being read the
+  ones behind it wait (`HandleMessageQueue`), a Blob that fails to read is skipped, and a connection that ends drops its queue
+  (`TearDown`). A view is copied when sent, an ArrayBuffer when its turn comes. `binaryType` is `arraybuffer` by default;
+  `blob` and `arraybuffer` are accepted and anything else is ignored; a received message is converted when it arrives. In main
+  the local pair copies the bytes (Blink copies into a Vector). The Cast path matches Chrome by dropping bytes:
+  `CastSessionClientImpl::OnMessage` returns at once for a message that is not text, so a page can send them without an error and
+  the device never hears of it.
+- **The picker's display** (`MediaRouterUI::GetEnabledSinks` with `WebContentsDisplayObserver`): the display the page's window is on
+  is found with `BrowserWindow.fromWebContents(wc)` and `screen.getDisplayMatching(win.getBounds())`, looked up at every start. While a
+  picker is open `request.observeSinks` gives the new list when the window moves or resizes to another display or a display
+  comes or goes. Without a window for the page (or without the `BrowserWindow` option) every display is offered. `displayOf`
+  overrides the lookup.
 
 Forced by Electron: a sandboxed preload must be a real bundled file, so the receiver preload is generated into a folder the
 app gives (`preloadDir`); the package never imports Electron, so `screen`, `BrowserWindow`, `session` and `ipcMain` are passed
-in; Electron has no per-window "display observer", so the app supplies `displayOf`; binary messages are not supported (as in
-the controller stand-in).
+in; Electron has no per-window display observer, so the display of a page is derived from its window's bounds on move and
+resize; a binary message over IPC is capped at 64 MiB (`MAX_BINARY_BYTES`; Blink allows 4 GiB) because it is cloned through
+the main process. The Blob is read in the page, as Blink reads it in the renderer, and sent as bytes.
 
 Notes for docs/CHROMIUM-MAP.md (absent on this branch), one row per rule: sink ids/names and ordering, mirrored displays,
 source rule, CreateRoute terminating the display's presentation, route description, receiver window lockdown and navigation

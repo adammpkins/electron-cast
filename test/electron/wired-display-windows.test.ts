@@ -203,7 +203,7 @@ test("the receiver page's IPC: register delivers the connection, messages and cl
   const conn = t.wired.controllers.start({ urls: [URL1], origin: "https://c.test", senderId: 1 }, "wired_display_2");
   const got: string[] = [];
   const log: string[] = [];
-  conn.onmessage = (m) => got.push(m);
+  conn.onmessage = (m) => got.push(m as string);
   conn.onclose = (r) => log.push(r);
   conn.onconnect = () => log.push("connect");
   const win = FakeBrowserWindow.all[0]!;
@@ -257,4 +257,26 @@ test("dispose closes the windows and removes the IPC", () => {
   assert.equal(FakeBrowserWindow.all[0]!.closeCalls, 1);
   t.wired.dispose();
   rmSync(t.dir, { recursive: true, force: true });
+});
+
+test("the receiver page's IPC carries bytes both ways, and refuses what is neither text nor bytes", () => {
+  const t = setup();
+  const conn = t.wired.controllers.start({ urls: [URL1], origin: "https://c.test", senderId: 1 }, "wired_display_2");
+  const got: (string | Uint8Array)[] = [];
+  conn.onmessage = (m) => got.push(m);
+  const wc = FakeBrowserWindow.all[0]!.webContents;
+  t.ipcMain.handlers.get(CH)!(main(wc), "register", {});
+  const cid = wc.sent[0]!.payload.connectionId as string;
+  const send = t.ipcMain.listeners.get(`${CH}:send`)!;
+  send(main(wc), cid, new Uint8Array([1, 2, 3]));
+  send(main(wc), cid, new Uint8Array([4, 5]).buffer);
+  send(main(wc), cid, 12);
+  send(main(wc), cid, { bytes: [1] });
+  assert.deepEqual(got.map((m) => (typeof m === "string" ? m : Array.from(m))), [[1, 2, 3], [4, 5]]);
+  conn.send(new Uint8Array([9, 8]));
+  conn.send("text");
+  const [bytes, text] = wc.sent.slice(1).map((s) => s.payload);
+  assert.deepEqual([bytes.type, Array.from(bytes.bytes as Uint8Array), bytes.data], ["message", [9, 8], undefined]);
+  assert.deepEqual([text.type, text.data, text.bytes], ["message", "text", undefined]);
+  t.done();
 });

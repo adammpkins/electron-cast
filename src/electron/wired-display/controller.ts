@@ -4,12 +4,15 @@
 // ControllerPresentationConnection (third_party/blink/renderer/modules/presentation/presentation_connection.cc).
 import { PresentationError } from "../presentation-handler.ts";
 import type { PresentationConnectionHandle } from "../presentation-handler.ts";
-import type { ControllerEnd, ControllerPort } from "./local-presentation.ts";
+import type { ControllerEnd, ControllerPort, PresentationMessage } from "./local-presentation.ts";
 import { isWiredDisplaySource } from "./displays.ts";
 import { WiredDisplayError, type WiredDisplayProvider } from "./provider.ts";
 
 /** A connection handle that starts out connecting: `onconnect` fires when the receiver page is ready. */
-export interface LocalConnectionHandle extends PresentationConnectionHandle {
+export interface LocalConnectionHandle extends Omit<PresentationConnectionHandle, "send" | "onmessage"> {
+  /** Text or bytes (`PresentationConnectionMessage`); the Cast connections of the same page carry text only. */
+  send(message: PresentationMessage): void;
+  onmessage: ((message: PresentationMessage) => void) | null;
   /** True until the receiver page has taken the connection (Blink's CONNECTING). */
   readonly connecting: boolean;
   onconnect: (() => void) | null;
@@ -22,8 +25,8 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
   onconnect: (() => void) | null = null;
   port: ControllerPort | null = null;
   private state: "connecting" | "connected" | "ended" = "connecting";
-  private queue: string[] = [];
-  private msgHandler: ((message: string) => void) | null = null;
+  private queue: PresentationMessage[] = [];
+  private msgHandler: ((message: PresentationMessage) => void) | null = null;
   private readonly owner: WiredDisplayControllers;
   private readonly senderId: number;
 
@@ -38,11 +41,11 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
     return this.state === "connecting";
   }
 
-  get onmessage(): ((message: string) => void) | null {
+  get onmessage(): ((message: PresentationMessage) => void) | null {
     return this.msgHandler;
   }
 
-  set onmessage(fn: ((message: string) => void) | null) {
+  set onmessage(fn: ((message: PresentationMessage) => void) | null) {
     this.msgHandler = fn;
     if (fn !== null && this.state !== "ended") {
       const queued = this.queue;
@@ -52,7 +55,7 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
   }
 
   /** `PresentationConnection::send`: only a connected connection sends (CanSendMessage). */
-  send(message: string): void {
+  send(message: PresentationMessage): void {
     if (this.state === "connected") this.port?.send(message);
   }
 
@@ -81,7 +84,7 @@ class LocalControllerConnection implements LocalConnectionHandle, ControllerEnd 
     this.onconnect?.();
   }
 
-  message(data: string): void {
+  message(data: PresentationMessage): void {
     if (this.state !== "connected") return;
     if (this.msgHandler !== null) this.msgHandler(data);
     else this.queue.push(data);

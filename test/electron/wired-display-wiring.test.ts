@@ -3,9 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createCastManager, type CastManagerOptions, type WiredDisplaySink } from "../../src/electron/main.ts";
+import { createCastManager, type CastManagerOptions, type WiredDisplayOptions, type WiredDisplayRequest, type WiredDisplaySink } from "../../src/electron/main.ts";
 import { FakeDevices } from "./fakes.ts";
-import { FakeScreen, disp, windowFactory } from "./wired-fakes.ts";
+import { FakePageWindow, FakeScreen, disp, windowFactory } from "./wired-fakes.ts";
 
 const ORIGIN = "http://127.0.0.1:4000";
 const URL1 = "https://example.com/receiver.html";
@@ -38,7 +38,11 @@ class FakeDiscovery extends FakeDevices {
   stop() {}
 }
 
-function setup(over: Partial<CastManagerOptions> = {}, picked: { sinks?: WiredDisplaySink[]; choose?: (s: WiredDisplaySink[]) => string | null } = {}) {
+function setup(
+  over: Partial<CastManagerOptions> = {},
+  picked: { sinks?: WiredDisplaySink[]; request?: WiredDisplayRequest; choose?: (s: WiredDisplaySink[]) => string | null } = {},
+  wiredOver: Partial<WiredDisplayOptions> | null = null,
+) {
   const ipcMain = new FakeIpcMain();
   const screen = new FakeScreen([disp(1, 0, 0), disp(2, 1920, 0)]);
   const f = windowFactory();
@@ -49,11 +53,12 @@ function setup(over: Partial<CastManagerOptions> = {}, picked: { sinks?: WiredDi
     wiredDisplay: {
       screen,
       createReceiverWindow: f.create,
-      selectDisplay: async (sinks) => {
+      selectDisplay: async (sinks, request) => {
         picked.sinks = sinks;
+        picked.request = request;
         return (picked.choose ?? ((s) => s[0]?.id ?? null))(sinks);
       },
-      displayOf: () => 1,
+      ...(wiredOver === null ? { displayOf: () => 1 } : wiredOver),
     },
     ...over,
   });
@@ -108,7 +113,7 @@ test("start: the picker is offered the other displays only, a window opens, the 
   assert.deepEqual(wc.events(), [{ type: "statechange", connectionId: "conn-1", state: "connected" }]);
   // controller -> receiver and back
   const rx: string[] = [];
-  t.f.windows[0]!.ends[0]!.onmessage = (m) => rx.push(m);
+  t.f.windows[0]!.ends[0]!.onmessage = (m) => rx.push(m as string);
   t.psend(wc, "conn-1", "hello");
   t.f.windows[0]!.ends[0]!.send("echo hello");
   assert.deepEqual(rx, ["hello"]);
@@ -199,5 +204,99 @@ test("observers of the manager's wiredDisplay API get sinks and routes", async (
   assert.deepEqual(routes, [0, 1, 0]);
   offS();
   offR();
+  await t.manager.dispose();
+});
+
+test("binary: bytes go both ways between the page and the receiver, copied, and text is unchanged", async () => {
+  const t = setup();
+  const wc = new FakeWebContents(5);
+  await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+  const win = t.f.windows[0]!;
+  win.register();
+  const rx: (string | Uint8Array)[] = [];
+  win.ends[0]!.onmessage = (m) => rx.push(m);
+  const mine = new Uint8Array([1, 2, 3]);
+  t.psend(wc, "c1", mine);
+  t.psend(wc, "c1", new Uint8Array([7, 8, 9]).buffer); // an ArrayBuffer over IPC is accepted too
+  t.psend(wc, "c1", "text");
+  mine[0] = 99;
+  assert.deepEqual(rx.map((m) => (typeof m === "string" ? m : Array.from(m))), [[1, 2, 3], [7, 8, 9], "text"]);
+  assert.notEqual(rx[0], mine, "the receiver gets a copy");
+  const reply = new Uint8Array([4, 5]);
+  win.ends[0]!.send(reply);
+  reply[0] = 0;
+  win.ends[0]!.send("back");
+  const msgs = wc.events().filter((e) => e.type === "message");
+  assert.deepEqual(msgs.map((e) => (e.bytes ? ["bytes", Object.values(e.bytes)] : ["data", e.data])), [["bytes", [4, 5]], ["data", "back"]]);
+  t.psend(wc, "c1", 123 as any);
+  t.psend(wc, "c1", { not: "bytes" } as any);
+  assert.equal(rx.length, 3, "anything but text or bytes is ignored");
+  await t.manager.dispose();
+});
+
+test("binary: bytes before the receiver connected are not sent, and bytes over the size cap are dropped", async () => {
+  const t = setup();
+  const wc = new FakeWebContents(5);
+  await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+  const win = t.f.windows[0]!;
+  t.psend(wc, "c1", new Uint8Array([1])); // CanSendMessage: not connected yet
+  win.register();
+  const rx: unknown[] = [];
+  win.ends[0]!.onmessage = (m) => rx.push(m);
+  t.psend(wc, "c1", new Uint8Array(64 * 1024 * 1024 + 1));
+  assert.deepEqual(rx, []);
+  await t.manager.dispose();
+});
+
+test("displayOf default: the page's window is found with BrowserWindow.fromWebContents and screen.getDisplayMatching", async () => {
+  const wc = new FakeWebContents(5);
+  const win = new FakePageWindow({ x: 100, y: 100, width: 800, height: 600 });
+  const picked: { sinks?: WiredDisplaySink[] } = {};
+  const t = setup({}, picked, { BrowserWindow: { fromWebContents: (w: unknown) => (w === wc ? win : null) } });
+  await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+  assert.deepEqual(picked.sinks!.map((s) => s.id), ["wired_display_2"], "the window is on display 1, whose sink is left out");
+  win.moveTo(2000, 100);
+  await t.pcall(wc, "start", { connectionId: "c2", urls: [URL1] });
+  assert.deepEqual(picked.sinks!.map((s) => s.id), ["wired_display_1"], "the lookup runs at every start, on the window's current bounds");
+  await t.manager.dispose();
+});
+
+test("displayOf default: a webContents with no window is offered every display, and the displayOf option overrides the lookup", async () => {
+  const wc = new FakeWebContents(5);
+  const ids = async (wired: Partial<WiredDisplayOptions>) => {
+    const picked: { sinks?: WiredDisplaySink[] } = {};
+    const t = setup({}, picked, wired);
+    await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+    await t.manager.dispose();
+    return picked.sinks!.map((s) => s.id);
+  };
+  const win = new FakePageWindow({ x: 0, y: 0, width: 100, height: 100 });
+  const destroyed = new FakePageWindow({ x: 0, y: 0, width: 100, height: 100 });
+  destroyed.destroyed = true;
+  const both = ["wired_display_1", "wired_display_2"];
+  assert.deepEqual(await ids({ BrowserWindow: { fromWebContents: () => null } }), both, "no window");
+  assert.deepEqual(await ids({}), both, "neither BrowserWindow nor displayOf");
+  assert.deepEqual(await ids({ BrowserWindow: { fromWebContents: () => destroyed } }), both, "a destroyed window counts as none");
+  assert.deepEqual(await ids({ BrowserWindow: { fromWebContents: () => { throw new Error("not a webContents"); } } }), both, "a lookup that throws counts as none");
+  assert.deepEqual(await ids({ BrowserWindow: { fromWebContents: () => win }, displayOf: () => 2 }), ["wired_display_1"], "displayOf wins");
+});
+
+test("an open picker follows the page's window as it moves or resizes, and displays coming and going", async () => {
+  const wc = new FakeWebContents(5);
+  const win = new FakePageWindow({ x: 100, y: 100, width: 800, height: 600 });
+  const picked: { request?: WiredDisplayRequest } = {};
+  const t = setup({}, picked, { BrowserWindow: { fromWebContents: () => win } });
+  await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+  const seen: string[][] = [];
+  const stop = picked.request!.observeSinks((s) => seen.push(s.map((x) => x.id)));
+  win.moveTo(2000, 100);
+  win.moveTo(2100, 150, "resize"); // still display 2: no new list
+  t.screen.add(disp(3, 3840, 0));
+  win.moveTo(100, 100);
+  stop();
+  win.moveTo(2000, 100);
+  t.screen.add(disp(4, 5760, 0));
+  assert.deepEqual(seen, [["wired_display_1"], ["wired_display_1", "wired_display_3"], ["wired_display_2", "wired_display_3"]]);
+  assert.equal(win.listenerCount("move") + win.listenerCount("resize"), 0, "stopping removes the window listeners");
   await t.manager.dispose();
 });

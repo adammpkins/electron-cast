@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installPresentationReceiver } from "../../polyfill/presentation-receiver.ts";
-import type { ReceiverEnd } from "./local-presentation.ts";
+import { MAX_BINARY_BYTES, asBytes, messageFields, type ReceiverEnd } from "./local-presentation.ts";
 import type { ReceiverWindow, ReceiverWindowFactory, ReceiverWindowRequest } from "./provider.ts";
 
 /** The part of an Electron `Session` used here. */
@@ -167,7 +167,7 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
         live.request.receiverCreated({ id: live.presentationId, url: live.wc.getURL() }, (end) => {
           const connectionId = randomUUID();
           live.connections.set(connectionId, end);
-          end.onmessage = (data) => sendEvent(live, { type: "message", connectionId, data });
+          end.onmessage = (data) => sendEvent(live, { type: "message", connectionId, ...messageFields(data) });
           end.onclose = () => {
             live.connections.delete(connectionId);
             sendEvent(live, { type: "closed", connectionId });
@@ -195,8 +195,10 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
   });
   const onSend = (event: { sender: ReceiverWebContentsLike; senderFrame?: { parent?: unknown } | null }, connectionId: unknown, data: unknown): void => {
     const live = liveOf(event);
-    if (live === undefined || typeof connectionId !== "string" || typeof data !== "string") return;
-    live.connections.get(connectionId)?.send(data);
+    if (live === undefined || typeof connectionId !== "string") return;
+    const message = typeof data === "string" ? data : asBytes(data);
+    if (message === null || (typeof message !== "string" && message.byteLength > MAX_BINARY_BYTES)) return;
+    live.connections.get(connectionId)?.send(message);
   };
   ipc.on(`${channel}:send`, onSend);
 

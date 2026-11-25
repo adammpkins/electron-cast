@@ -89,7 +89,8 @@ test("a receiver connection is connected, fires connect, has id and url, and exc
   assert.deepEqual(JSON.parse(JSON.stringify(h.run("log"))), ["connect", "m:ping"]);
   h.run("conn.send('pong')");
   assert.deepEqual(h.sent, [["c1", "pong"]]);
-  assert.throws(() => h.run("conn.send(new ArrayBuffer(2))"), { name: "TypeError" });
+  h.run("conn.send(new ArrayBuffer(2))");
+  assert.deepEqual(Array.from(h.sent.at(-1)![1] as any), [0, 0], "binary is sent as bytes (more in presentation-binary.test.ts)");
 });
 
 test("close(): tells the controller, closes with reason closed, leaves the list; later sends throw InvalidStateError", async () => {

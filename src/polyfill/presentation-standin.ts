@@ -24,6 +24,17 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
   const uuid = (): string => g.crypto.randomUUID();
 
   const MAX_QUEUED_MESSAGES = 1000;
+
+  // PresentationConnection::send overloads (presentation_connection.cc): a string, an ArrayBuffer, an ArrayBufferView or a
+  // Blob; anything else is converted to a string, as WebIDL resolves the DOMString overload. Cross-realm safe (no instanceof).
+  const tagOf = (v: any): string => Object.prototype.toString.call(v);
+  const copyView = (v: any): any => new g.Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+  // Bytes from the bridge become what binaryType names: an ArrayBuffer, or a Blob (DidReceiveBinaryMessage)
+  const binaryMessage = (conn: any, bytes: any): any => {
+    const view = g.ArrayBuffer.isView(bytes) ? bytes : new g.Uint8Array(bytes);
+    const buffer = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+    return conn.binaryType === "blob" ? new g.Blob([buffer]) : buffer;
+  };
   const connections = new Map<string, any>();
   const watches = new Map<string, any>();
   let pendingStart = false;
@@ -90,8 +101,11 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
     id: string;
     url: string;
     state: string;
-    binaryType: string;
-    __queue: string[];
+    __binaryType: string;
+    __queue: any[];
+    __out: any[];
+    __reading: boolean;
+    __gen: number;
     __flushScheduled: boolean;
     __msgListeners: number;
     __h_message: any;
@@ -101,27 +115,80 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       this.id = "";
       this.url = "";
       this.state = state;
-      this.binaryType = "arraybuffer";
+      this.__binaryType = "arraybuffer";
       this.__queue = [];
+      this.__out = [];
+      this.__reading = false;
+      this.__gen = 0;
       this.__flushScheduled = false;
       this.__msgListeners = 0;
       this.__h_message = null;
     }
     send(data: any): void {
       if (this.state !== "connected") throw new DE("The connection is not open.", "InvalidStateError");
-      if (typeof data !== "string") throw new TypeError("send() accepts strings only; binary data is not supported.");
-      bridge.send(this.connectionId, data);
+      let item: any;
+      if (typeof data === "string") item = data;
+      else if (tagOf(data) === "[object ArrayBuffer]") item = { buffer: data };  // read when its turn comes, as Blink does
+      else if (g.ArrayBuffer.isView(data)) item = { bytes: copyView(data) };
+      else if (tagOf(data) === "[object Blob]") item = { blob: data };
+      else item = String(data);
+      this.__out.push(item);
+      this.__pump();
+    }
+    // HandleMessageQueue: messages leave in order; while a Blob is being read the ones behind it wait
+    __pump(): void {
+      while (this.__out.length > 0 && !this.__reading) {
+        const item = this.__out[0];
+        if (typeof item === "string") {
+          this.__out.shift();
+          bridge.send(this.connectionId, item);
+        } else if (item.buffer !== undefined) {
+          this.__out.shift();
+          bridge.send(this.connectionId, new g.Uint8Array(item.buffer.slice(0)));
+        } else if (item.bytes !== undefined) {
+          this.__out.shift();
+          bridge.send(this.connectionId, item.bytes);
+        } else {
+          this.__reading = true;
+          const gen = this.__gen;
+          // A Blob that fails to read is skipped (DidFailLoadingBlob)
+          Promise.resolve(item.blob.arrayBuffer()).then((buffer: any) => buffer, () => null).then((buffer: any) => {
+            if (gen !== this.__gen) return;
+            this.__out.shift();
+            this.__reading = false;
+            if (buffer !== null) bridge.send(this.connectionId, new g.Uint8Array(buffer));
+            this.__pump();
+          });
+        }
+      }
+    }
+    // TearDown: a connection that ends drops what it had queued and stops reading a Blob
+    __teardown(): void {
+      this.__gen += 1;
+      this.__out.length = 0;
+      this.__reading = false;
     }
     close(): void { this.__end("closed"); }
     terminate(): void { this.__end("terminated"); }
     __end(state: string): void {
       if (this.state === "closed" || this.state === "terminated") return;
       this.state = state;
+      this.__teardown();
       bridge.call(state === "closed" ? "close" : "terminate", { connectionId: this.connectionId });
       connections.delete(this.connectionId);
       this.dispatchEvent(new EV(state === "closed" ? "close" : "terminate"));
     }
   }
+  // An invalid value is ignored, as for any IDL enum attribute
+  Object.defineProperty(PresentationConnection.prototype, "binaryType", {
+    configurable: true,
+    enumerable: true,
+    get(this: any) { return this.__binaryType; },
+    set(this: any, value: any) {
+      const v = String(value);
+      if (v === "blob" || v === "arraybuffer") this.__binaryType = v;
+    },
+  });
   wireEvents(PresentationConnection.prototype, ["message", "close", "terminate", "connect"], (conn) => maybeFlush(conn));
   const nativeAdd = PresentationConnection.prototype.addEventListener;
   const nativeRemove = PresentationConnection.prototype.removeEventListener;
@@ -229,7 +296,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
     if (e.type === "message") {
       const conn = connections.get(e.connectionId);
       if (!conn) return;
-      conn.__queue.push(e.data);
+      conn.__queue.push(e.bytes !== undefined ? binaryMessage(conn, e.bytes) : e.data);
       if (conn.__queue.length > MAX_QUEUED_MESSAGES) conn.__queue.shift();
       maybeFlush(conn);
       return;
@@ -247,6 +314,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       }
       const terminated = e.state === "terminated";
       conn.state = terminated ? "terminated" : "closed";
+      conn.__teardown();
       connections.delete(e.connectionId);
       const ev = new EV(terminated ? "terminate" : "close");
       ev.reason = e.reason ?? null;

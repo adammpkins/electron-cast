@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { DisplayLike } from "../../src/electron/wired-display/displays.ts";
+import type { DisplayLike, RectLike } from "../../src/electron/wired-display/displays.ts";
 import type { ReceiverEnd } from "../../src/electron/wired-display/local-presentation.ts";
 import type { ReceiverWindow, ReceiverWindowRequest, ScreenLike } from "../../src/electron/wired-display/provider.ts";
 
@@ -18,6 +18,12 @@ export class FakeScreen extends EventEmitter implements ScreenLike {
   }
   getPrimaryDisplay(): DisplayLike {
     return this.primary;
+  }
+  /** The display holding the centre of the rect, else the primary (Electron picks by largest overlap; this is enough for tests). */
+  getDisplayMatching(rect: RectLike): DisplayLike {
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    return this.displays.find((d) => cx >= d.bounds.x && cx < d.bounds.x + d.bounds.width && cy >= d.bounds.y && cy < d.bounds.y + d.bounds.height) ?? this.primary;
   }
   add(d: DisplayLike): void {
     this.displays.push(d);
@@ -78,4 +84,24 @@ export function windowFactory() {
       return w;
     },
   };
+}
+
+/** An Electron BrowserWindow as far as the display lookup sees it. */
+export class FakePageWindow extends EventEmitter {
+  bounds: RectLike;
+  destroyed = false;
+  constructor(bounds: RectLike) {
+    super();
+    this.bounds = bounds;
+  }
+  getBounds(): RectLike {
+    return { ...this.bounds };
+  }
+  isDestroyed(): boolean {
+    return this.destroyed;
+  }
+  moveTo(x: number, y: number, event: "move" | "resize" = "move"): void {
+    this.bounds = { ...this.bounds, x, y };
+    this.emit(event);
+  }
 }

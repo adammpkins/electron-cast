@@ -24,7 +24,7 @@ function watch(conn: ReturnType<WiredDisplayControllers["start"]>) {
   const got: string[] = [];
   conn.onconnect = () => log.push("connect");
   conn.onclose = (r) => log.push(r);
-  conn.onmessage = (m) => got.push(m);
+  conn.onmessage = (m) => got.push(m as string);
   return { log, got };
 }
 
@@ -78,7 +78,7 @@ test("messages go both ways in process, in order, and only once connected", () =
   w.register();
   const end = w.ends[0]!;
   const rx: string[] = [];
-  end.onmessage = (m) => rx.push(m);
+  end.onmessage = (m) => rx.push(m as string);
   conn.send("a");
   conn.send("b");
   end.send("x");

@@ -4,6 +4,7 @@ import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
+import { MAX_BINARY_BYTES, asBytes, messageFields } from "./wired-display/local-presentation.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
@@ -23,7 +24,7 @@ export { MediaRouteError } from "./manager-api.ts";
 export {
   createReceiverWindows, isWiredDisplaySource, availableDisplays, wiredDisplaySinks,
   type WiredDisplayApi, type WiredDisplayOptions, type WiredDisplayRequest, type WiredDisplaySink, type WiredDisplayRoute,
-  type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike,
+  type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
@@ -334,17 +335,20 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         sendTo(sid, { type: "statechange", connectionId, state });
       };
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
-      conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
+      if (typeof local.connecting === "boolean") {
+        (conn as LocalConnectionHandle).onmessage = (data) => sendTo(sid, { type: "message", connectionId, ...messageFields(data) });
+      } else {
+        conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
+      }
       return { ok: true, value: { id: conn.id, url: conn.url, ...(local.connecting === true ? { state: "connecting" } : {}) } };
     };
 
     /** A start() whose URLs only a display can show: the app picks a display, a window opens on it. */
     const startOnDisplay = async (sid: number, origin: string, urls: string[]): Promise<PresentationConnectionHandle> => {
       const w = wired!;
-      const exclude = w.displayOf?.(senders.get(sid)?.wc);
-      // MediaRouterUI::GetEnabledSinks hides the sink of the display the dialog is on
-      const sinks = w.provider.sinks().filter((s) => s.display.id !== exclude);
-      const request = { urls: [...urls], origin, senderId: sid };
+      const wc = senders.get(sid)?.wc;
+      const sinks = w.sinksFor(wc);
+      const request = { urls: [...urls], origin, senderId: sid, observeSinks: (l: Parameters<typeof w.observeSinksFor>[1]) => w.observeSinksFor(wc, l) };
       const choice = await w.selectDisplay(sinks, request);
       if (choice === null) throw new PresentationError("AbortError", "The user cancelled the request");
       return w.controllers.start(request, choice);
@@ -468,11 +472,18 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     });
 
     const onSend = (event: IpcMainEventLike, connectionId: unknown, data: unknown): void => {
-      if (typeof connectionId !== "string" || typeof data !== "string") return;
+      if (typeof connectionId !== "string") return;
       const c = connections.get(connectionId);
       if (c === undefined || c.sid !== senderIdOf(event.sender, event.senderFrame) || c.conn === null) return;
-      if (data.length > MAX_MESSAGE_CHARS) return;
-      c.conn.send(data);
+      if (typeof data === "string") {
+        if (data.length <= MAX_MESSAGE_CHARS) c.conn.send(data);
+        return;
+      }
+      const bytes = asBytes(data);
+      if (bytes === null || bytes.byteLength > MAX_BINARY_BYTES) return;
+      // A wired display carries bytes (PresentationConnectionMessage.data). A Cast connection drops them, as Chrome's
+      // CastSessionClientImpl::OnMessage does with anything that is not text.
+      if (typeof (c.conn as Partial<LocalConnectionHandle>).connecting === "boolean") (c.conn as LocalConnectionHandle).send(bytes);
     };
     on(`${channel}:presentation:send`, onSend);
 

@@ -12,6 +12,12 @@
   controller; a controller that goes away only leaves it. New exports: `createReceiverWindows` (the Electron
   BrowserWindow part, taking `BrowserWindow`, `session`, `ipcMain` and a folder for the generated receiver preload), the
   display rules, and `manager.wiredDisplay` (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+- Presentation mode: `PresentationConnection.send()` takes ArrayBuffer, ArrayBufferView and Blob as well as strings, and `binaryType`
+  (`arraybuffer` or `blob`) picks what `message` events carry, as in Chrome. Binary goes to wired displays, in both directions
+  (up to 64 MiB a message). To a Cast device it is dropped without an error, as Chrome's Cast provider ignores messages that are not
+  text. Before, `send()` threw a `TypeError` for anything but a string.
+- Wired displays: the display a page is on is left out of the picker by default, found with the new `BrowserWindow` option and
+  `screen.getDisplayMatching`, and `request.observeSinks` follows the window as it moves. `displayOf` is now an override.
 
 ## 0.4.0
 

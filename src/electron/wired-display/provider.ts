@@ -20,6 +20,8 @@ import {
 export interface ScreenLike {
   getAllDisplays(): DisplayLike[];
   getPrimaryDisplay(): DisplayLike;
+  /** `screen.getDisplayMatching(rect)`: the display a window is mostly on. Needed to find the display of a page's window. */
+  getDisplayMatching?(rect: RectLike): DisplayLike;
   on(event: "display-added" | "display-removed" | "display-metrics-changed", listener: (...args: any[]) => void): unknown;
   removeListener(event: "display-added" | "display-removed" | "display-metrics-changed", listener: (...args: any[]) => void): unknown;
 }

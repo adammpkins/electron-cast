@@ -58,14 +58,14 @@ app.whenReady().then(async () => {
     // receiver preload is generated into a folder the app owns, because a sandboxed preload must be a real file.
     wiredDisplay: {
       screen,
+      // Finds the display of the page's window, so the picker leaves that display out, as Chrome's does
+      BrowserWindow,
       createReceiverWindow: createReceiverWindows({
         BrowserWindow,
         session,
         ipcMain,
         preloadDir: join(app.getPath("userData"), "electron-cast-receiver"),
       }).factory,
-      // The page window is never offered as a target, so with one screen this list is empty.
-      displayOf: (wc) => screen.getDisplayMatching(BrowserWindow.fromWebContents(wc).getBounds()).id,
       async selectDisplay(sinks) {
         if (sinks.length === 0) return null;
         const { response } = await dialog.showMessageBox(win, {

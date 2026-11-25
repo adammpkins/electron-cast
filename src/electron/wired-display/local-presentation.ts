@@ -4,6 +4,33 @@
 // pipes (blink::mojom::PresentationConnection) to both sides; here a link carries the same notifications.
 // Pure module: no Electron imports.
 
+/**
+ * `blink::mojom::PresentationConnectionMessage`: a union of `message` (text) and `data` (bytes). Bytes are copied on the
+ * way across, as Blink copies them into a Vector, so the two pages never share a buffer.
+ */
+export type PresentationMessage = string | Uint8Array;
+
+/**
+ * Largest binary message taken from a page over IPC. Blink allows up to 4 GiB (`wtf_size_t`); an Electron IPC message is
+ * a structured clone through the main process, so this caps what one page can make it hold.
+ */
+export const MAX_BINARY_BYTES = 64 * 1024 * 1024;
+
+/** The bytes of what a page sent over IPC (it arrives as a Uint8Array, or an ArrayBuffer), or null when it is not binary. */
+export function asBytes(value: unknown): Uint8Array | null {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return null;
+}
+
+/** How a message travels to a page: text as `data`, bytes as `bytes`. */
+export function messageFields(data: PresentationMessage): { data: string } | { bytes: Uint8Array } {
+  return typeof data === "string" ? { data } : { bytes: data };
+}
+
+const copyMessage = (data: PresentationMessage): PresentationMessage => (typeof data === "string" ? data : data.slice());
+
 /** `blink::mojom::PresentationInfo`. */
 export interface PresentationInfo { id: string; url: string }
 
@@ -12,7 +39,7 @@ export interface ControllerEnd {
   /** `DidChangeState(CONNECTED)`, sent by `ReceiverPresentationConnection::Init`. */
   connected(): void;
   /** `OnMessage`. */
-  message(data: string): void;
+  message(data: PresentationMessage): void;
   /** `DidClose(CLOSED)`: the receiver's connection was closed. */
   closed(): void;
   /** `DidChangeState(TERMINATED)`: the receiver terminated the presentation, or its window went away. */
@@ -24,10 +51,10 @@ export interface ReceiverEnd {
   readonly id: string;
   readonly url: string;
   /** The controller sent a message. */
-  onmessage: ((data: string) => void) | null;
+  onmessage: ((data: PresentationMessage) => void) | null;
   /** The controller closed its connection (`DidClose(CLOSED)`). */
   onclose: (() => void) | null;
-  send(data: string): void;
+  send(data: PresentationMessage): void;
   /** `PresentationConnection::close()` on the receiver: tells the controller, keeps the presentation. */
   close(): void;
   /** `ReceiverPresentationConnection::TerminateInternal`: closes the receiver window. */
@@ -36,7 +63,7 @@ export interface ReceiverEnd {
 
 /** What the controller's connection calls (the controller side's `target_connection_`). */
 export interface ControllerPort {
-  send(data: string): void;
+  send(data: PresentationMessage): void;
   /** `PresentationConnection::DoClose`: the receiver's connection is closed and removed from its list. */
   close(): void;
 }
@@ -76,9 +103,9 @@ class ControllerSide implements ControllerPort {
     this.link = link;
   }
 
-  send(data: string): void {
+  send(data: PresentationMessage): void {
     const rx = this.link.receiver;
-    if (this.link.open && rx !== null) rx.onmessage?.(data);
+    if (this.link.open && rx !== null) rx.onmessage?.(copyMessage(data));
   }
 
   close(): void {
@@ -91,7 +118,7 @@ class ControllerSide implements ControllerPort {
 }
 
 class ReceiverSide implements ReceiverEnd {
-  onmessage: ((data: string) => void) | null = null;
+  onmessage: ((data: PresentationMessage) => void) | null = null;
   onclose: (() => void) | null = null;
   private readonly link: Link;
   constructor(link: Link) {
@@ -106,8 +133,8 @@ class ReceiverSide implements ReceiverEnd {
     return this.link.info.url;
   }
 
-  send(data: string): void {
-    if (this.link.open) this.link.controller.message(data);
+  send(data: PresentationMessage): void {
+    if (this.link.open) this.link.controller.message(copyMessage(data));
   }
 
   close(): void {

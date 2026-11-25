@@ -95,7 +95,9 @@ test("start() opens a connection; messages are buffered until onmessage is set, 
   assert.deepEqual(Array.from(h.run("__got")), ["m1", "m2", "m3", "m4"]);
   h.run(`__c.send('{"type":"client_connect"}')`);
   assert.deepEqual(h.sent, [[call.params.connectionId, '{"type":"client_connect"}']]);
-  assert.equal(h.run(`(() => { try { __c.send(new ArrayBuffer(1)); } catch (e) { return e.name; } })()`), "TypeError");
+  // Binary is sent as bytes (presentation_connection.cc send(ArrayBuffer)); presentation-binary.test.ts covers it in full
+  h.run("__c.send(new ArrayBuffer(1))");
+  assert.deepEqual(h.sent.map(([, d]) => (typeof d === "string" ? d : Array.from(d as any))).at(-1), [0]);
 });
 
 test("start() needs a user gesture, rejects with the main process DOMException name, and allows one at a time", async () => {
