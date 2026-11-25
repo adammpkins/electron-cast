@@ -1028,6 +1028,12 @@ agent therefore takes only the audio track from it (asked with the maximums), st
 video with the same `getUserMedia` request as on Windows. `fixed_resolution` is only chosen when the receiver recommends
 the minimum size.
 
+On macOS the screen is captured by ScreenCaptureKit, which letterboxes into the frame
+(`IOSurfaceCaptureDeviceBase::ComputeFrameSizeAndDestRect`) but reports the content rect as the frame's visible rect
+(`content/browser/media/capture/screen_capture_kit_device_mac.mm`, `OnStreamSample`). Chrome's encoder encodes the
+visible rect (`MediaVideoEncoderWrapper`, `visible_rect().size()`), and so does WebCodecs here, so a desktop mirrored
+from a Mac keeps the screen's own shape (a 4:3 screen gives 1024x768 frames, seen with Electron 40 on a macOS runner).
+
 ### Media remoting: capabilities only, the renderer side is not reachable
 
 Chrome's remoting is started by the renderer, not by the Mirroring Service. In a mirrored tab, `media::remoting::RendererController`

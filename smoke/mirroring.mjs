@@ -6,7 +6,7 @@
 // (`prefer-hardware`), VP8 in software otherwise. The `hardware: "off"` variant uses Chrome's own
 // `--cast-streaming-force-disable-hardware-*` switches, appended to `app.commandLine` as an app would, to get the
 // software path on such a machine; `hardware: "vp9"` also makes the receiver ask for VP9, which is then software VP9.
-import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
+import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, screen as displays, utilityProcess, webContents } from "electron";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
@@ -186,8 +186,17 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   // stream keeps the aspect ratio of the maximum, 16:9, whatever shape the page or screen is.
   // The fake receiver reads the picture size from the key frames.
   assert.ok(s.videoSizes.size > 0, "no key frame told its size");
+  // On macOS, ScreenCaptureKit letterboxes the screen into the frame but reports the content rect as the frame's visible
+  // rect (ScreenCaptureKitDeviceMac::OnStreamSample), and Chrome's encoder encodes the visible rect
+  // (MediaVideoEncoderWrapper: visible_rect().size()), so a desktop capture there keeps the screen's own shape.
+  const { width: dw, height: dh } = displays.getPrimaryDisplay().size;
+  const screenShapeAllowed = mode === "desktop" && process.platform === "darwin";
   for (const size of s.videoSizes) {
     const [w, h] = size.split("x").map(Number);
+    if (screenShapeAllowed && Math.abs(w / h - 16 / 9) >= 0.02 && Math.abs(w / h - dw / dh) < 0.02) {
+      console.log(`smoke: NOTICE [${name}] ${size} frames keep the ${dw}x${dh} screen's shape: ScreenCaptureKit gives the content rect as the visible rect, which is what Chrome encodes too`);
+      continue;
+    }
     assert.ok(Math.abs(w / h - 16 / 9) < 0.02, `a ${size} frame is not 16:9`);
   }
   if (audioWanted) assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
