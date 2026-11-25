@@ -274,7 +274,10 @@ export function parseEnvelope(raw: string): ParsedEnvelope | null {
   return out;
 }
 
-/** The v2_message media request types clank sends; SET_VOLUME/STOP/LAUNCH are not among them. */
+/**
+ * The v2_message media request types Chromium forwards to the receiver (IsMediaRequestMessageType in
+ * cast_message_util.cc); SET_VOLUME/STOP/LAUNCH are not among them. Any type missing here gets no reply at all.
+ */
 const MEDIA_REQUEST_TYPES = new Set([
   "LOAD",
   "QUEUE_LOAD",
@@ -289,6 +292,9 @@ const MEDIA_REQUEST_TYPES = new Set([
   "QUEUE_UPDATE",
   "QUEUE_REMOVE",
   "QUEUE_REORDER",
+  "QUEUE_NEXT",
+  "QUEUE_PREV",
+  "PRECACHE",
 ]);
 
 /** True when a v2_message type is one of the media requests forwarded to the receiver. */

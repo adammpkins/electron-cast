@@ -420,8 +420,14 @@ export class CastPresentationHandler {
     });
     if (res.ok) {
       conn.deliver(envelope("app_message", null, conn.clientId, env.sequenceNumber));
-    } else {
-      conn.deliver(envelope("error", { code: res.code, description: res.description ?? null, details: null }, conn.clientId, env.sequenceNumber));
+    } else if (res.code === "session_error") {
+      // Chromium's AppActivity::SendAppMessageToReceiver answers a missing session this way; a failed channel
+      // write gets neither an ack nor an error there.
+      conn.deliver(envelope("error", {
+        code: "session_error",
+        description: `Invalid session ID: ${m.sessionId}`,
+        details: null,
+      }, conn.clientId, env.sequenceNumber));
     }
   }
 
@@ -445,7 +451,8 @@ export class CastPresentationHandler {
         }
       }
       if (failed !== null) {
-        conn.deliver(envelope("error", { code: failed.code, description: failed.description ?? null, details: null }, conn.clientId, seq));
+        // Chromium's SendResultResponse never reports the real cause.
+        conn.deliver(envelope("error", { code: "internal_error", description: "unknown error", details: null }, conn.clientId, seq));
       } else {
         conn.deliver(envelope("v2_message", null, conn.clientId, seq));
       }
@@ -454,7 +461,7 @@ export class CastPresentationHandler {
     if (type === "STOP") {
       const res = await this.service.handle(sender, "stopSession", { sessionId: m.sessionId as string });
       if (!res.ok) {
-        conn.deliver(envelope("error", { code: res.code, description: res.description ?? null, details: null }, conn.clientId, seq));
+        conn.deliver(envelope("error", { code: "internal_error", description: "unknown error", details: null }, conn.clientId, seq));
         return;
       }
       conn.deliver(envelope("v2_message", null, conn.clientId, seq));
@@ -478,13 +485,11 @@ export class CastPresentationHandler {
         namespace: MEDIA_NAMESPACE,
         message: JSON.stringify(body),
       });
-      if (!res.ok) {
-        conn.pendingMedia.delete(requestId);
-        conn.deliver(envelope("error", { code: res.code, description: res.description ?? null, details: null }, conn.clientId, seq));
-      }
+      // A request that could not be sent gets no reply, as in Chromium (SendMediaRequestToReceiver returns no id).
+      if (!res.ok) conn.pendingMedia.delete(requestId);
       return;
     }
-    // Anything else: ignore.
+    // Anything else is dropped without a reply, as Chromium's HandleV2ProtocolMessage does (it only logs).
   }
 
   private async handleLeave(conn: Conn, env: ParsedEnvelope): Promise<void> {
