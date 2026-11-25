@@ -25,6 +25,7 @@
   origin. An iframe that navigates parks its sessions; a removed iframe or a navigating page ends them. Needs
   `nodeIntegrationInSubFrames: true` in the window's `webPreferences` so the preload runs in iframes; without it nothing
   changes. `mode: "chromecast"` stays main-frame only.
+- Main-process API on the cast manager, modelled on Chrome's Media Router: sinks and routes observers, `terminateRoute`, `detachRoute`, route volume control, and a third `selectDevice` argument that streams devices found while the picker is open. See docs/MAIN-API.md.
 
 ## 0.3.1
 

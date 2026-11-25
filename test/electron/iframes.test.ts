@@ -1,7 +1,7 @@
 // Frames as senders: every frame of a webContents (main frame or iframe) is its own controlling context.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCastManager, type CastManagerOptions, type IpcMainLike } from "../../src/electron/main.ts";
+import { createCastManager, type CastManagerOptions, type IpcMainLike, type MediaRoute } from "../../src/electron/main.ts";
 import { MEDIA_NAMESPACE } from "../../src/electron/presentation-envelope.ts";
 import { FakeDevices, FakeClient, FakeFrame, FramedWebContents, SPEAKER, TV, tick } from "./fakes.ts";
 
@@ -167,9 +167,10 @@ test("an iframe navigating parks only its own sessions, and the reloaded frame r
   // the new document in the same frame is the same sender, so it can reconnect to its parked session
   const again = await pcall(wc, sub, "reconnect", { connectionId: "conn-sub-2", urls: [URL1], presentationId: started.value.id });
   assert.equal(again.ok, true, JSON.stringify(again));
-  // the main frame (another sender, another origin) cannot reconnect to the iframe's session
-  const stolen = await pcall(wc, wc.main, "reconnect", { connectionId: "conn-x", urls: [URL1], presentationId: started.value.id });
-  assert.equal(stolen.ok, false);
+  // joining by id checks no origin (AppActivity::CanJoinSession: the app and the client only), so another frame that
+  // knows the id can join, as in Chrome
+  const other = await pcall(wc, wc.main, "reconnect", { connectionId: "conn-x", urls: [URL1], presentationId: started.value.id });
+  assert.equal(other.ok, true, JSON.stringify(other));
   await manager.dispose();
 });
 
@@ -241,4 +242,80 @@ test("main-frame behaviour is unchanged for a webContents without a frame tree",
   assert.equal(r.ok, true);
   assert.ok(sent.length > 0);
   await manager.dispose();
+});
+
+test("routes report frames as their webContents: an iframe's route parks and ends with its frame", async () => {
+  const { pcall, manager } = setup();
+  const wc = new FramedWebContents(5, MAIN);
+  let sub = wc.addFrame(EMBED);
+  const seen: MediaRoute[][] = [];
+  manager.registerMediaRoutesObserver({ onRoutesUpdated: (r) => seen.push(r) });
+  await pcall(wc, wc.main, "start", { connectionId: "conn-main", urls: [URL1] });
+  const started = await pcall(wc, sub, "start", { connectionId: "conn-sub", urls: [URL1] });
+
+  const byOrigin = () => Object.fromEntries(manager.getRoutes().map((r) => [r.origin, r]));
+  assert.deepEqual(manager.getRoutes().map((r) => r.members), [[5], [5]], "the iframe's synthetic sender id is not exposed");
+  assert.equal(seen.at(-1)?.length, 2);
+
+  sub = wc.navigate(sub, "https://embed.example/player2");
+  await tick();
+  const parked = byOrigin()["https://embed.example"]!;
+  assert.deepEqual([parked.members, parked.parkedSenders, parked.parked], [[], [5], true]);
+  assert.deepEqual(seen.at(-1)?.find((r) => r.origin === "https://embed.example")?.parkedSenders, [5], "observers were told");
+  assert.equal(byOrigin()["https://music.youtube.com"]!.parked, false);
+
+  // the reloaded frame rejoins, and the route has a page again
+  const joined = await pcall(wc, sub, "reconnect", { connectionId: "c2", urls: [URL1], presentationId: started.value.id });
+  assert.equal(joined.ok, true, JSON.stringify(joined));
+  assert.deepEqual(byOrigin()["https://embed.example"]!.members, [5]);
+
+  wc.removeFrame(sub);
+  wc.emit("did-frame-navigate", {}, MAIN, 200, "OK", false, 999, 999);
+  await tick();
+  assert.deepEqual(manager.getRoutes().map((r) => r.origin), ["https://music.youtube.com"]);
+  assert.equal(seen.at(-1)?.length, 1, "observers were told the iframe's route ended");
+  await manager.dispose();
+});
+
+test("the picker's signal aborts when the subframe that asked navigates or is removed", async () => {
+  const signals: AbortSignal[] = [];
+  const { pcall, manager } = setup({
+    selectDevice: (devices, _request, picker) =>
+      new Promise((resolve) => {
+        signals.push(picker.signal);
+        picker.signal.addEventListener("abort", () => resolve(null));
+        void devices;
+      }),
+  });
+  const wc = new FramedWebContents(5, MAIN);
+  let sub = wc.addFrame(EMBED);
+
+  const first = pcall(wc, sub, "start", { connectionId: "conn-1", urls: [URL1] });
+  await tick();
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]!.aborted, false);
+  sub = wc.navigate(sub, "https://embed.example/player2");
+  await tick();
+  assert.equal(signals[0]!.aborted, true, "aborted by the iframe's navigation");
+  assert.equal((await first).ok, false);
+
+  const second = pcall(wc, sub, "start", { connectionId: "conn-2", urls: [URL1] });
+  await tick();
+  assert.equal(signals[1]!.aborted, false);
+  wc.removeFrame(sub);
+  wc.emit("did-frame-navigate", {}, MAIN, 200, "OK", false, 999, 999);
+  await tick();
+  assert.equal(signals[1]!.aborted, true, "aborted when the iframe was removed");
+  assert.equal((await second).ok, false);
+
+  // a different frame's picker is not touched by another frame's navigation
+  const other = wc.addFrame("https://other.example/x");
+  const third = pcall(wc, wc.main, "start", { connectionId: "conn-3", urls: [URL1] });
+  await tick();
+  wc.navigate(other, "https://other.example/y");
+  await tick();
+  assert.equal(signals[2]!.aborted, false);
+  await manager.dispose();
+  assert.equal(signals[2]!.aborted, true);
+  await third;
 });

@@ -77,7 +77,9 @@ for that and auto-join does not find it (Chrome's auto-join only joins sessions 
 A page rejoins it only when it knows the session id, which Google's SDK exposes as `session.sessionId`: the page keeps
 the id (in `localStorage`, say) and calls `chrome.cast.requestSessionById(id)` (or `cast.framework`'s equivalent) at
 startup. electron-cast then asks the known devices which one runs that session and joins it if the app matches, with
-no origin check, exactly as Chrome does. If the device no longer runs the session, the call fails like in Chrome.
+no origin check (Chrome's `AppActivity::CanJoinSession` checks only the app id and that the client is not
+already connected), also when this run already holds the session; `allowOrigin` still applies first. If the device no
+longer runs the session, the call fails like in Chrome.
 `mode: "chromecast"` is unchanged and does not do this.
 
 **Iframes (presentation mode only).** Google's SDK also works inside an iframe (an embedded player, say). As in Chrome,
@@ -160,6 +162,8 @@ The package root exports every layer, if you want to use them without Electron:
 - `CastSessionService`: the session logic behind the Electron layer, with no Electron dependency.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
+
+To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
 
 ## License
 

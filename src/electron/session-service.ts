@@ -2,6 +2,9 @@ import type { BridgeEvent, BridgeResult, SessionSnapshot, VolumeSnapshot } from 
 import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
 import { CastTimeoutError } from "../client/index.ts";
+import {
+  ObservedMap, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
+} from "./manager-api.ts";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
 export function capabilityNames(bits: number): string[] {
@@ -71,7 +74,7 @@ export interface CastSessionServiceOptions {
    * Ask the user which device to cast to. Resolves a device, `null` (cancel) or
    * `"stop"` (stop `request.session`, the sender's current session, if it has one).
    */
-  selectDevice(devices: CastDevice[], request: CastRequestInfo): Promise<DeviceChoice>;
+  selectDevice(devices: CastDevice[], request: CastRequestInfo, picker: DevicePickerContext): Promise<DeviceChoice>;
   allowOrigin?(origin: string): boolean;
   emit(senderId: number, event: BridgeEvent): void;
 }
@@ -100,6 +103,13 @@ interface SessionRecord {
   stoppingBy?: number;
 }
 
+interface PendingRequest {
+  discard: { value: boolean };
+  cancelled: { value: boolean };
+  /** The live picker context while the picker is open. */
+  picker?: { close(): void };
+}
+
 interface ClientEntry {
   client: CastClientLike;
   device: CastDevice;
@@ -118,6 +128,8 @@ const CAPABILITY_BITS: Record<string, number> = {
 };
 
 const DEFAULT_TIMEOUT_MS = 60000;
+/** The caller id of a stop that comes from the main process, not from a page. */
+const MAIN_CALLER = -1;
 
 /** A request that must be reported as a specific chrome.cast error code. */
 class MappedError extends Error {
@@ -234,14 +246,17 @@ function sameValue(a: unknown, b: unknown): boolean {
 export class CastSessionService {
   private readonly options: CastSessionServiceOptions;
   private readonly senders = new Map<number, SenderRecord>();
-  private readonly sessions = new Map<string, SessionRecord>();
+  private readonly sessions = new ObservedMap<string, SessionRecord>((kind, rec) => this.notifySession(kind, rec));
+  private readonly sessionListeners = new Set<() => void>();
+  private readonly sinks;
   private readonly clients = new Map<string, ClientEntry>();
-  private readonly pendingRequests = new Map<number, { discard: { value: boolean }; cancelled: { value: boolean } }>();
+  private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
   private disposed = false;
 
   constructor(options: CastSessionServiceOptions) {
     this.options = options;
+    this.sinks = createSinksObservers(options.devices);
     options.devices.on("deviceUp", this.deviceListener);
     options.devices.on("deviceDown", this.deviceListener);
     options.devices.on("deviceChanged", this.deviceListener);
@@ -260,7 +275,7 @@ export class CastSessionService {
         case "requestSession":
           return await this.handleRequestSession(sender, params);
         case "joinSession":
-          return this.handleJoinSession(sender, params);
+          return this.handleJoinSession(sender, params, true);
         case "joinRunningSession":
           return await this.handleJoinRunningSession(sender, params);
         case "sendMessage":
@@ -301,12 +316,16 @@ export class CastSessionService {
     for (const rec of this.sessions.values()) {
       if (!rec.members.delete(senderId)) continue;
       rec.parked.add(senderId);
+      this.notifySession("updated", rec);
     }
   }
 
   private forgetSender(senderId: number): void {
     const pending = this.pendingRequests.get(senderId);
-    if (pending !== undefined) pending.cancelled.value = true;
+    if (pending !== undefined) {
+      pending.cancelled.value = true;
+      pending.picker?.close();
+    }
     this.pendingRequests.delete(senderId);
     this.senders.delete(senderId);
   }
@@ -315,10 +334,12 @@ export class CastSessionService {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.sinks.dispose();
     const d = this.options.devices;
     d.off("deviceUp", this.deviceListener);
     d.off("deviceDown", this.deviceListener);
     d.off("deviceChanged", this.deviceListener);
+    for (const pending of this.pendingRequests.values()) pending.picker?.close();
     const entries = [...this.clients.values()];
     this.clients.clear();
     for (const entry of entries) entry.client.close();
@@ -340,6 +361,7 @@ export class CastSessionService {
       if (p.autoJoinPolicy === "origin_scoped" || (p.autoJoinPolicy === "tab_and_origin_scoped" && sameTab)) {
         rec.parked.delete(sender.id);
         rec.members.add(sender.id);
+        this.notifySession("updated", rec);
         joined.push(this.snapshotOf(rec));
       }
     }
@@ -352,7 +374,8 @@ export class CastSessionService {
     if (this.pendingRequests.has(sender.id)) return bad("invalid_parameter");
     const discard = { value: false };
     const cancelled = { value: false };
-    this.pendingRequests.set(sender.id, { discard, cancelled });
+    const pending: PendingRequest = { discard, cancelled };
+    this.pendingRequests.set(sender.id, pending);
     try {
       const eligible = this.options.devices.devices().filter((d) => deviceMatches(d, p.capabilities));
       if (eligible.length === 0) return bad("receiver_unavailable");
@@ -367,10 +390,15 @@ export class CastSessionService {
         request.session = { sessionId: current.app.sessionId, deviceId: current.device.id };
       }
       let choice: DeviceChoice;
+      // The picker gets live device updates until it answers; closing aborts its signal.
+      const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
+      pending.picker = pick;
       try {
-        choice = await this.options.selectDevice(eligible, request);
+        choice = await this.options.selectDevice(eligible, request, pick.context);
       } catch (err) {
         return bad("session_error", describe(err));
+      } finally {
+        pick.close();
       }
       if (choice === null) return bad("cancel");
       if (choice === "stop") {
@@ -408,13 +436,19 @@ export class CastSessionService {
     }
   }
 
-  private handleJoinSession(sender: SenderInfo, params: unknown): BridgeResult {
+  /**
+   * `checkOrigin` is joinSession's own rule (mode "chromecast", which is frozen and has no
+   * Chromium counterpart). Joining by id, as Chrome's Presentation API path does, has none: AppActivity::CanJoinSession checks only
+   * the app and that the client is not connected yet.
+   */
+  private handleJoinSession(sender: SenderInfo, params: unknown, checkOrigin: boolean): BridgeResult {
     const p = parseSessionId(params);
     if (p === null) return bad("invalid_parameter");
     const rec = this.sessions.get(p.sessionId);
-    if (rec === undefined || rec.origin !== sender.origin) return bad("session_error");
+    if (rec === undefined || (checkOrigin && rec.origin !== sender.origin)) return bad("session_error");
     rec.parked.delete(sender.id);
     rec.members.add(sender.id);
+    this.notifySession("updated", rec);
     return good(this.snapshotOf(rec));
   }
 
@@ -535,7 +569,8 @@ export class CastSessionService {
 
   /**
    * Join a session by its id, as Chrome's Media Router does for `reconnect("cast-session_<id>")`. A session this
-   * service already holds is joined as joinSession does. Otherwise the id is looked up in the receiver status of
+   * service already holds is joined without an origin check, like one found on a device. Otherwise the id is looked up
+   * in the receiver status of
    * every known device: Chrome's CastSessionTracker learns the sessions running on all sinks and
    * CastActivityManager::AddNonLocalActivity makes them joinable by id (and only by id: auto-join skips them, and no
    * origin is checked). `appId`, when given, must be the session's app (CastActivity::CanJoinSession). Unlike Chrome
@@ -548,7 +583,7 @@ export class CastSessionService {
     const known = this.sessions.get(p.sessionId);
     if (known !== undefined) {
       if (appId !== undefined && known.appId !== appId) return bad("session_error");
-      return this.handleJoinSession(sender, params);
+      return this.handleJoinSession(sender, params, false);
     }
     const found = await this.findRunningSession(p.sessionId);
     if (found === undefined) return bad("session_error");
@@ -556,7 +591,7 @@ export class CastSessionService {
     try {
       if (this.disposed || (appId !== undefined && app.appId !== appId)) return bad("session_error");
       // Another join of the same session finished while this one looked.
-      if (this.sessions.has(app.sessionId)) return this.handleJoinSession(sender, params);
+      if (this.sessions.has(app.sessionId)) return this.handleJoinSession(sender, params, false);
       entry.client.connectTransport(app.transportId);
       const rec: SessionRecord = {
         device: entry.device,
@@ -698,6 +733,8 @@ export class CastSessionService {
       rec.client.closeTransport(rec.app.transportId);
       this.sessions.delete(rec.app.sessionId);
       this.cleanupIdle(rec.device.id, rec.client);
+    } else {
+      this.notifySession("updated", rec);
     }
   }
 
@@ -741,6 +778,7 @@ export class CastSessionService {
       const snapshot = this.snapshotOf(rec);
       if (!sameValue(snapshot, rec.lastSnapshot)) {
         rec.lastSnapshot = snapshot;
+        this.notifySession("updated", rec);
         for (const member of rec.members) {
           this.emitTo(member, { type: "sessionUpdated", session: snapshot });
         }
@@ -800,6 +838,81 @@ export class CastSessionService {
     if (entry === undefined || entry.client !== client) return;
     this.clients.delete(deviceId);
     client.close();
+  }
+
+  // Main-process API (see manager-api.ts). Control goes through the paths the pages use, so pages see the same events.
+
+  /** Every live session, parked ones included. */
+  mediaRoutes(): MediaRoute[] {
+    return [...this.sessions.values()].map((rec) => this.routeOf(rec));
+  }
+
+  /** Be told when a session starts, changes (status, volume, pages) or ends; returns the unsubscribe function. */
+  observeSessions(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => void this.sessionListeners.delete(listener);
+  }
+
+  /** Stop a session on the device for every page, as if a member had called stopSession. */
+  async terminateSession(sessionId: string): Promise<BridgeResult> {
+    const rec = this.sessions.get(sessionId);
+    if (rec === undefined) return bad("session_error", "unknown session");
+    // No page is the caller, so every member is told sessionEnded.
+    return this.stopSessionRecord(rec, MAIN_CALLER, false);
+  }
+
+  async setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult> {
+    const rec = this.sessions.get(sessionId);
+    if (rec === undefined) return bad("session_error", "unknown session");
+    try {
+      await rec.client.setVolume(volume);
+    } catch (err) {
+      return bad("session_error", describe(err));
+    }
+    return good(undefined);
+  }
+
+  /** Detach every page from the session and close its transport; the receiver app keeps running. */
+  detachSession(sessionId: string): BridgeResult {
+    const rec = this.sessions.get(sessionId);
+    if (rec === undefined) return bad("session_error", "unknown session");
+    for (const member of rec.members) {
+      this.emitTo(member, { type: "sessionEnded", sessionId, status: "disconnected" });
+    }
+    rec.members.clear();
+    rec.parked.clear();
+    rec.client.closeTransport(rec.app.transportId);
+    this.sessions.delete(sessionId);
+    this.cleanupIdle(rec.device.id, rec.client);
+    return good(undefined);
+  }
+
+  /** Tell the route observers something changed (the arguments only fit the ObservedMap callback). */
+  private notifySession(_kind: "started" | "updated" | "ended", _rec: SessionRecord): void {
+    if (this.disposed) return;
+    for (const listener of [...this.sessionListeners]) {
+      try {
+        listener();
+      } catch (err) {
+        console.error("electron-cast: a session listener failed", err);
+      }
+    }
+  }
+
+  private routeOf(rec: SessionRecord): MediaRoute {
+    return {
+      id: rec.app.sessionId,
+      mediaSource: `cast:${rec.appId}`,
+      sinkId: rec.device.id,
+      description: rec.app.statusText || rec.app.displayName,
+      appId: rec.appId,
+      displayName: rec.app.displayName,
+      origin: rec.origin,
+      volume: { level: rec.lastVolume.level ?? null, muted: rec.lastVolume.muted ?? null },
+      members: [...rec.members],
+      parkedSenders: [...rec.parked],
+      parked: rec.members.size === 0,
+    };
   }
 
   private snapshotOf(rec: SessionRecord): SessionSnapshot {

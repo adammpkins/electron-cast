@@ -99,11 +99,12 @@ test("an unreachable device does not stop the others from being searched", async
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT })).ok, true);
 });
 
-test("a session this run already holds is joined as joinSession does, with the origin check", async () => {
+test("a session this run already holds is joined by id with no origin check, as Chrome does, while joinSession keeps its own rule", async () => {
   const { service, sessionId } = await restarted();
   assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT })).ok, true);
   assert.equal((await service.handle(PAGE2, "joinRunningSession", { sessionId, appId: YT })).ok, true);
-  assert.equal((await service.handle(EVIL, "joinRunningSession", { sessionId, appId: YT })).ok, false);
+  assert.equal((await service.handle(EVIL, "joinRunningSession", { sessionId, appId: YT })).ok, true, "AppActivity::CanJoinSession checks only the app");
+  assert.equal((await service.handle({ id: 4, origin: "https://evil2.example" }, "joinSession", { sessionId })).ok, false, "joinSession (mode chromecast) is unchanged");
 });
 
 test("allowOrigin gates joinRunningSession before any device is contacted", async () => {
@@ -111,4 +112,22 @@ test("allowOrigin gates joinRunningSession before any device is contacted", asyn
   const r = await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT });
   assert.equal(r.ok === false && r.code, "extension_missing");
   assert.equal(clients.length, 0);
+});
+
+test("a session found on a device appears as a route and route observers hear of it", async () => {
+  const { service, sessionId, app } = await restarted();
+  let calls = 0;
+  service.observeSessions(() => void calls++);
+  assert.deepEqual(service.mediaRoutes(), []);
+  assert.equal((await service.handle(PAGE, "joinRunningSession", { sessionId, appId: YT })).ok, true);
+  assert.ok(calls > 0, "observers were notified");
+  const [route] = service.mediaRoutes();
+  assert.equal(route?.id, sessionId);
+  assert.equal(route?.sinkId, TV.id);
+  assert.equal(route?.mediaSource, `cast:${YT}`);
+  assert.deepEqual([route?.members, route?.parked, route?.description], [[PAGE.id], false, app.statusText || app.displayName]);
+  const before = calls;
+  await service.handle(PAGE2, "joinRunningSession", { sessionId, appId: YT });
+  assert.ok(calls > before, "a second page joining is a route update");
+  assert.deepEqual(service.mediaRoutes()[0]?.members, [PAGE.id, PAGE2.id]);
 });
