@@ -250,6 +250,21 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
     urls: string[];
     constructor(urls: any) {
       super();
+      // PresentationRequest::Create (third_party/blink/renderer/modules/presentation/presentation_request.cc) throws a
+      // SecurityError first when the document is sandboxed without allow-presentation (WebSandboxFlags::kPresentationController).
+      // A page cannot read its own sandbox flags; the one place they show is the embedding <iframe sandbox> attribute, which
+      // `frameElement` exposes only to a same-origin parent (an iframe that also has allow-same-origin). A cross-origin or
+      // CSP-sandboxed frame is not detected here: the stand-in cannot do better than the platform lets a page see.
+      let frameElement: any = null;
+      try {
+        frameElement = g.frameElement;
+      } catch {
+        // a cross-origin parent: not readable
+      }
+      if (frameElement && frameElement.tagName === "IFRAME" && frameElement.hasAttribute("sandbox")
+          && !frameElement.sandbox.contains("allow-presentation")) {
+        throw new DE("The document is sandboxed and lacks the 'allow-presentation' flag.", "SecurityError");
+      }
       const list: string[] = Array.isArray(urls) ? urls.slice() : [urls];
       if (list.length === 0) {
         throw new DE("PresentationRequest requires at least one url.", "NotSupportedError");
