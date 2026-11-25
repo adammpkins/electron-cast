@@ -267,6 +267,13 @@ electron-cast does the same:
 - The preload only runs in subframes if the app sets `webPreferences.nodeIntegrationInSubFrames: true`; without it
   iframes have no stand-in and behave as before. See the README.
 - `mode: "chromecast"` (`<channel>:call`) stays main-frame only and refuses iframe calls.
+- **Sandboxed iframes.** Blink's `PresentationRequest::Create` throws a `SecurityError` in a document whose sandbox lacks
+  `allow-presentation` (`WebSandboxFlags::kPresentationController`, `presentation_request.cc`). A page cannot read its own
+  sandbox flags, so the stand-in checks the one place they show: the `sandbox` attribute of its `<iframe>`, through
+  `frameElement`, which a page may read only when its parent is same-origin (that is, when the iframe has `allow-same-origin`).
+  Deviation, forced by the platform: a cross-origin parent, a `Content-Security-Policy: sandbox` header and an `<object>`
+  are not seen, so there the stand-in lets the page construct a request where Chrome would refuse. The app's `allowOrigin`
+  and `selectDevice` are still the gate, and an opaque-origin frame fails `allowOrigin` unless the app allows `"null"`.
 
 Not done: Chrome also cancels a pending start whose frame navigated to another origin while the picker was open
 (`HandleStartPresentationResponse` in the controller delegate); here a pending start is cancelled when the frame is
