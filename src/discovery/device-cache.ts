@@ -215,8 +215,12 @@ export class CastDeviceCache {
       const srv = srvByInstance.get(ik);
       const txt = txtByInstance.get(ik);
       if (!srv || !txt) continue;
+      // CreateCastMediaSink: a device whose TXT has no `id`, or no `fn` (kMissingID, kMissingFriendlyName), is not a sink.
+      // Chrome requires nothing else in the TXT record; the address check below is its kMissingOrInvalidIPAddress.
       const id = txt.record.data["id"];
       if (!id) continue;
+      const fn = txt.record.data["fn"];
+      if (!fn) continue;
       const addrs = addrsByHost.get(srv.record.data.target.toLowerCase());
       if (!addrs || (addrs.v4.length + addrs.v6.length) === 0) continue;
       const v4 = newestFirst(addrs.v4);
@@ -224,13 +228,10 @@ export class CastDeviceCache {
       // IPv4 first (Chromium's Cast discovery only resolves A records), then global IPv6, then link-local.
       const ordered = [...v4, ...v6.filter((a) => !isLinkLocal(a)), ...v6.filter(isLinkLocal)];
       const txtData = txt.record.data;
-      const fn = txtData["fn"];
-      const dot = instance.indexOf(".");
-      const label = dot === -1 ? instance : instance.slice(0, dot);
       const capabilities = parseCapabilities(txtData["ca"]);
       const device: CastDevice = {
         id,
-        name: fn && fn !== "" ? fn : label,
+        name: fn,
         model: txtData["md"] ?? "",
         host: ordered[0] ?? "",
         addresses: ordered,

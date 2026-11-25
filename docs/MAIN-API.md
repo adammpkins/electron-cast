@@ -420,6 +420,7 @@ device that mDNS also finds is a second sink until the same-address rule removes
 | `AccessCodeOptions` | The `accessCode` option: `enabled`, `deviceDuration` (seconds), `store`, and optional `log` and `now` (tests). |
 | `AccessCodeDevice`, `AccessCodeCapabilities` | What `addSinkByAddress` takes: `id`, `name`, `capabilities` (`videoOut`, `videoIn`, `audioOut`, `audioIn`, `devMode`), `ipV6Address` or `ipV4Address`, and `port`. |
 | `AddSinkResult`, `SinkCreationFailure` | How adding ended: `ok` with the `sinkId`, or `response_malformed`, `sink_creation_error` (with its `reason`) or `channel_open_error`. |
+| `ReceiverIdHashTokenStore` | The `receiverIdHashToken` option: `load` and `save` the token that salts receiver labels (Chrome's `media_router.receiver_id_hash_token` pref), so a page's remembered `receiverLabel` still matches after a restart. Without it the token lasts for the process. |
 | `AccessCodeRememberedSink`, `AccessCodeStore` | A remembered device, and where they are kept between runs (`load`, `save`). |
 | `AccessCodeCastDisabledError` | What `addSinkByAddress` rejects with unless access code casting is enabled. |
 | `createAccessCodeSink(device)` | Chrome's checks on a device, without opening anything: the sink it would be, or why it cannot be one. |

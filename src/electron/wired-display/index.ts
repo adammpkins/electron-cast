@@ -1,6 +1,7 @@
 // Wired display support: extra screens as presentation sinks, with a window on the screen as the receiver. See
 // docs/DESIGN.md ("Wired displays") for the mapping to Chrome's WiredDisplayMediaRouteProvider.
 import { WiredDisplayControllers } from "./controller.ts";
+import { sortSinks } from "../sink-order.ts";
 import { WiredDisplayProvider, type ReceiverWindowFactory, type ScreenLike, type WiredDisplayRoute } from "./provider.ts";
 import type { RectLike, WiredDisplaySink } from "./displays.ts";
 
@@ -119,7 +120,7 @@ export function createWiredDisplay(options: WiredDisplayOptions): WiredDisplay {
   // MediaRouterUI::GetEnabledSinks hides the sink of the display the dialog is on
   const sinksFor = (webContents: unknown): WiredDisplaySink[] => {
     const exclude = displayIdOf(webContents);
-    return provider.sinks().filter((s) => s.display.id !== exclude);
+    return sortSinks(provider.sinks().filter((s) => s.display.id !== exclude));
   };
   const observeSinksFor = (webContents: unknown, listener: (sinks: WiredDisplaySink[]) => void): (() => void) => {
     const keyOf = (sinks: WiredDisplaySink[]): string => sinks.map((s) => s.id).join(",");

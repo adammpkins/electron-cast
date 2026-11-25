@@ -113,14 +113,16 @@ test("returns unknown record types with their raw bytes", () => {
   assert.ok(rec && Buffer.isBuffer(rec.data));
 });
 
-test("parses TXT entries: lowercase keys, first wins, bare keys, '=' in values, empty strings skipped", () => {
+// CreateCastMediaSink (media_sink_util.cc): `service_data[key] = val` for each entry with an '=', so keys are case-sensitive
+// and the last one wins, and an entry without '=' is skipped
+test("parses TXT entries: case-sensitive keys, last wins, bare entries skipped, '=' in values, empty strings skipped", () => {
   const pkt = Buffer.concat([
     header({ an: 1 }),
     rr("x.local", 16, 1, 120, txt(["FN=Kitchen", "fn=ignored", "flag", "", "url=a=b", "UTF=héllo"])),
   ]);
   const [rec] = decodeDnsPacket(pkt).answers;
   assert.equal(rec?.type, "TXT");
-  assert.deepEqual({ ...(rec?.data as Record<string, string>) }, { fn: "Kitchen", flag: "", url: "a=b", utf: "héllo" });
+  assert.deepEqual({ ...(rec?.data as Record<string, string>) }, { FN: "Kitchen", fn: "ignored", url: "a=b", UTF: "héllo" });
 });
 
 test("TXT data is a plain object with no prototype keys", () => {

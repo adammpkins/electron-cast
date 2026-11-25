@@ -1,19 +1,21 @@
 // Codec between Chromium's private Cast "router message" envelope (what Google's clank.js sender speaks over a
 // PresentationConnection) and electron-cast's snapshot types. Pure module: no Electron imports.
 import { createHash } from "node:crypto";
+import { parseCastMediaSource, type CastMediaSourceInfo } from "./cast-media-source.ts";
 import type { ReceiverSnapshot, SessionSnapshot } from "../polyfill/bridge-types.ts";
 
 /** The Cast media namespace; the only reserved namespace kept by {@link filterNamespaces}. */
 export const MEDIA_NAMESPACE = "urn:x-cast:com.google.cast.media";
 
-/** The fields parsed out of a presentation request URL. */
-export interface PresentationUrl {
+/**
+ * The fields parsed out of a presentation request URL by `CastMediaSource::FromMediaSourceId`
+ * (see cast-media-source.ts, which holds the parsing and its Chromium citations).
+ */
+export interface PresentationUrl extends CastMediaSourceInfo {
+  /** The first app of the URL: the one launched when the sink is not known yet (`appInfos[0]`). */
   appId: string;
+  /** The capability names of the first app. */
   capabilities: string[];
-  clientId: string | null;
-  autoJoinPolicy: string;
-  defaultActionPolicy: string;
-  launchTimeout: number | null;
 }
 
 /** A validated inbound router message, with `timeoutMillis` dropped and object messages null-stripped. */
@@ -24,96 +26,15 @@ export interface ParsedEnvelope {
   clientId: string;
 }
 
-const APP_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
-
-/** Splits `<appId>(cap,cap)` into its parts; no suffix means no capabilities. */
-function splitAppId(raw: string): { appId: string; capabilities: string[] } {
-  const open = raw.indexOf("(");
-  if (open === -1 || !raw.endsWith(")")) return { appId: raw, capabilities: [] };
-  return { appId: raw.slice(0, open), capabilities: raw.slice(open + 1, -1).split(",").filter((c) => c !== "") };
-}
-
-/** A positive integer millisecond count, or null for anything else. */
-function parseLaunchTimeout(raw: string | null): number | null {
-  if (raw === null || !/^\d+$/.test(raw)) return null;
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
 /**
  * Parses a presentation request URL (the legacy `https://google.com/cast#__castAppId__=...` form or
  * `cast:<appId>?...`) into its launch fields, or null for anything that is not one of those forms.
  */
 export function parsePresentationUrl(url: string): PresentationUrl | null {
-  if (typeof url !== "string" || url.length === 0 || url.length > 4096) return null;
-  const legacyPrefix = "https://google.com/cast#";
-  if (url.startsWith(legacyPrefix)) {
-    let appId: string | null = null;
-    let capabilities: string[] = [];
-    let clientId: string | null = null;
-    let autoJoinPolicy = "tab_and_origin_scoped";
-    let defaultActionPolicy = "create_session";
-    let launchTimeout: number | null = null;
-    for (const part of url.slice(legacyPrefix.length).split("/")) {
-      const eq = part.indexOf("=");
-      const key = eq === -1 ? part : part.slice(0, eq);
-      const value = eq === -1 ? "" : part.slice(eq + 1);
-      switch (key) {
-        case "__castAppId__": {
-          const split = splitAppId(value);
-          appId = split.appId;
-          capabilities = split.capabilities;
-          break;
-        }
-        case "__castClientId__":
-          clientId = value === "" ? null : value;
-          break;
-        case "__castAutoJoinPolicy__":
-          if (value !== "") autoJoinPolicy = value;
-          break;
-        case "__castDefaultActionPolicy__":
-          if (value !== "") defaultActionPolicy = value;
-          break;
-        case "__castLaunchTimeout__":
-          launchTimeout = parseLaunchTimeout(value);
-          break;
-        case "__dialPostData__":
-          // Its base64 value may contain "/", which would break the split: stop parsing here.
-          return appId !== null && APP_ID_RE.test(appId)
-            ? { appId, capabilities, clientId, autoJoinPolicy, defaultActionPolicy, launchTimeout }
-            : null;
-        default:
-          // Unknown keys and __dialAppName__ are ignored.
-          break;
-      }
-    }
-    return appId !== null && APP_ID_RE.test(appId)
-      ? { appId, capabilities, clientId, autoJoinPolicy, defaultActionPolicy, launchTimeout }
-      : null;
-  }
-  if (url.startsWith("cast:")) {
-    const rest = url.slice("cast:".length);
-    const q = rest.indexOf("?");
-    const split = splitAppId(q === -1 ? rest : rest.slice(0, q));
-    if (!APP_ID_RE.test(split.appId)) return null;
-    const params = new URLSearchParams(q === -1 ? "" : rest.slice(q + 1));
-    const param = (k: string): string | null => {
-      const v = params.get(k);
-      return v === null || v === "" ? null : v;
-    };
-    const queryCaps = param("capabilities");
-    return {
-      appId: split.appId,
-      capabilities: split.capabilities.length > 0
-        ? split.capabilities
-        : queryCaps !== null ? queryCaps.split(",").filter((c) => c !== "") : [],
-      clientId: param("clientId"),
-      autoJoinPolicy: param("autoJoinPolicy") ?? "tab_and_origin_scoped",
-      defaultActionPolicy: param("defaultActionPolicy") ?? "create_session",
-      launchTimeout: parseLaunchTimeout(param("launchTimeout")),
-    };
-  }
-  return null;
+  const source = parseCastMediaSource(url);
+  if (source === null) return null;
+  const first = source.appInfos[0]!;
+  return { ...source, appId: first.appId, capabilities: first.capabilities };
 }
 
 /** Deep-copies a value, dropping every object property whose value is null (null array elements are kept). */

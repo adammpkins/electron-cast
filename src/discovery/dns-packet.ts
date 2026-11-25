@@ -111,9 +111,11 @@ function parseTxt(buf: Uint8Array, start: number, end: number): Record<string, s
     const entry = utf8(buf.subarray(pos, pos + len));
     pos += len;
     if (entry === "") continue;
+    // CreateCastMediaSink (chrome/browser/media/router/discovery/mdns/media_sink_util.cc): an entry without `=` is
+    // skipped, keys are case-sensitive, and the last entry for a key wins (`service_data[key] = val`)
     const eq = entry.indexOf("=");
-    const key = (eq === -1 ? entry : entry.slice(0, eq)).toLowerCase();
-    if (!(key in data)) data[key] = eq === -1 ? "" : entry.slice(eq + 1);
+    if (eq === -1) continue;
+    data[entry.slice(0, eq)] = entry.slice(eq + 1);
   }
   return data;
 }

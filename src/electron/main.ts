@@ -3,11 +3,12 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, PresentationError, type PresentationConnectionHandle } from "./presentation-handler.ts";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
   type CastManagerApi, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
+import { getReceiverIdHashToken, type ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
@@ -44,6 +45,7 @@ export {
 } from "./wired-display/index.ts";
 export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
 export type { NetworkMonitor } from "./network-monitor.ts";
+export type { ReceiverIdHashTokenStore } from "./receiver-id-token.ts";
 export type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
 export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 export type {
@@ -133,6 +135,12 @@ export interface CastManagerOptions {
    * imports Electron. See {@link WiredDisplayOptions}.
    */
   wiredDisplay?: WiredDisplayOptions;
+  /**
+   * Where the token that salts receiver labels is kept (Chrome: the profile pref `media_router.receiver_id_hash_token`), so
+   * a page that remembers a `receiverLabel` finds the same one after a restart. Without it the token is made again on
+   * each start. See {@link ReceiverIdHashTokenStore}.
+   */
+  receiverIdHashToken?: ReceiverIdHashTokenStore;
   /**
    * Adding a device by its address, as Chrome's access code casting adds the device a code resolved to (see
    * {@link CastManager.addSinkByAddress}). Off unless `enabled`, as Chrome's `AccessCodeCastEnabled` policy is.
@@ -298,8 +306,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       heartbeatTimeoutMs: params.livenessTimeoutMs,
       heartbeatIntervalMs: params.pingIntervalMs,
     }));
-  // The receiver labels of Cast and DIAL routes are hashed with one per-process token, as in Chrome.
-  const hashToken = randomBytes(16).toString("hex");
+  // The receiver labels of Cast and DIAL routes are hashed with one token, kept between runs when the app gives a store
+  // (Chrome keeps it in the profile's prefs).
+  const hashToken = getReceiverIdHashToken(options.receiverIdHashToken);
   const dialOption = options.dial ?? (options.discovery === undefined);
   // A DIAL sink whose processed UDN is a Cast sink's id is removed: CastMediaSinkServiceImpl removes it from the DIAL
   // sink service when the Cast channel opens (OnChannelOpenSucceeded) and when the DIAL sink comes after the Cast one

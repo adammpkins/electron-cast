@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Chrome parity
+
+- **Cast presentation URLs are read as Chrome reads them** (`CastMediaSource::FromMediaSource`). New fields:
+  `supportedAppTypes`, `appParams`, `invisibleSender`, `streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio`.
+  A legacy URL with several `__castAppId__` is no longer reduced to its last app: a sink is offered the URL when it has
+  one of the apps and its capabilities, and the first app it can run is launched. Values are unescaped as Chrome unescapes
+  them, an unknown `autoJoinPolicy` is `page_scoped` (it was `tab_and_origin_scoped`), and a `cast:` URL's `(caps)` suffix is
+  no longer split off the app id. Not yet tried on a real device.
+- **A device with no `fn` is not a sink** (`CreateCastMediaSink`: an empty or missing `id` or `fn`). It was listed under its
+  instance name. TXT keys are now case-sensitive and the last repeat wins, as in Chrome.
+- **Sinks are listed in Chrome's order** (`MediaSink::CompareUsingCollator`): by icon type, then collated name, then id.
+  Group speakers now come before single speakers.
+- **Receiver labels survive a restart when the app gives `receiverIdHashToken`** a store: a 64-byte token as Chrome keeps in
+  the profile (`GetReceiverIdHashToken`). It was a 16-byte token made at every start.
+
 ### Tested on real devices
 
 - **DIAL dedup tested with real Chromecasts.** With DIAL on, three Chromecasts that answer both mDNS and DIAL were each listed
