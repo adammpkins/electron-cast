@@ -71,14 +71,17 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `createClient` | `(device: CastDevice) => CastClientLike` | `new CastClient({ host: device.host, port: device.port, verifyDevice: verifyDevices !== false })` | Creates the connection to a device. Use it to pass `CastClient` options such as `tls`. When you give it, `verifyDevices` is ignored: pass `verifyDevice` to your own `CastClient`. |
 | `channel` | `string` | `"electron-cast"` | Prefix of the IPC channel names. Must match the preload's `channel`. |
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
-| `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is still listed by discovery and the picker; casting to it fails as for an unreachable device. |
+| `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is never listed (see [sinks](MAIN-API.md#sinks)). |
+| `sinks` | `CastSinkOptions` | Chrome's values | When and how channels to devices open and the list is reported: `openDelayMaxMs` (5000), `reportDelayMs` (3000), `retry` (`initialDelayMs` 15000, `maxAttempts` 3, `multiplyFactor` 1, `jitter` 0.5, `maxDelayMs` 30000) and `allowAllIps` (false: public and loopback addresses are skipped, as Chrome does). Each is Chrome's own setting (see [DESIGN.md](DESIGN.md#sinks-and-sessions-sink-servicets-session-trackerts)); mostly for tests. |
 
 #### `CastManager`
 
 | Member | Description |
 |---|---|
 | `start(): Promise<void>` | Starts discovery: opens an mDNS socket on every external IPv4 interface and on each adapter's IPv6 link-local address, and queries (see [Discovery](#discovery)). Safe to call more than once. Rejects only if the manager was disposed. |
-| `devices(): CastDevice[]` | The devices known right now. Fresh copies, sorted. |
+| `devices(): CastDevice[]` | The devices that can be cast to: those whose channel has opened and passed device authentication, as last reported (see [sinks](MAIN-API.md#sinks)). Not the same as what mDNS has heard. Fresh copies. |
+| `discoverSinksNow(): void` | Opens channels at once to every discovered device that has none, with no random delay (Chrome: `DiscoverSinksNow`). A device that gave up after its retries is only tried again by this or when discovery reports it again. |
+| `settled(): Promise<void>` | Resolves when no channel is being opened or waiting to be, and the list is reported. For tests and start-up. |
 | `dispose(): Promise<void>` | Removes the IPC handlers, stops discovery, closes every device connection and ends all sessions. Idempotent. A disposed manager cannot be restarted; create a new one. |
 | `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
 
@@ -137,8 +140,8 @@ not protect against.
   not find sessions started by an earlier run, and neither does electron-cast. The app keeps the session id (Google's
   SDK exposes it as `session.sessionId`) and the page calls `chrome.cast.requestSessionById(id)` at startup. The SDK
   turns that into `PresentationRequest.reconnect("cast-session_<id>")`, which reaches
-  [`joinRunningSession`](#joinrunningsession): electron-cast asks the known devices what they run and
-  joins the session if the app matches. This checks no origin (Chrome's `AppActivity::CanJoinSession` checks only the
+  [`joinRunningSession`](#joinrunningsession): electron-cast already knows what each device runs (it follows
+  every device's receiver status, as Chrome does) and joins the session if the app matches. This checks no origin (Chrome's `AppActivity::CanJoinSession` checks only the
   app and that the client is not already connected), but `allowOrigin` still applies first. If the device no longer
   runs the session, the call fails with `NotFoundError`. `mode: "chromecast"` does not do this.
 
@@ -346,12 +349,12 @@ pages hold, and pushes events through `options.emit`.
 ##### `joinRunningSession`
 
 Joins a session by id the way Chrome's Media Router does for `reconnect("cast-session_<id>")`. A session this service
-already holds is joined at once. Otherwise every known device is asked for its receiver status, and the first one
-running `sessionId` is connected to (the other connections are released); the session then belongs to the caller's
-origin. `appId`, when given, must be the session's app. No origin is compared with the session's (unlike
+already holds is joined at once. Otherwise the session tracker, which keeps what every device runs from the receiver
+status on its open channel, is asked, and the caller joins over that device's channel; the session then belongs to the
+caller's origin. Nothing is looked up when asked, so the device must have been found (its channel open and status
+received) by then. `appId`, when given, must be the session's app. No origin is compared with the session's (unlike
 `joinSession`); `allowOrigin` still applies. Fails with `session_error` when no known device runs the session, the
-app differs, or the service was disposed; with `invalid_parameter` for a bad `sessionId`. The lookup runs when asked
-instead of tracking every device all the time (Chrome tracks). The presentation handler calls it for `reconnect`;
+app differs, or the service was disposed; with `invalid_parameter` for a bad `sessionId`. The presentation handler calls it for `reconnect`;
 `mode: "chromecast"` does not (its `requestSessionById` uses `joinSession`). Only main calls it: it is not a
 `BridgeMethod`, and the IPC channel refuses it from a page as an unknown method (`invalid_parameter`).
 
@@ -362,7 +365,8 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 
 | Option | Type | Description |
 |---|---|---|
-| `devices` | `DeviceSource` | Source of devices and change events. |
+| `devices` | `DeviceSource` | Source of devices and change events. The service opens a channel to each and lists it only once the channel is open. |
+| `sinks` | `CastSinkOptions` (optional) | As for the manager. |
 | `createClient` | `(device: CastDevice) => CastClientLike` | Creates a connection for a device. |
 | `selectDevice` | `(devices, request, picker) => Promise<DeviceChoice>` | As in [`selectDevice`](#selectdevice). |
 | `allowOrigin` | `(origin: string) => boolean` (optional) | As for the manager. |

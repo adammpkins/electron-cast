@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **Devices are tracked as Chrome's Media Router tracks them.** electron-cast opens a channel to every device mDNS
+  finds (after Chrome's random delay of up to 5 s), runs device authentication on it, and lists the device only once
+  that has passed. A failed attempt is retried with Chrome's backoff (15 s, 3 attempts); a device that fails
+  authentication is never listed, where before it appeared in the picker and failed on use. The channel then stays
+  open, with a ping every 5 s, and is reopened after a failure (sleep and resume included); a device is dropped only
+  when it cannot be reopened, not when mDNS stops reporting it. The list is reported once it has been quiet for 3 s.
+  `manager.devices()`, the picker's list and the sinks observers show these devices, so right after `start()` the
+  list fills in over a few seconds. Public and loopback addresses are skipped, as in Chrome. New options: `sinks`
+  (`openDelayMaxMs`, `reportDelayMs`, `retry`, `allowAllIps`) on `createCastManager` and `CastSessionService`.
+  Each is a Chrome setting; there is no cap or off switch because Chrome has none. New methods:
+  `CastManager.discoverSinksNow()` and `CastManager.settled()`.
+- **A session tracker follows what every device runs**, from the receiver status (and media status) on the device's
+  channel, whoever started it. `joinRunningSession` is answered from it instead of scanning the devices, with the same
+  results and errors. Sessions started elsewhere, or by this app before it restarted, are reported through the routes
+  observers and `getRoutes()` as non-local routes, as Chrome does; `MediaRoute` gains `isLocal` and `sinkName`, and
+  `origin` is empty on a non-local route. A non-local route can be terminated and have its volume set. A session whose
+  pages all let go now stays a (non-local) route while the device runs it, where it used to disappear from the list.
+- A device's channel is shared by its sessions and kept open, so clients from `createClient` live as long as the device
+  is a sink, not as long as a session. `createClient` is called once per device (again after a failure) and its
+  clients must be fine to keep connected. Chromecast mode (`mode: "chromecast"`) behaves as before for pages; it
+  shares the device list.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge
