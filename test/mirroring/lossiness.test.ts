@@ -48,13 +48,18 @@ class FakePort implements AgentPort {
 
 const PARAMS: VideoCaptureParams = { width: 1920, height: 1080, frameRate: 30, resolutionChangePolicy: "any_within_limit" };
 
-function backendWithVideo(params: VideoCaptureParams = PARAMS, bitrate = 2_000_000, source: CaptureSource = { kind: "tab", mediaSourceId: "x" }) {
+function backendWithVideo(
+  params: VideoCaptureParams = PARAMS,
+  bitrate = 2_000_000,
+  source: CaptureSource = { kind: "tab", mediaSourceId: "x" },
+  codec: "vp8" | "h264" = "vp8",
+) {
   const port = new FakePort();
   const backend = new PortBackend(port, source);
   const encoded: SenderEncodedFrame[] = [];
   let feedbackFor: ((f: SenderEncodedFrame) => number) | undefined;
   const encoder = backend.createVideoEncoder(
-    { maxFrameRate: params.frameRate, startBitrate: bitrate, codecParameter: "vp8", videoCodec: "vp8" } as never,
+    { maxFrameRate: params.frameRate, startBitrate: bitrate, codecParameter: codec, videoCodec: codec, useHardwareEncoder: codec === "h264" } as never,
     {
       onEncoded: (_ref, f) => {
         if (f !== undefined) encoded.push(f);
@@ -98,6 +103,100 @@ test("port backend: an estimated complexity becomes the frame's lossiness agains
   assert.ok(Math.abs(t.encoded[2]!.lossiness! - 0.36) < 1e-9);
   t.frame(99);
   assert.equal(t.encoded[3]!.lossiness, undefined);
+});
+
+/** The start of a hardware encoder's H.264 frames (see h264-quantizer.test.ts), padded to a frame of `bytes`. */
+const H264_KEY_QP34 = "0000000109100000000167640028ac2b403b010ff36022000007d00001d4c01e3855400000000168ee3cb00000000165b804087f0b6e47ffbaa0ad8955fd4c73";
+const H264_DELTA_QP33 = "0000000109300000000161e0223bfffe9da8fd4bffffc3e7";
+const H264_DELTA_QP51 = "0000000109300000000161e0220cbffee8c20b63fff06654";
+function h264Frame(start: string, bytes: number): ArrayBuffer {
+  const data = new Uint8Array(bytes).fill(0xff);
+  data.set(Buffer.from(start, "hex"));
+  return data.buffer;
+}
+
+test("port backend: an H.264 frame's lossiness comes from the quantizer the encoder used, not from the estimate", () => {
+  const t = backendWithVideo(PARAMS, 2_000_000, undefined, "h264");
+  // 1500 bytes over 1/30 s is 18% of 2 Mbps; the estimate of 0.1 is ignored for the QP over 51.
+  t.frame(0, { key: true, data: h264Frame(H264_KEY_QP34, 1500), complexity: 0.1, durationMs: 1000 / 30 });
+  assert.ok(Math.abs(t.encoded[0]!.lossiness! - 0.18 * (34 / 51)) < 1e-9);
+  t.frame(33, { data: h264Frame(H264_DELTA_QP33, 1500), complexity: 0.1, durationMs: 1000 / 30 });
+  assert.ok(Math.abs(t.encoded[1]!.lossiness! - 0.18 * (33 / 51)) < 1e-9);
+  // Against a target the encoder cannot reach at its largest quantizer, the frame is as lossy as it is over the target.
+  t.encoder.setBitRate(265_000);
+  t.frame(66, { data: h264Frame(H264_DELTA_QP51, 3900), durationMs: 1000 / 30 });
+  assert.ok(Math.abs(t.encoded[2]!.lossiness! - (3900 * 8 * 30) / 265_000) < 1e-9);
+});
+
+test("port backend: the agent estimates complexity only while the encoder's frames carry no quantizer (encoder_reports_qp_)", () => {
+  const t = backendWithVideo(PARAMS, 2_000_000, undefined, "h264");
+  const switches = () => t.port.out.flatMap((m) => (m.t === "estimate-complexity" ? [m.on] : []));
+  t.frame(0, { key: true, data: h264Frame(H264_KEY_QP34, 1500), complexity: 0.1 });
+  assert.deepEqual(switches(), [false], "the first frame with a quantizer turns the estimate off");
+  t.frame(33, { data: h264Frame(H264_DELTA_QP33, 1500) });
+  t.frame(66, { data: h264Frame(H264_DELTA_QP33, 1500) });
+  assert.deepEqual(switches(), [false], "said once");
+  // A frame that was in the encoder when the estimate was turned off still carries one: nothing more to say.
+  // The agent's new encoder (another capture size) estimates again until it hears otherwise.
+  t.frame(99, { key: true, data: h264Frame(H264_KEY_QP34, 1500), complexity: 0.2 });
+  assert.deepEqual(switches(), [false, false]);
+  // A frame without a readable quantizer has the estimate turned back on, and has no lossiness of its own.
+  t.frame(132, { data: new ArrayBuffer(1500) });
+  assert.deepEqual(switches(), [false, false, true]);
+  assert.equal(t.encoded.at(-1)!.lossiness, undefined);
+  t.frame(165, { data: new ArrayBuffer(1500), complexity: 0.5, durationMs: 1000 / 30 });
+  assert.deepEqual(switches(), [false, false, true]);
+  assert.ok(Math.abs(t.encoded.at(-1)!.lossiness! - 0.09) < 1e-9, "the estimate stands in again");
+});
+
+test("port backend: a VP8 frame keeps the estimate, which is never turned off", () => {
+  const t = backendWithVideo();
+  // The bytes of an H.264 frame mean nothing in another codec.
+  t.frame(0, { key: true, data: h264Frame(H264_KEY_QP34, 1500), complexity: 0.5, durationMs: 1000 / 30 });
+  assert.ok(Math.abs(t.encoded[0]!.lossiness! - 0.09) < 1e-9);
+  assert.ok(!t.port.out.some((m) => m.t === "estimate-complexity"));
+});
+
+/**
+ * A 1888x1062 tab against a 265 kbps video target, as a live session had it: the hardware encoder is at its largest
+ * quantizer and its delta frames still come to 3.9 KB, three and a half times the target. `feedback` is what
+ * VideoSender reports for a frame (video_sender.cc): the larger of the encoder utilization and the lossiness over
+ * the target utilization of 75%, at most 1 for a key frame.
+ */
+function overTargetSession(codec: "vp8" | "h264", complexity: number | undefined) {
+  const params: VideoCaptureParams = { width: 1920, height: 1080, frameRate: 30, resolutionChangePolicy: "fixed_aspect_ratio" };
+  const t = backendWithVideo(params, 265_000, undefined, codec);
+  t.useFeedback((f) => {
+    const reported = Math.max(f.encoderUtilization, f.lossiness ?? -1) / 0.75;
+    return f.isKeyFrame ? Math.min(1, reported) : reported;
+  });
+  const size = { width: 1888, height: 1062 };
+  let firstChangeMs: number | undefined;
+  for (let i = 0; i < 30 * 60; i++) {
+    const key = i === 0;
+    const chunk = { key, data: h264Frame(key ? H264_KEY_QP34 : H264_DELTA_QP51, key ? 12_700 : 3900), durationMs: 1000 / 30, encodeMs: 9 };
+    t.frame(i * (1000 / 30), complexity === undefined ? chunk : { ...chunk, complexity }, size);
+    if (firstChangeMs === undefined && t.captureSizes().length > 1) firstChangeMs = i * (1000 / 30);
+  }
+  return { sizes: t.captureSizes(), firstChangeMs };
+}
+
+test("port backend: an encoder stuck over its target at the largest quantizer makes the capture shrink within seconds", () => {
+  const { sizes, firstChangeMs } = overTargetSession("h264", undefined);
+  assert.deepEqual(sizes[0], { width: 1888, height: 1062 });
+  assert.ok(sizes.length > 1, "the capture size steps down");
+  // HasSufficientRecentFeedback wants three seconds of feedback (kDefaultMinSizeChangePeriod) before the first change.
+  assert.ok(firstChangeMs! >= 3000 && firstChangeMs! < 4000, `first change after ${firstChangeMs} ms`);
+  // The first step already answers a utilization of 3.5 / 0.75: well under half the area.
+  assert.ok(sizes[1]!.width * sizes[1]!.height < (1888 * 1062) / 2, `first step ${sizes[1]!.width}x${sizes[1]!.height}`);
+  for (const s of sizes) assert.ok(Math.abs(s.width / s.height - 16 / 9) < 0.02, "the aspect ratio is kept");
+});
+
+test("port backend: the same frames judged by a low complexity estimate never shrink the capture", () => {
+  // What the session did before the quantizer was read: an estimate of 0.15 puts the lossiness at 0.53, under the
+  // 0.75 that counts as full utilization.
+  const { sizes } = overTargetSession("vp8", 0.15);
+  assert.deepEqual(sizes, [{ width: 1888, height: 1062 }]);
 });
 
 test("port backend: the encoder utilization is the smoothed processing time over the frame interval", () => {

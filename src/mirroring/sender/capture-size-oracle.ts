@@ -272,6 +272,15 @@ export class CaptureSizeOracle {
     return this.throttling === "active";
   }
 
+  /**
+   * Debug aid: the frame area the consumer's feedback says it can take, as a share of the current capture area
+   * (`estimated_capable_area_` over `capture_size_`). Undefined until feedback has made throttling active.
+   */
+  get consumerCapability(): number | undefined {
+    if (this.throttling !== "active") return undefined;
+    return this.estimatedCapableArea.current / area(this.currentCaptureSize);
+  }
+
   /** `SetSourceSize`. */
   setSourceSize(size: Size): void {
     if (sameSize(size, this.sourceSizeOrEmpty)) return;
