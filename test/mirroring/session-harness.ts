@@ -54,7 +54,8 @@ export async function startHarness(
         { hardware: new Set(opts.hardware ?? []), software: new Set(opts.software ?? ["vp8"]) },
         { denyListed: opts.denyListed, onDenyListed: opts.onDenyListed },
       ),
-      platform: opts.platform,
+      // A fixed platform, so the offer (Baseline H.264 on a Mac, ToProfile) does not depend on the machine running the tests.
+      platform: opts.platform ?? "linux",
       env: opts.env ?? {},
       messagePort: { postMessage: (_dest, ns, message) => setImmediate(() => receiver.onControlMessage(ns, message)) },
       observer: {
