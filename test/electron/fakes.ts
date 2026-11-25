@@ -186,3 +186,82 @@ export class EventLog {
 }
 
 export const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+/** A frame of a {@link FramedWebContents}: what Electron's WebFrameMain exposes to the manager. */
+export class FakeFrame {
+  sent: { channel: string; payload: any }[] = [];
+  readonly owner: FramedWebContents;
+  readonly frameTreeNodeId: number;
+  url: string;
+  readonly parent: FakeFrame | null;
+  processId: number;
+  routingId: number;
+  constructor(owner: FramedWebContents, frameTreeNodeId: number, url: string, parent: FakeFrame | null, processId: number, routingId: number) {
+    this.owner = owner;
+    this.frameTreeNodeId = frameTreeNodeId;
+    this.url = url;
+    this.parent = parent;
+    this.processId = processId;
+    this.routingId = routingId;
+  }
+  get origin(): string {
+    return new URL(this.url).origin;
+  }
+  send(channel: string, payload: unknown): void {
+    if (!this.owner.frames.includes(this)) throw new Error("Render frame was disposed before WebFrameMain could be accessed");
+    this.sent.push({ channel, payload: JSON.parse(JSON.stringify(payload)) });
+  }
+  /** Events of one kind that this frame received. */
+  events(kind: "presentation" | "cast"): any[] {
+    const channel = kind === "presentation" ? "electron-cast:presentation:event" : "electron-cast:event";
+    return this.sent.filter((s) => s.channel === channel).map((s) => s.payload);
+  }
+}
+
+/** A webContents with a frame tree. Its main frame is reached with `send`, a subframe only through `frame.send`. */
+export class FramedWebContents extends EventEmitter {
+  destroyed = false;
+  frames: FakeFrame[] = [];
+  private nodes = 100;
+  private process = 50;
+  readonly id: number;
+  constructor(id: number, url = "https://music.youtube.com/") {
+    super();
+    this.id = id;
+    this.frames.push(new FakeFrame(this, ++this.nodes, url, null, ++this.process, 1));
+  }
+  get main(): FakeFrame {
+    return this.frames[0]!;
+  }
+  get mainFrame(): { framesInSubtree: FakeFrame[] } {
+    return { framesInSubtree: [...this.frames] };
+  }
+  send(channel: string, payload: unknown): void {
+    if (this.destroyed) throw new Error("Object has been destroyed");
+    this.main.send(channel, payload);
+  }
+  isDestroyed(): boolean {
+    return this.destroyed;
+  }
+  destroy(): void {
+    this.destroyed = true;
+    this.emit("destroyed");
+  }
+  addFrame(url: string): FakeFrame {
+    const f = new FakeFrame(this, ++this.nodes, url, this.main, ++this.process, 1);
+    this.frames.push(f);
+    return f;
+  }
+  /** The iframe element was removed; Electron announces nothing. */
+  removeFrame(f: FakeFrame): void {
+    this.frames = this.frames.filter((x) => x !== f);
+  }
+  /** A frame navigates: like a cross-process navigation it comes back as a new frame object with new ids. */
+  navigate(f: FakeFrame, url: string): FakeFrame {
+    const next = new FakeFrame(this, f.frameTreeNodeId, url, f.parent, ++this.process, 1);
+    this.frames = this.frames.map((x) => (x === f ? next : x));
+    if (f.parent === null) this.emit("did-navigate", {}, url);
+    this.emit("did-frame-navigate", {}, url, 200, "OK", f.parent === null, next.processId, next.routingId);
+    return next;
+  }
+}

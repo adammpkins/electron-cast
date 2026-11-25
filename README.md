@@ -66,8 +66,31 @@ stand-in Presentation API backed by the main process, and **Google's own `cast_s
 and run unmodified**, as they do in Chrome. electron-cast never replaces Google's SDK.
 
 A cast has to start from a user gesture (a click on the page's cast button), as in Chrome. As in Chrome, a session
-belongs to the app rather than the page, so a page that reloads gets its session back through auto-join. Current
-limit: Google's SDK running inside an iframe gets no events, because messages go to the main frame.
+belongs to the app rather than the page, so a page that reloads gets its session back through auto-join.
+
+**Iframes (presentation mode only).** Google's SDK also works inside an iframe (an embedded player, say). As in Chrome,
+each frame is its own controlling context: its availability watches, connections and sessions belong to that frame, its
+events reach only that frame, and it can't read, close or message another frame's connections. The origin electron-cast
+uses (for `allowOrigin`, the device picker and origin-scoped auto-join) is the sending frame's own, so a cross-origin
+iframe is its own origin. An iframe that navigates parks its sessions as a reloading page does, and is left for good when
+it is removed or its page navigates. Electron only runs a preload in subframes if the app opts in:
+
+```js
+new BrowserWindow({
+  webPreferences: {
+    preload: path.join(__dirname, "preload.js"),
+    sandbox: true,
+    contextIsolation: true,
+    nodeIntegrationInSubFrames: true,  // run the preload in iframes too
+  },
+});
+```
+
+Without `nodeIntegrationInSubFrames`, nothing changes: the preload runs only in the main frame, an iframe has no stand-in
+and no cast, and its SDK finds no devices. With it, the preload (and so the cast bridge) runs in every iframe of every
+origin, so keep `allowOrigin` strict. `nodeIntegration` stays `false`; Electron's docs describe the option as giving
+preloads to every iframe, and the iframe's page still gets no Node, but not tested here with a sandbox, which this
+project could not run live. `mode: "chromecast"` stays main-frame only: a call from an iframe is refused.
 
 **Fallback: `mode: "chromecast"`.** This installs electron-cast's own implementation of `chrome.cast` and
 `chrome.cast.media` and blocks Google's loader scripts. Use it for pages that call `chrome.cast` without loading

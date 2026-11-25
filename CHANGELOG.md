@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Google's Cast SDK now works inside iframes in presentation mode, with Chrome's per-frame semantics: each frame has its
+  own availability watches, connections and sessions, receives only its own events (`frame.send`), and uses its own
+  origin. An iframe that navigates parks its sessions; a removed iframe or a navigating page ends them. Needs
+  `nodeIntegrationInSubFrames: true` in the window's `webPreferences` so the preload runs in iframes; without it nothing
+  changes. `mode: "chromecast"` stays main-frame only.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which
