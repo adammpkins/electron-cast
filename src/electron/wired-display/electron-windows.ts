@@ -8,10 +8,14 @@ import { join } from "node:path";
 import { installPresentationReceiver } from "../../polyfill/presentation-receiver.ts";
 import { MAX_MESSAGE_SIZE, asBytes, messageFields, type ReceiverEnd } from "./local-presentation.ts";
 import type { ReceiverWindow, ReceiverWindowFactory, ReceiverWindowRequest } from "./provider.ts";
+import type { PresentationInfo, ReceiverConnectionCallback } from "./local-presentation.ts";
+import { watchCapture, type OffscreenTabHandle, type Size } from "../../mirroring/offscreen-tab.ts";
 
 /** The part of an Electron `Session` used here. */
 export interface ReceiverSessionLike {
-  setPermissionRequestHandler(handler: ((wc: unknown, permission: string, callback: (granted: boolean) => void) => void) | null): void;
+  setPermissionRequestHandler(
+    handler: ((wc: unknown, permission: string, callback: (granted: boolean) => void, details?: { securityOrigin?: string }) => void) | null,
+  ): void;
   setPermissionCheckHandler(handler: ((wc: unknown, permission: string) => boolean) | null): void;
   on(event: "will-download", listener: (event: { preventDefault(): void }) => void): unknown;
   clearStorageData(): Promise<void>;
@@ -37,6 +41,11 @@ export interface ReceiverWebContentsLike {
   setWindowOpenHandler(handler: () => { action: "deny" }): void;
   readonly mainFrame?: unknown;
   on(event: string, listener: (...args: any[]) => void): unknown;
+  /** The session of the contents; used for an offscreen tab when no `session` module was given. */
+  readonly session?: ReceiverSessionLike;
+  /** Offscreen tabs only (`WebContents::SetAudioMuted`, `IsBeingCaptured`). */
+  setAudioMuted?(muted: boolean): void;
+  isBeingCaptured?(): boolean;
 }
 
 /** The part of an Electron `BrowserWindow` used here. */
@@ -50,6 +59,9 @@ export interface ReceiverBrowserWindowLike {
   /** Windows and Linux; absent where there is no per-window menu. */
   removeMenu?(): void;
   once(event: "closed", listener: () => void): unknown;
+  /** Offscreen tabs only. */
+  setContentSize?(width: number, height: number): void;
+  destroy?(): void;
 }
 
 /** The subset of Electron's `ipcMain` used here. */
@@ -95,6 +107,12 @@ const BRIDGE_KEY = "__electronCastReceiverBridge";
  */
 export const RECEIVER_SANDBOX =
   "sandbox allow-downloads allow-forms allow-orientation-lock allow-pointer-lock allow-presentation allow-same-origin allow-scripts allow-storage-access-by-user-activation";
+
+/**
+ * The origin of the mirroring host's capture page (src/mirroring/electron/host.ts loads it with `loadFile`), as Electron
+ * reports it in a permission request's `securityOrigin`.
+ */
+const CAPTURER_ORIGIN = "file:///";
 
 /** Sessions that were cleared and can serve another presentation; more would only hold memory. */
 const MAX_POOLED_SESSIONS = 4;
@@ -170,6 +188,48 @@ interface Live {
  * One call per `ipcMain` and `channel` until its `dispose()`: a second one throws.
  */
 export function createReceiverWindows(options: ReceiverWindowsOptions): ReceiverWindows {
+  const host = createReceiverHost(options);
+  return { factory: host.factory, dispose: host.dispose };
+}
+
+/** What an offscreen tab is opened with (`OffscreenTab::Start` with a presentation id). */
+export interface OffscreenReceiverRequest {
+  url: string;
+  presentationId: string;
+  /** `initial_size`. */
+  size: Size;
+  /** The tab is gone, for whatever reason. Runs once. */
+  onDestroyed(): void;
+  /** As {@link ReceiverWindowRequest}'s. */
+  receiverCreated(info: PresentationInfo, callback: ReceiverConnectionCallback): void;
+  receiverReset(presentationId: string): void;
+  /** Why the tab destroyed itself, for the log. */
+  log?(message: string): void;
+}
+
+/** The receiver windows and the offscreen tabs: both are a page with `ReceiverPresentationServiceDelegateImpl`. */
+export interface ReceiverHost extends ReceiverWindows {
+  /**
+   * `OffscreenTab::Start` (chrome/browser/media/offscreen_tab.cc) with a presentation id: what
+   * `CastMirroringServiceHost::OpenOffscreenTab` opens to render a presentation URL that is then mirrored. Chrome makes
+   * a `WebContents` that is in no window; Electron has none without a window, so this is a window that is never shown:
+   *  - `initial_size` is the size of its page (set after the window is made: Windows clamps the size a window is created
+   *    with to the work area);
+   *  - muted from the start ("Mute audio output. When tab capture starts, the audio will be automatically unmuted, but
+   *    will be captured into the MediaStream"): the mirroring host keeps a captured tab silent here for the whole session;
+   *  - a profile of its own, the receiver sandbox flags, no popups and the presentation navigation policy, as for a
+   *    receiver window: a second main-frame navigation closes the tab (`DidStartNavigation` -> `Close`);
+   *  - no input reaches it (`PreHandleKeyboardEvent`, `ShouldFocusLocationBarByDefault`): it cannot be focused;
+   *  - no downloads (`CanDownload`), no camera or microphone (`RequestMediaAccessPermission` answers NOT_SUPPORTED);
+   *  - an element may go fullscreen and then fills the tab (`EnterFullscreenModeForTab`); the window stays hidden;
+   *  - `window.close()` destroys it (`CloseContents`), and so does `DieIfContentCaptureEnded` (see `watchCapture`).
+   * Throws when the window cannot be made.
+   */
+  openOffscreenTab(request: OffscreenReceiverRequest): OffscreenTabHandle;
+}
+
+/** {@link createReceiverWindows} with the offscreen tabs. `session` may be left out: a window's own session is used then. */
+export function createReceiverHost(options: Omit<ReceiverWindowsOptions, "session"> & { session?: ReceiverWindowsOptions["session"] }): ReceiverHost {
   const channel = options.channel ?? "electron-cast:receiver";
   const platform = options.platform ?? process.platform;
   const ipc = options.ipcMain;
@@ -242,16 +302,22 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
 
   const open = new Set<Live>();
 
-  const pool: { partition: string; ses: ReceiverSessionLike }[] = [];
+  interface PooledSession { partition: string; ses: ReceiverSessionLike | null; capturable: boolean }
+  const pool: PooledSession[] = [];
   let disposed = false;
 
-  const newSession = (): { partition: string; ses: ReceiverSessionLike } => {
-    // A partition without the `persist:` prefix lives in memory only
-    const partition = `electron-cast-receiver-${randomUUID()}`;
-    const ses = options.session.fromPartition(partition);
+  const configure = (ses: ReceiverSessionLike, session: PooledSession): void => {
     // The receiver has nobody to answer a permission prompt, and Chrome's off-the-record profile starts with no grants.
     // Fullscreen stays, as `requestFullscreen()` is how a presentation fills its screen.
-    ses.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "fullscreen"));
+    //
+    // An offscreen tab must be capturable by the mirroring host. Electron asks the session of the page that is captured,
+    // not of the page that captures, for `display-capture`, and asks it the same thing when the page itself wants to
+    // capture the screen (`getUserMedia` with `chromeMediaSource: "desktop"`). The two differ only in the request's
+    // `securityOrigin`: the capturing page's, which for the mirroring host is a file page and for the receiver's page
+    // (loaded over http or https, and unable to navigate or to frame a file) never is. So that one origin is granted, and
+    // the page's own requests are refused as `OffscreenTab::RequestMediaAccessPermission` refuses them (NOT_SUPPORTED).
+    ses.setPermissionRequestHandler((_wc, permission, callback, details) =>
+      callback(permission === "fullscreen" || (session.capturable && permission === "display-capture" && details?.securityOrigin === CAPTURER_ORIGIN)));
     ses.setPermissionCheckHandler((_wc, permission) => permission === "fullscreen");
     ses.on("will-download", (e) => e.preventDefault());
     // kPresentationReceiverSandboxFlags on every document of the receiver, frames included
@@ -265,22 +331,31 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
       headers[key] = [...(headers[key] ?? []), RECEIVER_SANDBOX];
       callback({ responseHeaders: headers });
     });
-    return { partition, ses };
+  };
+  const newSession = (): PooledSession => {
+    // A partition without the `persist:` prefix lives in memory only
+    const partition = `electron-cast-receiver-${randomUUID()}`;
+    const session: PooledSession = { partition, ses: options.session?.fromPartition(partition) ?? null, capturable: false };
+    if (session.ses !== null) configure(session.ses, session);
+    return session;
   };
 
-  const factory: ReceiverWindowFactory = (request) => {
+  /** `offscreen` is set for an offscreen tab; a receiver window is on its display's bounds. */
+  const openWindow = (request: ReceiverWindowRequest, offscreen?: { log(message: string): void }): { receiver: ReceiverWindow; webContentsId: number; destroy(): void } => {
     const session = pool.pop() ?? newSession();
-    const { partition, ses } = session;
+    const { partition } = session;
+    session.capturable = offscreen !== undefined;
 
     const b = request.bounds;
     const win = new options.BrowserWindow({
       show: false,
-      x: b.x,
-      y: b.y,
+      ...(offscreen === undefined
+        ? { x: b.x, y: b.y, fullscreenable: true, autoHideMenuBar: true }
+        // Never shown and never focused. Not fullscreenable, so that an element's fullscreen fills the page and leaves
+        // the window alone, as OffscreenTab::EnterFullscreenModeForTab only resizes the tab.
+        : { useContentSize: true, frame: false, focusable: false, skipTaskbar: true, fullscreenable: false }),
       width: b.width,
       height: b.height,
-      fullscreenable: true,
-      autoHideMenuBar: true,
       webPreferences: {
         partition,
         preload,
@@ -292,8 +367,21 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
         webviewTag: false,
         spellcheck: false,
         allowRunningInsecureContent: false,
+        // A page that is never shown must still render: Chrome's capturer keeps the tab visible to its renderer
+        ...(offscreen === undefined ? {} : { backgroundThrottling: false }),
       },
     });
+    if (session.ses === null) {
+      const own = win.webContents.session;
+      if (own === undefined) {
+        win.close();
+        throw new Error("the receiver's session cannot be reached");
+      }
+      configure(own, session);
+      session.ses = own;
+    }
+    const ses = session.ses;
+    if (offscreen !== undefined) win.setContentSize?.(b.width, b.height);
     // Chrome's receiver window has no browser UI, so no menu accelerators (reload, developer tools) either
     win.removeMenu?.();
     const wc = win.webContents;
@@ -341,6 +429,11 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
     wc.on("page-title-updated", (_e: unknown, title: string) => request.onTitle(title));
     // The window's accelerator for IDC_FULLSCREEN
     wc.on("before-input-event", (e: { preventDefault(): void }, input: { type: string; key: string; control?: boolean; meta?: boolean }) => {
+      if (offscreen !== undefined) {
+        // OffscreenTab::PreHandleKeyboardEvent: "Intercept and silence all keyboard events"
+        e.preventDefault();
+        return;
+      }
       if (input.type !== "keyDown") return;
       const toggle = platform === "darwin" ? input.control === true && input.meta === true && input.key.toLowerCase() === "f" : input.key === "F11";
       if (!toggle) return;
@@ -348,7 +441,19 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
       win.setFullScreen(!win.isFullScreen());
     });
     // PresentationReceiverWindowController::WindowClosed and CloseContents
-    win.once("closed", finish);
+    let stopWatching: (() => void) | undefined;
+    win.once("closed", () => {
+      stopWatching?.();
+      finish();
+    });
+    /** `destroy_callback_`: the contents are deleted, with no unload handlers. */
+    const destroy = (): void => {
+      stopWatching?.();
+      if (terminated) return;
+      if (win.isDestroyed()) finish();
+      else if (win.destroy !== undefined) win.destroy();
+      else win.close();
+    };
 
     const terminate = (): void => {
       if (terminated) return;
@@ -359,22 +464,51 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
     const receiver: ReceiverWindow = {
       start(id, url) {
         live.presentationId = id;
+        if (offscreen !== undefined) wc.setAudioMuted?.(true);
         void wc.loadURL(url).catch(() => {
           // A failed load shows Chrome's error page; the presentation stays until its window closes.
         });
-        win.showInactive();
-        win.setFullScreen(true);
+        if (offscreen === undefined) {
+          win.showInactive();
+          win.setFullScreen(true);
+          return;
+        }
+        // OffscreenTab::Start ends with DieIfContentCaptureEnded()
+        if (wc.isBeingCaptured !== undefined) {
+          stopWatching = watchCapture({
+            isBeingCaptured: () => !wc.isDestroyed() && wc.isBeingCaptured!(),
+            destroy: (reason) => {
+              offscreen.log(reason === "capture_ended"
+                ? "Capture of the offscreen tab has stopped; the tab is destroyed."
+                : "Capture of the offscreen tab did not start within a minute; the tab is destroyed.");
+              destroy();
+            },
+          });
+        }
       },
       terminate,
       exitFullscreen() {
-        if (!win.isDestroyed()) win.setFullScreen(false);
+        if (offscreen === undefined && !win.isDestroyed()) win.setFullScreen(false);
       },
     };
-    return receiver;
+    return { receiver, webContentsId: wcId, destroy };
   };
+  const factory: ReceiverWindowFactory = (request) => openWindow(request).receiver;
 
   return {
     factory,
+    openOffscreenTab(request) {
+      const tab = openWindow({
+        bounds: { x: 0, y: 0, width: request.size.width, height: request.size.height },
+        onTerminated: () => request.onDestroyed(),
+        // The route of an offscreen tab is described by its URL, never by the page's title
+        onTitle: () => {},
+        receiverCreated: (info, callback) => request.receiverCreated(info, callback),
+        receiverReset: (id) => request.receiverReset(id),
+      }, { log: (message) => request.log?.(message) });
+      tab.receiver.start(request.presentationId, request.url);
+      return { webContentsId: tab.webContentsId, destroy: tab.destroy };
+    },
     dispose() {
       disposed = true;
       claimed.delete(channel);

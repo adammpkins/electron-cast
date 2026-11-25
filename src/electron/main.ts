@@ -21,6 +21,10 @@ import { AccessCodeCastDisabledError, type AccessCodeDevice, type AccessCodeOpti
 import { DiscoveryNetworkMonitor, NETWORK_ID_DISCONNECTED, type NetworkMonitor } from "./network-monitor.ts";
 import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
 import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
+import type { OffscreenTabHandle } from "../mirroring/offscreen-tab.ts";
+import { OffscreenPresentations } from "./offscreen-presentation.ts";
+import { offscreenTabPresentationUrl } from "./presentation-source.ts";
+import type { OffscreenReceiverRequest, ReceiverIpcMainLike, ReceiverWindowsOptions } from "./wired-display/electron-windows.ts";
 import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirroring-activity.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
@@ -162,9 +166,18 @@ export interface CastManagerOptions {
   /**
    * Enables tab and desktop mirroring (`startCasting` with `castMode: "tab_mirror"` or `"desktop_mirror"`). Pass the
    * Electron classes it needs (`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`,
-   * and optionally `app`); off by default. `createService` replaces the Electron engine (tests, or a different one).
+   * and optionally `app`, `systemPreferences` and `screen`); off by default. `createService` replaces the Electron engine
+   * (tests, or a different one), and `openOffscreenTab` next to it the offscreen tab.
+   *
+   * With mirroring on and presentation mode, a page's `PresentationRequest` for an ordinary https URL can be started on a
+   * Cast device, as in Chrome (its 1-UA mode): the URL is loaded in an offscreen tab, a hidden window of the size of
+   * the primary display (at most 1920x1080), that tab is mirrored to the device, and the page's `PresentationConnection`
+   * talks to the tab's `navigator.presentation.receiver`.
    */
-  mirroring?: ElectronMirroringOptions | { createService: MirroringServiceFactory };
+  mirroring?: ElectronMirroringOptions | {
+    createService: MirroringServiceFactory;
+    openOffscreenTab?: (request: OffscreenReceiverRequest) => OffscreenTabHandle;
+  };
   /**
    * Network changes, as Chrome's `DiscoveryNetworkMonitor` tells its media router: the DIAL devices given up on are tried
    * again, the sinks of a network the machine comes back to are reopened, and devices added by address are removed and
@@ -588,6 +601,26 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   /** The mirroring routes a page started through the Presentation API, so their connections end with them. */
   const siteRoutes = new Set<string>();
   /**
+   * Presentation URLs on a Cast sink (1-UA mode): present whenever mirroring and presentation mode are both on, as
+   * Chrome has no switch for it (`CastMediaSource::FromMediaSource` serves every https URL).
+   */
+  const offscreen = ((): OffscreenPresentations | undefined => {
+    const m = options.mirroring;
+    if (m === undefined || options.presentation === false) return undefined;
+    const log = (message: string): void => {
+      logger.info("Mirroring", "OffscreenTab", message);
+      console.debug(`electron-cast mirroring: ${message}`);
+    };
+    if ("createService" in m) return m.openOffscreenTab === undefined ? undefined : new OffscreenPresentations(m.openOffscreenTab, log);
+    // The app passes Electron's own classes, which are both what the capture windows and what a receiver page need
+    return new OffscreenPresentations({
+      BrowserWindow: m.electron.BrowserWindow as unknown as ReceiverWindowsOptions["BrowserWindow"],
+      ipcMain: options.ipcMain as unknown as ReceiverIpcMainLike,
+      channel: `${channel}:offscreen-receiver`,
+      ...(m.electron.screen === undefined ? {} : { screen: m.electron.screen }),
+    }, log);
+  })();
+  /**
    * Site-initiated mirroring and mirroring-to-flinging (see mirroring-to-flinging.ts). `routes_by_frame_` keys a route by
    * the web contents' main frame, so a sender (any frame) is looked up through its window.
    */
@@ -612,8 +645,24 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     terminate: (routeId) => void mirroring?.terminate(routeId),
     sinkOfFrame(senderId) {
       const wcId = senders.get(senderId)?.wc.id;
-      return mirroring?.routes().find((r) => r.castMode === "tab_mirror" && r.webContentsId === wcId)?.sinkId;
+      // any route of the frame that is not an app's: its tab's mirroring, or a presentation in an offscreen tab
+      return mirroring?.routes().find((r) => r.castMode !== "desktop_mirror" && r.webContentsId === wcId)?.sinkId;
     },
+    ...(offscreen === undefined ? {} : {
+      offscreenTab: {
+        available: () => true,
+        async start({ senderId, url, deviceId }) {
+          const wc = senders.get(senderId)?.wc;
+          if (wc === undefined) throw new Error("the page is gone");
+          try {
+            return await offscreen.start({ senderId, frameWebContentsId: wc.id, url, sinkId: deviceId });
+          } catch (err) {
+            if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+            throw err;
+          }
+        },
+      },
+    }),
   };
 
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
@@ -709,8 +758,12 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (choice === null) throw new PresentationError("AbortError", "The user cancelled the request");
       return w.controllers.start(request, choice);
     };
-    /** A URL the Cast provider serves (a Cast app URL), or the DIAL provider (a `cast-dial:` URL, when DIAL is on). */
-    const providerUrl = (u: string): boolean => parsePresentationUrl(u) !== null || (dial !== undefined && isDialSource(u));
+    /**
+     * A URL the Cast provider serves (a Cast app URL, and with an offscreen tab an ordinary https URL), or the DIAL
+     * provider (a `cast-dial:` URL, when DIAL is on).
+     */
+    const providerUrl = (u: string): boolean =>
+      parsePresentationUrl(u) !== null || (dial !== undefined && isDialSource(u)) || (offscreen !== undefined && offscreenTabPresentationUrl(u) !== null);
     /** The URLs of a request that the Cast and DIAL providers serve. */
     const castUrlsOf = (urls: string[]): string[] => urls.filter(providerUrl);
     /**
@@ -767,7 +820,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             if (wired !== undefined && p.urls.some((u) => isWiredDisplaySource(u))) {
               // Blink ORs the sources of a request: available when displays exist for a standard source, or the
               // request's Cast URLs have a device. Displays are not hidden here (only the dialog hides one).
-              const castUrls = p.urls.filter((u) => !isWiredDisplaySource(u));
+              // (with an offscreen tab a standard source is a Cast source as well)
+              const castUrls = offscreen !== undefined ? p.urls : p.urls.filter((u) => !isWiredDisplaySource(u));
               let displays = false;
               let cast = false;
               let ready = false;
@@ -847,6 +901,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             }
             {
               const { urls, presentationId } = p;
+              // ControllerPresentationServiceDelegateImpl::ReconnectPresentation: a local presentation is joined by its
+              // id before any provider is asked. One in an offscreen tab on a Cast sink is local too.
+              if (offscreen?.local.isLocalPresentation(presentationId) === true) {
+                return await open(sid, p.connectionId, async () => offscreen.controllers.reconnect({ urls, senderId: sid }, presentationId));
+              }
               // A local presentation (a display) is joined again from any page, by its id; for a URL only a display
               // serves, an id that is not local is the provider's unknown error, which the page sees as NotFoundError
               if (wired !== undefined && (displayOnly(urls) || wired.provider.local.isLocalPresentation(presentationId))) {
@@ -904,6 +963,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         launchedFrom.delete(sid);
         h.senderGone(sid);
         wired?.controllers.senderGone(sid);
+        offscreen?.controllers.senderGone(sid);
         for (const [id, c] of connections) if (c.sid === sid) connections.delete(id);
         for (const [id, w] of watches) {
           if (w.sid !== sid) continue;
@@ -933,8 +993,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           url = dial === undefined ? null : await dialUrlFor(dial, device, request.presentationUrls, request.frameOrigin);
         } else {
           for (const candidate of request.presentationUrls) {
-            const parsed = parsePresentationUrl(candidate);
-            if (parsed === null || presentationUrlForDevice(device, [candidate]) === null) continue;
+            const parsed = parsePresentationUrl(candidate) ?? (offscreen === undefined ? null : offscreenTabPresentationUrl(candidate));
+            if (parsed === null || presentationUrlForDevice(device, [candidate], undefined, undefined, offscreen !== undefined) === null) continue;
             if (await service.checkAppAvailability(device, parsed.appId)) {
               url = candidate;
               break;
@@ -995,7 +1055,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           return dialRoute;
         }
         if (!result.value.id.startsWith("cast-session_")) {
-          // a site-initiated mirroring route: the connection's id is the route's presentation id
+          // a mirroring route (site-initiated, or a URL in an offscreen tab): the connection's id is the route's presentation id
           const prefix = `urn:x-org.chromium:media:route:${result.value.id}/`;
           const mirrorRoute = routes().find((r) => r.id.startsWith(prefix));
           if (mirrorRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
@@ -1071,6 +1131,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       findDevice: (id) => service.devices().find((d) => d.id === id),
       createClient: (d) => sharedChannelClient(d.id, service.channelClient(d.id)),
       createService,
+      ...(offscreen === undefined ? {} : { openOffscreenTab: offscreen.openOffscreenTab }),
       terminateRoutesOfPage: (wcId) => {
         for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
       },
@@ -1084,6 +1145,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`);
       },
     });
+    offscreen?.attach(mirroring);
     // a route that ended ends the connections of the page that started it (`RemoveActivity`, `TERMINATED`)
     mirroring.observe(() => {
       const live = new Set(mirroring!.routes().map((r) => r.id));
@@ -1144,6 +1206,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   const api = createManagerApi(createSinksObservers(dialSource === undefined ? castDevices : combineSources(castDevices, dialSource), {
     cached: (d, appId) => service.cachedAppAvailability(d, appId),
     check: (d, appId) => service.checkAppAvailability(d, appId),
+    ...(offscreen === undefined ? {} : { offscreenTab: () => true }),
     ...(dial === undefined ? {} : {
       dial: {
         available: (d: CastDevice, app: string, origin: string) => dial.availableFor(app, origin).some((x) => x.id === d.id),
@@ -1288,6 +1351,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       logger.dispose();
       defaults.dispose();
       mirroring?.dispose();
+      offscreen?.dispose();
       disposeMirroring?.();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();

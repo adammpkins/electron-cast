@@ -553,8 +553,10 @@ export class CastSessionService {
           return this.handleJoinSession(sender, params, true);
         case "requestSink":
           // main only: the presentation handler's request with a `cast-dial:` source
+          // with `pickOnly`, a Cast choice is answered as `pickSink` answers it
           return await this.handleRequestSession(sender, params, {
             sink: true,
+            ...(isRecord(params) && params.pickOnly === true ? { pickOnly: true } : {}),
             ...(isRecord(params) && typeof params.deviceId === "string" ? { presetDeviceId: params.deviceId } : {}),
           });
         case "pickSink":

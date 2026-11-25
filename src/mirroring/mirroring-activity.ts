@@ -209,7 +209,7 @@ export class MirroringActivity {
 
   /** `GetRouteDescription` for a mirroring route. */
   get description(): string {
-    return routeDescription(this.source.type);
+    return routeDescription(this.source.type, this.source.id);
   }
 
   /**

@@ -5,7 +5,7 @@
 import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import { APP_AVAILABILITY_REFRESH_MS, type DeviceSource } from "./session-service.ts";
-import { parsePresentationUrl } from "./presentation-envelope.ts";
+import { castAppInfosOf } from "./presentation-source.ts";
 import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
 import type { DefaultPresentationRequests, PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 import type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
@@ -48,8 +48,9 @@ export interface MediaSinksQuery {
    * Only sinks that can run one of these presentation URLs (Chrome: a `MediaSinksObserver` per URL's `MediaSource`, as
    * the Cast dialog sets them from the page's default request). A Cast sink matches a Cast app URL whose app it said it
    * has; a DIAL sink matches a `cast-dial:` URL whose app its DIAL server said it has, and while the observer is
-   * registered the DIAL sinks are asked about those apps (`DialMediaRouteProvider::StartObservingMediaSinks`). Other
-   * URLs match no sink. Combines with `capabilities`.
+   * registered the DIAL sinks are asked about those apps (`DialMediaRouteProvider::StartObservingMediaSinks`). With
+   * mirroring on, a Cast sink that has a streaming app also matches an ordinary https URL, which is rendered in an
+   * offscreen tab and mirrored. Other URLs match no sink. Combines with `capabilities`.
    */
   presentationUrls?: string[];
   /**
@@ -377,6 +378,11 @@ export function presentationUrlForDevice(
   appAvailable?: (device: CastDevice, appId: string) => boolean | undefined,
   /** When given, a DIAL sink matches a `cast-dial:` URL whose app it has. */
   dialAvailable?: (device: CastDevice, appName: string) => boolean,
+  /**
+   * An ordinary https URL is a Cast source too (rendered in an offscreen tab and mirrored): a sink that has a streaming
+   * app matches it (`CastMediaSource::FromMediaSource`).
+   */
+  offscreenTab = false,
 ): string | null {
   // A DIAL sink runs the cast-dial: sources whose app it has (DialMediaRouteProvider), never a Cast app URL
   if (device.dial !== undefined) {
@@ -388,9 +394,9 @@ export function presentationUrlForDevice(
     return null;
   }
   for (const url of urls) {
-    const parsed = parsePresentationUrl(url);
+    const appInfos = castAppInfosOf(url, offscreenTab);
     // CastAppAvailabilityTracker::GetAvailableSinks: some app of the URL is available and the sink has all its capabilities
-    if (parsed !== null && parsed.appInfos.some((i) => sinkSupportsApp(device.capabilities, i)
+    if (appInfos !== null && appInfos.some((i) => sinkSupportsApp(device.capabilities, i)
       && (appAvailable === undefined || appAvailable(device, i.appId) === true))) return url;
   }
   return null;
@@ -408,6 +414,8 @@ export interface AppAvailability {
     available(device: CastDevice, appName: string, origin: string): boolean;
     monitor(appName: string, origin: string): (() => void) | null;
   };
+  /** Whether an ordinary https presentation URL can be cast (an offscreen tab can be opened); see `presentationUrlForDevice`. */
+  offscreenTab?(): boolean;
 }
 
 /** The sink for a discovered device. */
@@ -502,7 +510,7 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       const matchesBase = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
         && (mirrorSource === undefined || (d.dial === undefined && sinkSupportsSource(mirrorSource, d.capabilities)));
       const matches = (d: CastDevice): boolean => matchesBase(d)
-        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null);
+        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable, availability?.offscreenTab?.() === true) !== null);
       // DialMediaRouteProvider::StartObservingMediaSinks: the DIAL sinks are asked about each cast-dial: app while the
       // observer is registered
       const dialApps = urls === undefined || dial === undefined ? [] : [...new Set(urls.map((u) => (isDialSource(u) ? appNameFromDialSource(u) : "")))].filter((a) => a !== "");
@@ -519,9 +527,9 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
         for (const d of source.devices()) {
           if (d.dial !== undefined || (eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
           for (const url of urls) {
-            const parsed = parsePresentationUrl(url);
-            if (parsed === null) continue;
-            for (const info of parsed.appInfos) {
+            const appInfos = castAppInfosOf(url, availability.offscreenTab?.() === true);
+            if (appInfos === null) continue;
+            for (const info of appInfos) {
               if (!sinkSupportsApp(d.capabilities, info) || availability.cached(d, info.appId) !== undefined) continue;
               const key = `${d.id}\n${info.appId}`;
               const before = asked.get(key);
