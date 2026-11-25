@@ -347,9 +347,10 @@ sender policy, plus the session host, plus the routing.
 | `sender/bandwidth-estimator.ts` | openscreen `impl/bandwidth_estimator.cc` |
 | `sender/frame-sender.ts` | Chromium `media/cast/sender/openscreen_frame_sender.cc`, `video_sender.cc`, `audio_sender.cc`, `media/cast/constants.h` |
 | `session-host.ts` | Chromium `components/mirroring/service/openscreen_session_host.cc`, `mirror_settings.cc`, `mirroring_features.cc`, `media/cast/openscreen/config_conversions.cc`, `media/cast/encoding/encoding_support.cc` |
-| `mirroring-activity.ts` | Chromium `mirroring_activity.cc` (`OnAppMessage`, `OnInternalMessage`, `HandleParseJsonResult`, `StartSession`, `StopMirroring`) and `cast_activity_manager.cc` (`DoLaunchSession`, `OnActivityStopped`) |
-| `mirroring-manager.ts` | Chromium `cast_activity_manager.cc` (`LaunchSession`, `TerminateSession`, `NotifyAllOnRoutesUpdated`), `media_route.cc` (`GetMediaRouteId`) |
+| `mirroring-activity.ts` | Chromium `mirroring_activity.cc` (`OnAppMessage`, `OnInternalMessage`, `HandleParseJsonResult`, `StartSession`, `StopMirroring`, `ScheduleFetchMirroringStats`, `FetchMirroringStats`) and `cast_activity_manager.cc` (`DoLaunchSession`, `OnActivityStopped`) |
+| `mirroring-manager.ts` | Chromium `cast_activity_manager.cc` (`LaunchSession`, `TerminateSession`, `NotifyAllOnRoutesUpdated`), `media_route.cc` (`GetMediaRouteId`), `media_router_debugger.h` (the mirroring stats methods) |
 | `routing.ts` | Chromium `cast_media_source.cc` (`CastMediaSourceForTabMirroring`, `ForDesktopMirroring`, `ProvidesStreamingAudioCapture`, the streaming `CastAppInfo`s), `components/media_router/common/media_source.cc`, `cast_activity_manager.cc` (`ChooseAppId`), `mirroring_activity.cc` (`StartSession`, `GetRouteDescription`, `GetMirroringNamespace`, `GetScrubbedLogMessage`), `chrome/app/media_router_strings.grdp` |
+| `stats/*.ts` | openscreen `impl/statistics_{collector,dispatcher,analyzer,common}.cc`, `impl/clock_offset_estimator_impl.cc`, `public/statistics.cc`; Chromium `openscreen_stats_client.cc`, `openscreen_session_host.cc` (`GetMirroringStats`), `stats_event_subscriber.cc` (`CastStatToString`) |
 | `engine.ts` | assembles `OpenscreenSessionHost` around a backend, as the Mirroring Service does with its resource provider |
 | `transport/udp-environment.ts` | openscreen `cast/streaming/public/environment.cc` (`SendPacket`, `GetMaxPacketSize`, `OnRead`) and `SenderPacketRouter::OnReceivedPacket` (packets only from the announced endpoint) |
 | `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc`, `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate, utilization), `openscreen_session_host.cc` (`OnEncoderStatusChange`) |
@@ -415,14 +416,70 @@ Chrome offers H.264 only through hardware encoders and its HEVC and AV1 features
 cannot tell us whether an encoder is hardware. The order of offered codecs is `kSupportedVideoCodecs` (HEVC, AV1, VP9,
 H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bundled.
 
+### Mirroring statistics (`src/mirroring/stats/`)
+
+Chrome measures a mirroring session for debugging, not for pages: `MirroringActivity::OnSessionSet` asks the
+`MediaRouterDebugger` (`ShouldFetchMirroringStats`) and, when it is on, starts the session with
+`enable_rtcp_reporting`; `DidStart` then calls `CastMirroringServiceHost::GetMirroringStats` every
+`kRtcpReportInterval` (500 ms) and hands the dictionary to the debugger (`OnMirroringStats`), where
+`chrome://media-router-internals` shows it and `MirroringStatsObserver`s get it. It is off by default and read at the
+start of a session. Rules, all from openscreen revision `aec59dd1baf42bc7e23963ccbe7b72bbaf28dfe6` (the one Chromium
+pins; the files are identical on main) unless noted:
+
+- **Collection** (`statistics_collector.cc`, `statistics_dispatcher.cc`). While a stats client is set on the session
+  (`SenderSession::SetStatsClient`), `Environment::SendPacket` reports every packet to the collector, which parses the
+  wire bytes (RTP timestamp at 4, packet id and max packet id at 14 and 16, size = the packet) and tags it
+  `kPacketRetransmitted` or `kPacketSentToNetwork`. `SenderImpl` dispatches capture begin, capture end and encoded
+  (size, key frame) at the end of `EnqueueFrame`, frame ack received from the receiver's checkpoint and ack vector for
+  slots still in flight, and frame dropped by encoder from `ReportFrameDropEvent`. The receiver's RTCP event log
+  (`receiverRtcpEventLog` is already in the OFFER) is parsed by `CompoundRtcpParser::ParseFrameLogMessages` and
+  dispatched between the receiver report and the checkpoint: packet received, ack sent, decoded and played out (with
+  its signed delay). Event times in the log are `RtcpSession::start_time` (the sender's clock when the `Sender` was
+  made) plus the 24-bit base plus a 12-bit delta; the receiver's own origin is whatever it chose, which the clock
+  offset estimate absorbs.
+- **Clock offset** (`clock_offset_estimator_impl.cc`). Two Kalman-filtered bounds (process noise 5 ms, measurement
+  noise 30 ms): packet sent against packet received, and ack sent against ack received, each matched by RTP
+  timestamp, packet id and media type in a map capped at 500 entries. Offset is half the sum of the bounds, latency
+  half the difference, and neither exists until both bounds have a measurement.
+- **Analysis** (`statistics_analyzer.cc`). Every 500 ms the analyzer takes the collected frame events, then packet
+  events, updates its aggregates and latency pairs (the 200 most recent frames and 1000 most recent packets are kept to
+  join events), and gives `SenderStats` to the client. Counts, bitrates and rates cover the whole session since the
+  analyzer was made, not a sliding window; latencies are means over every data point so far; durations are truncated
+  to whole milliseconds as `to_milliseconds` does, so a session shorter than 1 ms yields an infinite rate (shown as
+  the string "null", as Chrome's dictionary does). Histograms are 0 to 800 ms in 20 ms buckets, for capture, encode,
+  queueing, network, packet and end-to-end latency, and lateness.
+- **Exposure** (`openscreen_stats_client.cc`, `openscreen_session_host.cc` `GetMirroringStats`,
+  `stats_event_subscriber.cc` `CastStatToString`). `{ audio, video }`, each holding every statistic under Chrome's name
+  (`ENQUEUE_FPS`, `AVG_CAPTURE_LATENCY_MS`, ..., `LAST_EVENT_TIME_MS`) and the histograms as lists of single-key
+  objects (`"<0"`, `"20-39"`, `">=800"`; empty buckets are left out). The session host merges its own counters:
+  `TARGET_BITRATE` (kbps), `ENCODER_UTILIZATION` and `LOSSINESS` (percent, -100 when nothing reported yet),
+  `FRAMES_INSERTED`, and `FRAMES_DROPPED` (video: dropped before plus after encoding). The `MediaRouterDebugger` surface
+  is mirrored by `getMirroringStats(routeId)`, `setMirroringStatsEnabled`, `isMirroringStatsEnabled` and
+  `registerMirroringStatsObserver`; like Chrome they are a debugging aid, off by default and applied to sessions that
+  start afterwards, and there is no web API for them.
+- **Quirks copied on purpose.** The collector reads RTCP sender reports as if they were RTP packets (every packet
+  goes through `Environment::SendPacket`), so they add to `NUM_PACKETS_SENT` and `TRANSMISSION_KBPS` with a garbage
+  packet id. `kNumPacketsRetransmitted` has no case in Chromium's `StatisticTypeToCastStat`, so it is reported under
+  `UNKNOWN_OPEN_SCREEN_STAT`. Receiver events that arrive before the clock offset is known are left out of the frame
+  and end-to-end latencies, the late-frame count and the first and last event times.
+- **Deviations.** (1) Chrome's debugger is a single global one holding the most recent push of any session (its own
+  TODO says multiple sessions are not handled); `getMirroringStats` takes the route id and each route keeps its own.
+  (2) Electron's capture gives one time per frame, so the capture begin and end of a video frame are both that time
+  (Chrome has `capture_begin_time` and `capture_end_time` from the renderer's frame metadata); the capture latency is
+  therefore 0 and the encode time starts at capture. Audio is the same as in Chrome (one time for both). (3) The stats
+  are fetched from the utility process over its message port (`get-stats`/`stats`), where Chrome calls the Mirroring
+  Service over mojo. (4) Not ported: UMA (`RecordCastStreamingSenderUma` and the other histograms Chrome uploads): they
+  need Chrome's metrics pipeline and send usage data to Google, and this library has no backend or consent to
+  report to.
+
 ### Not checked, or different from Chromium
 
 - The fake receiver in `test/mirroring/` is ours: it implements what openscreen's receiver does for the parts we send
   to (ANSWER, RTCP reports, ACKs, NACKs), not Chrome's receiver app. **No real device has been used.** Whether a real
   Chromecast accepts this OFFER, and what it does with the VP8 we produce, is unverified; the live harness in
   `examples/live-mirroring/` is how to find out.
-- Not ported: Remoting (RPC playback), tab switching (`DidGetTabSourceId`), pause and resume, the stats analyzer and
-  UMA, the GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
+- Not ported: Remoting (RPC playback), tab switching (`DidGetTabSourceId`), pause and resume, UMA (see
+  Mirroring statistics), the GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
   letterboxing, `GET_CAPABILITIES` (Chrome sends it only for remoting).
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the
   session's, which reads as swapped for a message from the receiver; `MirroringActivity` here takes the transport as

@@ -9,6 +9,7 @@
  */
 import { ALL_PACKETS_LOST } from "../protocol/constants.ts";
 import { expandGreaterThan, expandLessThanOrEqual } from "../protocol/frame-id.ts";
+import { expandRtpTimestamp, fromWireType, type RtcpReceiverEventLogMessage, type RtcpReceiverFrameLogMessage } from "../stats/statistics-common.ts";
 import type { NtpTimeConverter } from "./ntp.ts";
 import { parseReportBlock, type RtcpReportBlock } from "./sender-report.ts";
 import {
@@ -41,6 +42,8 @@ export interface PacketNack {
 export interface CompoundRtcpClient {
   onReceiverReferenceTimeAdvanced?(referenceTimeMs: number): void;
   onReceiverReport?(report: RtcpReportBlock): void;
+  /** The receiver's RTCP event log (`OnCastReceiverFrameLogMessages`), only when it sent any. */
+  onCastReceiverFrameLogMessages?(messages: RtcpReceiverFrameLogMessage[]): void;
   onReceiverCheckpoint?(frameId: number, playoutDelayMs: number): void;
   onReceiverHasFrames?(acks: number[]): void;
   onReceiverIsMissingPackets?(nacks: PacketNack[]): void;
@@ -66,10 +69,13 @@ interface SessionIds {
   senderSsrc: number;
   receiverSsrc: number;
   ntp: NtpTimeConverter;
+  /** `RtcpSession::start_time`: the base of the event timestamps in the receiver's log. */
+  startTimeMs: number;
 }
 
 export class CompoundRtcpParser {
   private latestReceiverTimestampMs: number | undefined;
+  private latestFrameLogRtpTimestamp = 0;
   private readonly session: SessionIds;
   private readonly client: CompoundRtcpClient;
 
@@ -91,6 +97,7 @@ export class CompoundRtcpParser {
     let receivedFrames: number[] = [];
     let packetNacks: PacketNack[] = [];
     let pictureLoss = false;
+    const logMessages: RtcpReceiverFrameLogMessage[] = [];
 
     let pos = 0;
     while (pos < buffer.length) {
@@ -111,7 +118,7 @@ export class CompoundRtcpParser {
           break;
         }
         case RtcpPacketType.applicationDefined:
-          if (!this.validateApplicationDefined(dv, header.countOrSubtype, start, end)) return false;
+          if (!this.parseApplicationDefined(dv, header.countOrSubtype, start, end, logMessages)) return false;
           break;
         case RtcpPacketType.payloadSpecific:
           if (header.countOrSubtype === RtcpSubtype.pictureLossIndicator) {
@@ -148,7 +155,7 @@ export class CompoundRtcpParser {
       this.client.onReceiverReferenceTimeAdvanced?.(receiverReferenceTime);
     }
     if (receiverReport !== undefined) this.client.onReceiverReport?.(receiverReport);
-    // Frame log messages are validated above and otherwise unused: the stats analyzer is not ported.
+    if (logMessages.length > 0) this.client.onCastReceiverFrameLogMessages?.(logMessages);
     if (checkpointFrameId !== undefined) this.client.onReceiverCheckpoint?.(checkpointFrameId, targetPlayoutDelayMs);
     if (receivedFrames.length > 0) this.client.onReceiverHasFrames?.(receivedFrames);
     const nacks = canonicalizePacketNacks(packetNacks);
@@ -157,8 +164,8 @@ export class CompoundRtcpParser {
     return true;
   }
 
-  /** `ParseApplicationDefined` + `ParseFrameLogMessages`, structure only. */
-  private validateApplicationDefined(dv: DataView, subtype: number, start: number, end: number): boolean {
+  /** `ParseApplicationDefined` + `ParseFrameLogMessages`: the receiver's event log goes into `messages`. */
+  private parseApplicationDefined(dv: DataView, subtype: number, start: number, end: number, messages: RtcpReceiverFrameLogMessage[]): boolean {
     if (end - start < 8) return false;
     const senderSsrc = dv.getUint32(start);
     const name = dv.getUint32(start + 4);
@@ -168,11 +175,30 @@ export class CompoundRtcpParser {
     let p = start + 8;
     while (p < end) {
       if (end - p < RTCP_RECEIVER_FRAME_LOG_MESSAGE_HEADER_SIZE) return false;
+      const truncatedRtpTimestamp = dv.getUint32(p);
       const data = dv.getUint32(p + 4);
       p += RTCP_RECEIVER_FRAME_LOG_MESSAGE_HEADER_SIZE;
+      // The low 24 bits are the events' base time, in milliseconds from when the session started.
+      const eventTimestampBase = this.session.startTimeMs + (data & 0xffffff);
+      // At least one event is required, so a count of 0 on the wire means one.
       const numEvents = 1 + (data >>> 24);
-      if (end - p < numEvents * RTCP_RECEIVER_FRAME_LOG_MESSAGE_BLOCK_SIZE) return false;
-      p += numEvents * RTCP_RECEIVER_FRAME_LOG_MESSAGE_BLOCK_SIZE;
+      const rtpTimestamp = expandRtpTimestamp(this.latestFrameLogRtpTimestamp, truncatedRtpTimestamp);
+      const frameLog: RtcpReceiverFrameLogMessage = { rtpTimestamp, messages: [] };
+      for (let i = 0; i < numEvents; i++) {
+        if (end - p < RTCP_RECEIVER_FRAME_LOG_MESSAGE_BLOCK_SIZE) return false;
+        const delayDeltaOrPacketId = dv.getUint16(p);
+        const typeAndTimestampDelta = dv.getUint16(p + 2);
+        p += RTCP_RECEIVER_FRAME_LOG_MESSAGE_BLOCK_SIZE;
+        // Unknown event types are not useful.
+        const type = fromWireType(typeAndTimestampDelta >> 12);
+        if (type === "unknown") continue;
+        const event: RtcpReceiverEventLogMessage = { type, timestamp: eventTimestampBase + (typeAndTimestampDelta & 0xfff), packetId: 0, delay: 0 };
+        if (type === "packetReceived") event.packetId = delayDeltaOrPacketId;
+        else event.delay = (delayDeltaOrPacketId << 16) >> 16;
+        frameLog.messages.push(event);
+      }
+      this.latestFrameLogRtpTimestamp = rtpTimestamp;
+      messages.push(frameLog);
     }
     return true;
   }

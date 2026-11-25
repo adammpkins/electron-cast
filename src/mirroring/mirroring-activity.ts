@@ -13,6 +13,7 @@ import type { ReceiverApplication, ReceiverStatus } from "../client/index.ts";
 import { CAST_REMOTING_NAMESPACE, CAST_WEBRTC_NAMESPACE } from "./protocol/constants.ts";
 import { chooseAppId, mirroringNamespace, routeDescription, scrubbedLogMessage, sessionTypeFor, type MirroringSource } from "./routing.ts";
 import type { MirroringError, SessionParameters } from "./session-host.ts";
+import type { MirroringStats } from "./stats/statistics.ts";
 
 /** The slice of a Cast client the activity uses (a subset of the session service's `CastClientLike`). */
 export interface MirroringClient {
@@ -49,7 +50,12 @@ export interface MirroringService {
   onMessage(namespace: string, jsonFormatData: string): void;
   /** Stops capture and streaming; the service never calls `didStop` for a stop the activity asked for. */
   stop(): void;
+  /** `MirroringServiceHost::GetMirroringStats`: the latest statistics; undefined when the service cannot say. */
+  getMirroringStats?(): Promise<MirroringStats | undefined>;
 }
+
+/** `kRtcpReportInterval`: how often the activity fetches the statistics, the interval at which the receiver reports. */
+export const RTCP_REPORT_INTERVAL_MS = 500;
 
 /** `MirroringServiceHost::Start`. */
 export type MirroringServiceFactory = (
@@ -69,6 +75,15 @@ export interface MirroringActivityOptions {
   /** A change of route state (description, launching to mirroring). */
   onChange(): void;
   log?(level: "info" | "error", message: string): void;
+  /**
+   * `MediaRouterDebugger::ShouldFetchMirroringStats`, asked when the session starts: whether the receiver's RTCP event
+   * log is collected and analyzed, and the statistics fetched every 500 ms.
+   */
+  shouldFetchMirroringStats?(): boolean;
+  /** `MediaRouterDebugger::OnMirroringStats`: each set of statistics fetched. */
+  onMirroringStats?(stats: MirroringStats): void;
+  /** Timers for the fetch loop; default `setTimeout`. */
+  setTimeout?(cb: () => void, ms: number): () => void;
 }
 
 export type MirroringActivityState = "launching" | "mirroring" | "stopped";
@@ -85,8 +100,15 @@ export class MirroringActivity {
   private readonly onStop: () => void;
   private readonly onChange: () => void;
   private readonly log: (level: "info" | "error", message: string) => void;
+  private readonly shouldFetchMirroringStats: () => boolean;
+  private readonly onMirroringStats: ((stats: MirroringStats) => void) | undefined;
+  private readonly setTimer: (cb: () => void, ms: number) => () => void;
   private service: MirroringService | undefined;
   private stopping = false;
+  private fetchStatsOnStart = false;
+  private cancelFetch: (() => void) | undefined;
+  /** `most_recent_mirroring_stats_`. */
+  mostRecentMirroringStats: MirroringStats | undefined;
 
   constructor(options: MirroringActivityOptions) {
     this.sink = options.sink;
@@ -99,6 +121,15 @@ export class MirroringActivity {
     // addresses its replies to the source id of the message it answers, so a second id would drop every ANSWER.
     this.sourceId = options.client.senderId;
     this.log = options.log ?? (() => {});
+    this.shouldFetchMirroringStats = options.shouldFetchMirroringStats ?? (() => false);
+    this.onMirroringStats = options.onMirroringStats;
+    this.setTimer =
+      options.setTimeout ??
+      ((cb, ms) => {
+        const t = setTimeout(cb, ms);
+        t.unref();
+        return () => clearTimeout(t);
+      });
     this.client.on("message", (msg) => this.onAppMessage(msg));
     this.client.on("receiverStatus", (status) => this.onReceiverStatus(status));
     this.client.on("close", () => this.stopMirroring());
@@ -144,8 +175,12 @@ export class MirroringActivity {
       this.stopMirroring();
       return;
     }
+    this.fetchStatsOnStart = this.shouldFetchMirroringStats();
     const observer: MirroringSessionObserver = {
-      didStart: () => this.log("info", "mirroring started"),
+      didStart: () => {
+        this.log("info", "mirroring started");
+        if (this.fetchStatsOnStart) this.scheduleFetchMirroringStats();
+      },
       didStop: () => this.stopMirroring(),
       onError: (error, message) => {
         this.log("error", `Mirroring will stop. MirroringService.SessionError: ${error}: ${message}`);
@@ -160,8 +195,38 @@ export class MirroringActivity {
       sourceId: this.sourceId,
       destinationId,
       targetPlayoutDelayMs: this.source.targetPlayoutDelayMs,
+      enableRtcpReporting: this.fetchStatsOnStart,
     };
     this.service = this.createService(params, observer, channel, this.source);
+  }
+
+  /** `ScheduleFetchMirroringStats`. */
+  private scheduleFetchMirroringStats(): void {
+    this.cancelFetch?.();
+    this.cancelFetch = this.setTimer(() => this.fetchMirroringStats(), RTCP_REPORT_INTERVAL_MS);
+  }
+
+  /** `FetchMirroringStats`: ask the service, and schedule the next fetch without waiting for the answer. */
+  private fetchMirroringStats(): void {
+    const service = this.service;
+    if (!this.fetchStatsOnStart || service === undefined || this.state === "stopped") return;
+    void service.getMirroringStats?.().then(
+      (stats) => {
+        if (stats !== undefined && this.state !== "stopped") this.onStats(stats);
+      },
+      () => {},
+    );
+    this.scheduleFetchMirroringStats();
+  }
+
+  /** `OnMirroringStats`. */
+  private onStats(stats: MirroringStats): void {
+    this.mostRecentMirroringStats = stats;
+    try {
+      this.onMirroringStats?.(stats);
+    } catch (err) {
+      this.log("error", `a mirroring stats observer failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** `HandleParseJsonResult`: a message from the service goes to the receiver, in the namespace its type implies. */
@@ -233,6 +298,8 @@ export class MirroringActivity {
     if (this.stopping) return;
     this.stopping = true;
     this.state = "stopped";
+    this.cancelFetch?.();
+    this.cancelFetch = undefined;
     try {
       this.service?.stop();
     } catch (err) {

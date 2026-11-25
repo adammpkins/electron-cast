@@ -79,6 +79,9 @@ export class PortBackend implements MirroringBackend {
           referenceTimeMs: ref,
           newPlayoutDelayMs: 0,
           data: Buffer.from(m.data),
+          // Electron's capture reports one time per frame, so it stands for the begin and the end of the capture.
+          captureBeginTimeMs: ref,
+          captureEndTimeMs: ref,
           // How much of the frame interval the encoder needed, the utilization `VideoSender` feeds back.
           encoderUtilization: Math.max(0, m.encodeMs / this.frameInterval),
         });
@@ -133,6 +136,9 @@ export class PortBackend implements MirroringBackend {
             newPlayoutDelayMs: 0,
             data: Buffer.from(m.data),
             encoderUtilization: -1,
+            // Chrome's audio source also uses the capture time for both.
+            captureBeginTimeMs: meta.referenceTimeMs,
+            captureEndTimeMs: meta.referenceTimeMs,
           },
           skipped,
         );

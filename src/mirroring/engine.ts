@@ -65,6 +65,7 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
     );
     return {
       onMessage: (namespace, json) => host?.onMessage(params.destinationId, namespace, json),
+      getMirroringStats: () => Promise.resolve(host?.getMirroringStats()),
       stop: () => {
         host?.stopSession();
         backend.stopAll?.();

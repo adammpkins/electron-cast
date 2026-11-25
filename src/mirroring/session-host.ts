@@ -6,7 +6,7 @@
  * that is enabled by default), asks for refresh frames on a static screen, and maps failures to session errors.
  *
  * Not ported: remoting (`NegotiateRemoting`, `MediaRemoter`, `RemotingStreamData`), GPU factories and the hardware
- * encoder denylist and renegotiation (WebCodecs does not expose the choice), UMA metrics, `OpenscreenStatsClient`.
+ * encoder denylist and renegotiation (WebCodecs does not expose the choice), UMA metrics.
  */
 import { SUPPORTED_VIDEO_CODECS, type EncodingSupport } from "./encoding-support.ts";
 import { type MirroringBackend, type CapturedVideoFrame, type OperationalStatus, operationalStatusErrorMessage } from "./backend.ts";
@@ -20,6 +20,8 @@ import { FrameSender } from "./sender/frame-sender.ts";
 import { type SenderPacketRouter } from "./sender/packet-router.ts";
 import { SenderSession, type ConfiguredSenders, type SenderSessionClient, type SessionEnvironment } from "./sender/sender-session.ts";
 import type { Sender } from "./sender/sender.ts";
+import { OpenscreenStatsClient } from "./stats/openscreen-stats-client.ts";
+import type { MirroringStats } from "./stats/statistics.ts";
 import { VideoSender, type VideoEncoderPort } from "./sender/video-sender.ts";
 
 /** `kBandwidthUpdateInterval`. */
@@ -73,6 +75,8 @@ export interface SessionParameters {
   targetPlayoutDelayMs?: number;
   /** `force_letterboxing`. */
   forceLetterboxing?: boolean;
+  /** `enable_rtcp_reporting`: collect and analyze the receiver's RTCP event log for `getMirroringStats`. */
+  enableRtcpReporting?: boolean;
 }
 
 export interface SessionHostDeps {
@@ -95,6 +99,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   private readonly deps: SessionHostDeps;
   private readonly settings: MirrorSettings;
   private readonly session: SenderSession;
+  private readonly statsClient: OpenscreenStatsClient | undefined;
   private state: State = "initializing";
   private lastOfferedAudioConfig: FrameSenderConfig | undefined;
   private lastOfferedVideoConfigs: FrameSenderConfig[] = [];
@@ -130,7 +135,35 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       messageDestinationId: params.destinationId,
       timers: { setTimeout: (cb, ms) => deps.environment.schedule(deps.environment.now() + ms, cb) },
     });
+    if (params.enableRtcpReporting === true) {
+      this.statsClient = new OpenscreenStatsClient();
+      this.session.setStatsClient(this.statsClient);
+    }
     this.scheduleBandwidthUpdate();
+  }
+
+  /**
+   * `GetMirroringStats`: the analyzer's latest statistics (empty without `enableRtcpReporting`), and the senders' own
+   * counters merged into the "video" and "audio" dictionaries.
+   */
+  getMirroringStats(): MirroringStats {
+    const stats: MirroringStats = this.statsClient?.getStats() ?? {};
+    const video = this.videoSender;
+    if (video !== undefined) {
+      stats.video = {
+        ...stats.video,
+        TARGET_BITRATE: video.encoderBitrate / 1000,
+        ENCODER_UTILIZATION: video.encoderUtilization * 100,
+        LOSSINESS: video.lossiness * 100,
+        FRAMES_INSERTED: video.framesInserted,
+        FRAMES_DROPPED: video.framesDropped,
+      };
+    }
+    const audio = this.audioSender;
+    if (audio !== undefined) {
+      stats.audio = { ...stats.audio, FRAMES_INSERTED: audio.framesInserted, FRAMES_DROPPED: audio.framesDropped };
+    }
+    return stats;
   }
 
   get isStopped(): boolean {
@@ -544,6 +577,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     this.cancelBandwidthTimer?.();
     this.cancelBandwidthTimer = undefined;
     this.deps.router.stop();
+    this.session.dispose();
     this.deps.observer.didStop?.();
   }
 }

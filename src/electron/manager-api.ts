@@ -6,6 +6,7 @@ import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import type { DeviceSource } from "./session-service.ts";
 import type { MirroringCastMode, StartMirroringOptions } from "../mirroring/mirroring-manager.ts";
+import type { MirroringStats } from "../mirroring/stats/statistics.ts";
 import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource } from "../mirroring/routing.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast devices. */
@@ -108,6 +109,22 @@ export interface CastManagerApi {
    * runs; end it with `terminateRoute`. Needs the `mirroring` option of `createCastManager`.
    */
   startCasting(sinkId: string, options: StartMirroringOptions): Promise<MediaRoute>;
+  /**
+   * Mirroring statistics, a debugging aid like Chrome's `chrome://media-router-internals` "Mirroring stats" (the
+   * `MediaRouterDebugger`: `GetMirroringStats`, `EnableRtcpReports`, `ShouldFetchMirroringStats`, `AddObserver`).
+   * Chrome gives pages no access to them and neither does this library. Off by default and read when a session
+   * starts: call `setMirroringStatsEnabled(true)` before `startCasting`. Then the route's latest statistics are in
+   * `getMirroringStats`, refreshed every 500 ms, with Chrome's names and units (`ENQUEUE_FPS`,
+   * `AVG_NETWORK_LATENCY_MS`, `NETWORK_LATENCY_MS_HISTO`, ...) under `audio` and `video`. Chrome guarantees no
+   * structure: it is for logs.
+   */
+  getMirroringStats(routeId: string): MirroringStats;
+  /** `MediaRouterDebugger::EnableRtcpReports` / `DisableRtcpReports`: applies to sessions that start afterwards. */
+  setMirroringStatsEnabled(enabled: boolean): void;
+  /** `MediaRouterDebugger::ShouldFetchMirroringStats`. */
+  isMirroringStatsEnabled(): boolean;
+  /** `MediaRouterDebugger::AddObserver` (`OnMirroringStatsUpdated`), with the route id. Returns the remove function. */
+  registerMirroringStatsObserver(observer: (routeId: string, stats: MirroringStats) => void): () => void;
 }
 
 /**
@@ -133,6 +150,13 @@ export interface SessionHost {
   detachSession(sessionId: string): BridgeResult;
   /** Mirroring routes; present when the manager was given the `mirroring` option. */
   startCasting?(sinkId: string, options: StartMirroringOptions): Promise<MediaRoute>;
+  /** Mirroring statistics (see `CastManagerApi.getMirroringStats`); present with `startCasting`. */
+  mirroringStats?: {
+    get(routeId: string): MirroringStats;
+    setEnabled(enabled: boolean): void;
+    isEnabled(): boolean;
+    observe(observer: (routeId: string, stats: MirroringStats) => void): () => void;
+  };
 }
 
 /** A Map that reports new and removed keys, so the service needs no per-site notification. */
@@ -312,6 +336,22 @@ export function createManagerApi(
       validateStartCasting(sinkId, options);
       if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
       return host.startCasting(sinkId, options);
+    },
+    getMirroringStats(routeId) {
+      need(routeId);
+      return host.mirroringStats?.get(routeId) ?? {};
+    },
+    setMirroringStatsEnabled(enabled) {
+      if (typeof enabled !== "boolean") throw new TypeError("enabled must be a boolean");
+      if (host.mirroringStats === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
+      host.mirroringStats.setEnabled(enabled);
+    },
+    isMirroringStatsEnabled() {
+      return host.mirroringStats?.isEnabled() ?? false;
+    },
+    registerMirroringStatsObserver(observer) {
+      if (typeof observer !== "function") throw new TypeError("observer must be a function");
+      return host.mirroringStats?.observe(observer) ?? (() => {});
     },
     getRouteController(routeId) {
       need(routeId);

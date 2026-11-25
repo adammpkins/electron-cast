@@ -11,6 +11,12 @@
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
   tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
   pause and resume, hardware codecs.
+- **Mirroring statistics.** A debugging aid with Chrome's names and units, like `chrome://media-router-internals`
+  "Mirroring stats": `setMirroringStatsEnabled(true)` before `startCasting`, then `getMirroringStats(routeId)` and
+  `registerMirroringStatsObserver` (every 500 ms) give `{ audio, video }` with `ENQUEUE_FPS`, the latency averages and
+  histograms, bitrates, packet counts and the sender's own counters. A port of openscreen's statistics collector,
+  clock offset estimator and analyzer, with the receiver's RTCP event log parsed. Off by default; nothing is uploaded
+  (Chrome's UMA is not ported). `examples/live-mirroring` takes `--stats`.
 
 ## 0.4.0
 

@@ -22,6 +22,8 @@ What to expect:
 - Close the window or press Ctrl+C to end it: the receiver's app is stopped and the TV returns to its idle screen.
 - The log shows the negotiation (the OFFER with its keys redacted, the ANSWER) and the codec chosen.
 
-Options: `--extra-codecs` lets the sender also offer VP9 (VP8 is always offered, and Opus for audio).
+Options: `--extra-codecs` lets the sender also offer VP9 (VP8 is always offered, and Opus for audio). `--stats` prints
+the mirroring statistics (Chrome's "Mirroring stats") every 5 seconds, for example
+`npm run tab -- "Living Room TV" --stats`. The first lines come a few seconds in, once the receiver has sent its event log.
 
 If something fails, the log lines that start with `electron-cast mirroring:` and `engine:` say where.

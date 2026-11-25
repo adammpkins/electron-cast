@@ -14,6 +14,8 @@ import { ErrorCode, SessionError, receiverErrorToError } from "../protocol/error
 import { SenderSessionMessenger, type MessagePort, type MessengerTimers } from "../protocol/messenger.ts";
 import type { SenderEnvironment, SenderPacketRouter } from "./packet-router.ts";
 import { Sender, type SessionConfig } from "./sender.ts";
+import { StatisticsAnalyzer } from "../stats/statistics-analyzer.ts";
+import type { SenderStatsClient } from "../stats/statistics.ts";
 
 
 /** The environment as `SenderSession` uses it: the router's, plus the UDP destination learned from the ANSWER. */
@@ -78,6 +80,7 @@ export class SenderSession {
   private readonly useAndroidRtpHack: boolean;
   private negotiation: Negotiation | undefined;
   private sequenceNumber = 0;
+  private statsAnalyzer: StatisticsAnalyzer | undefined;
   state: "idle" | "streaming" = "idle";
 
   constructor(config: SenderSessionConfig) {
@@ -124,6 +127,25 @@ export class SenderSession {
   /** `RequestCapabilities`. */
   requestCapabilities(): void {
     this.messenger.sendRequest(getCapabilitiesMessage(++this.sequenceNumber) as Record<string, unknown> & { seqNum: number }, "CAPABILITIES_RESPONSE", (reply) => this.onCapabilitiesResponse(reply));
+  }
+
+  /**
+   * `SetStatsClient`: from now on the environment reports every packet sent, the senders report their frame events and
+   * the receiver's RTCP event log, and the client gets the analyzed statistics every 500 ms. Once only.
+   */
+  setStatsClient(client: SenderStatsClient): void {
+    if (this.statsAnalyzer !== undefined) throw new Error("the stats client should only be set once");
+    const env = this.config.environment;
+    const analyzer = new StatisticsAnalyzer(client, () => env.now(), (atMs, cb) => env.schedule(atMs, cb));
+    this.statsAnalyzer = analyzer;
+    env.statisticsCollector = analyzer.statisticsCollector;
+    analyzer.scheduleAnalysis();
+  }
+
+  /** The destructor: statistics stop (`SetStatisticsCollector(nullptr)`) and so does the analysis timer. */
+  dispose(): void {
+    this.config.environment.statisticsCollector = undefined;
+    this.statsAnalyzer?.dispose();
   }
 
   /** `GetEstimatedNetworkBandwidth`. */

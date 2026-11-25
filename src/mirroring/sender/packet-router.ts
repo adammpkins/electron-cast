@@ -9,6 +9,7 @@
  */
 import { RTCP_REPORT_INTERVAL_MS, REQUIRED_NETWORK_PACKET_SIZE } from "../protocol/constants.ts";
 import { BandwidthEstimator } from "./bandwidth-estimator.ts";
+import type { StatisticsCollector } from "../stats/statistics-collector.ts";
 import { parseCommonHeader, RTCP_COMMON_HEADER_SIZE } from "../rtcp/wire.ts";
 
 /** sender_packet_router.h `kDefaultMaxBurstBitrate` (24 << 20) and `kDefaultBurstInterval`. */
@@ -31,6 +32,8 @@ export interface SenderEnvironment {
   consumeIncomingPackets?(consumer: (arrivalTimeMs: number, packet: Buffer) => void): void;
   /** `DropIncomingPackets`: and gives them up when the last sender is destroyed. */
   dropIncomingPackets?(): void;
+  /** `Environment::statistics_collector`: set while statistics are on; every packet sent is reported to it. */
+  statisticsCollector?: StatisticsCollector | undefined;
 }
 
 /** sender_packet_router.h `SenderPacketRouter::Sender`. */
@@ -42,6 +45,8 @@ export interface RoutedSender {
   getRtpResumeTime(): number;
   readonly streamType: StreamType;
   readonly wasLastRtpPacketRetransmission: boolean;
+  /** `GetLastRtpTimestamp`. */
+  readonly lastRtpTimestamp?: number;
 }
 
 interface SenderEntry {
@@ -169,6 +174,7 @@ export class SenderPacketRouter extends BandwidthEstimator {
       const packet = e.sender.getRtcpPacketForImmediateSend(sendTime);
       if (packet !== undefined && packet.length > 0) {
         this.env.sendPacket(packet);
+        this.env.statisticsCollector?.collectPacketSentEvent(packet, { streamType: e.sender.streamType, rtpTimestamp: e.sender.lastRtpTimestamp ?? 0 });
         e.nextRtcpSendTime = sendTime + RTCP_REPORT_INTERVAL_MS;
         sent.packets++;
         sent.bytes += packet.length;
@@ -186,6 +192,11 @@ export class SenderPacketRouter extends BandwidthEstimator {
         const packet = e.sender.getRtpPacketForImmediateSend(sendTime);
         if (packet === undefined || packet.length === 0) break;
         this.env.sendPacket(packet);
+        this.env.statisticsCollector?.collectPacketSentEvent(packet, {
+          streamType: e.sender.streamType,
+          rtpTimestamp: e.sender.lastRtpTimestamp ?? 0,
+          isRetransmission: e.sender.wasLastRtpPacketRetransmission,
+        });
         sent.bytes += packet.length;
       }
       e.nextRtpSendTime = e.sender.getRtpResumeTime();

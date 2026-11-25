@@ -21,7 +21,7 @@ function setup() {
     onReceiverIsMissingPackets: (n) => events.push(["nacks", n]),
     onReceiverIndicatesPictureLoss: () => events.push(["pli"]),
   };
-  const parser = new CompoundRtcpParser({ senderSsrc: SENDER, receiverSsrc: RECEIVER, ntp }, client);
+  const parser = new CompoundRtcpParser({ senderSsrc: SENDER, receiverSsrc: RECEIVER, ntp, startTimeMs: 0 }, client);
   return { ntp, events, parser };
 }
 

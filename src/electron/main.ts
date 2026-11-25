@@ -496,6 +496,15 @@ export function createCastManager(options: CastManagerOptions): CastManager {
               throw err;
             }
           },
+    mirroringStats:
+      mirroring === undefined
+        ? undefined
+        : {
+            get: (id) => mirroring.getMirroringStats(id),
+            setEnabled: (enabled) => mirroring.setMirroringStatsEnabled(enabled),
+            isEnabled: () => mirroring.isMirroringStatsEnabled(),
+            observe: (observer) => mirroring.observeMirroringStats(observer),
+          },
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
   });

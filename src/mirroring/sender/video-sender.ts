@@ -87,6 +87,21 @@ export class VideoSender implements FrameSenderClient {
     return this.lastBitrate;
   }
 
+  /** `GetEncoderUtilization`: -1 until an encoded frame reports one. */
+  get encoderUtilization(): number {
+    return this.lastReportedEncoderUtilization;
+  }
+
+  /** `GetLossiness`: -1 until an encoded frame reports one. */
+  get lossiness(): number {
+    return this.lastReportedLossiness ?? -1;
+  }
+
+  /** `GetFramesDropped`: before and after encoding, not the encoder's own drops. */
+  get framesDropped(): number {
+    return this.framesDroppedBeforeEncoding + this.framesDroppedAfterEncoding;
+  }
+
   getNumberOfFramesInEncoder(): number {
     return this.framesInEncoder;
   }
@@ -198,6 +213,7 @@ export class VideoSender implements FrameSenderClient {
   /** `OnFrameDroppedByEncoder`. */
   private onFrameDroppedByEncoder(encoded: SenderEncodedFrame): void {
     this.framesDroppedByEncoder++;
+    this.frameSender.reportFrameDroppedByEncoder(encoded.rtpTimestamp);
     this.lastReportedEncoderUtilization = encoded.encoderUtilization;
     this.reportResourceUtilization(
       Math.max(this.lastReportedEncoderUtilization, this.lastReportedLossiness ?? -1, ENCODER_DROPPED_FRAME_UTILIZATION),
