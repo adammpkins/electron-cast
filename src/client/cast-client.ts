@@ -5,7 +5,9 @@ import type { TLSSocket } from "node:tls";
 import { decodeCastMessage, encodeCastMessage, frame, FrameDecoder, PayloadType } from "../protocol/index.ts";
 import type { CastMessage } from "../protocol/index.ts";
 import { NS, PLATFORM_RECEIVER_ID } from "./namespaces.ts";
-import { CastAuthError, CastConnectionError, CastRequestError, CastTimeoutError } from "./errors.ts";
+import { CastAuthError, CastConnectionError, CastLaunchError, CastRequestError, CastTimeoutError } from "./errors.ts";
+import { chromeSenderIdentity, connectFields, VIRTUAL_CONNECTION_INVISIBLE, VIRTUAL_CONNECTION_STRONG } from "./sender-info.ts";
+import type { SenderIdentity } from "./sender-info.ts";
 import { authenticateChallengeReply, createAuthChallenge } from "./auth/cast-auth.ts";
 import type { DeviceAuthOptions, DeviceAuthResult } from "./auth/cast-auth.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "./types.ts";
@@ -16,10 +18,23 @@ export interface CastClientOptions {
   port?: number;
   senderId?: string;
   connectTimeoutMs?: number;
+  /**
+   * How long GET_APP_AVAILABILITY, STOP, SET_VOLUME and GET_STATUS wait for their reply. Default 5000, Chrome's
+   * `kRequestTimeout` (cast_message_handler.h). Chrome sends GET_STATUS without waiting for the answer; this client
+   * waits for it, so it gets the same bound.
+   */
   requestTimeoutMs?: number;
+  /** How long a LAUNCH waits for the receiver. Default 60000, Chrome's `CastMediaSource` `kDefaultLaunchTimeout`. */
   launchTimeoutMs?: number;
+  /** Idle time before a PING is sent. Default 5000. */
   heartbeatIntervalMs?: number;
+  /** Idle time before the connection is taken as dead. Default 10000. */
   heartbeatTimeoutMs?: number;
+  /**
+   * What CONNECT and LAUNCH tell the receiver about the sender (user agent, browser version, locale, platform). The
+   * defaults are what Chrome on this machine sends; override for tests.
+   */
+  sender?: Partial<SenderIdentity>;
   tls?: Omit<tls.ConnectionOptions, "host" | "port">;
   connectPayload?: Record<string, unknown>;
   /**
@@ -53,10 +68,35 @@ interface PendingRequest {
 interface LaunchWaiter {
   appId: string;
   requestId: number;
+  onStatus: ((status: "pending_authorization" | "allowed") => void) | undefined;
   timer: NodeJS.Timeout;
   resolve: (app: ReceiverApplication) => void;
   reject: (err: unknown) => void;
 }
+
+/** What a LAUNCH asks for beyond the app id; Chrome takes these from the Cast presentation URL. */
+export interface LaunchOptions {
+  /** LAUNCH `supportedAppTypes`; empty or absent sends `["WEB"]`, as `CastMediaSource` defaults. */
+  supportedAppTypes?: readonly string[];
+  /** LAUNCH `appParams`, already parsed from the URL's JSON; `undefined` leaves the field out. */
+  appParams?: unknown;
+  /** Replaces `launchTimeoutMs` for this launch; capped at two minutes (`kLaunchMaxTimeout`). */
+  timeoutMs?: number;
+  /**
+   * Called when the receiver reports that the user must approve the cast (`pending_authorization`, LAUNCH_STATUS
+   * USER_PENDING_AUTHORIZATION) and when they have (`allowed`, USER_ALLOWED). The launch timeout is not extended.
+   */
+  onStatus?: (status: "pending_authorization" | "allowed") => void;
+}
+
+/** cast_message_handler.h `kRequestTimeout`. */
+const REQUEST_TIMEOUT_MS = 5000;
+/** cast_media_source.h `kDefaultLaunchTimeout`. */
+const DEFAULT_LAUNCH_TIMEOUT_MS = 60_000;
+/** cast_message_handler.cc `kLaunchMaxTimeout`. */
+const MAX_LAUNCH_TIMEOUT_MS = 120_000;
+/** cast_message_util.h `kPlatformSenderId`, the source of keep-alive messages. */
+const PLATFORM_SENDER_ID = "sender-0";
 
 type ClientState = "idle" | "connecting" | "connected" | "closed";
 
@@ -93,18 +133,20 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   private pending = new Map<number, PendingRequest>();
   private launchWaiters: LaunchWaiter[] = [];
   private transports = new Set<string>();
-  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private pingTimer: NodeJS.Timeout | null = null;
   private livenessTimer: NodeJS.Timeout | null = null;
   private connectTimer: NodeJS.Timeout | null = null;
   private authNonce: Buffer | null = null;
   private authPeerCert: Buffer | null = null;
   private authResult: DeviceAuthResult | undefined;
   private authFinish: ((err?: Error) => void) | null = null;
+  private readonly identity: SenderIdentity;
 
   constructor(options: CastClientOptions) {
     super();
     this.options = options;
     this.senderId = options.senderId ?? "sender-" + randomBytes(4).toString("hex");
+    this.identity = { ...chromeSenderIdentity(), ...options.sender };
   }
 
   /** True while connected to the receiver. */
@@ -140,7 +182,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         if (err === undefined) {
           this.state = "connected";
           this.startHeartbeat();
-          this.write(buildMessage(this.senderId, NS.CONNECTION, PLATFORM_RECEIVER_ID, { type: "CONNECT", ...this.options.connectPayload }));
+          this.write(buildMessage(this.senderId, NS.CONNECTION, PLATFORM_RECEIVER_ID, { type: "CONNECT", ...connectFields(this.identity, VIRTUAL_CONNECTION_STRONG), ...this.options.connectPayload }));
           resolve();
         } else {
           this.state = "closed";
@@ -231,7 +273,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
       return Promise.reject(new CastConnectionError("not connected"));
     }
     const requestId = this.nextRequestId++;
-    const timeoutMs = options?.timeoutMs ?? this.options.requestTimeoutMs ?? 10000;
+    const timeoutMs = options?.timeoutMs ?? this.options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     return new Promise<T>((resolve, reject) => {
       const entry: PendingRequest = {
         namespace,
@@ -255,17 +297,31 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     );
   }
 
-  /** Launch an app and wait until it appears in a RECEIVER_STATUS. */
-  launch(appId: string): Promise<ReceiverApplication> {
+  /**
+   * Launch an app and wait until it appears in a RECEIVER_STATUS. The LAUNCH carries what Chrome's
+   * `CreateLaunchRequest` (cast_message_util.cc) sends: `language`, `supportedAppTypes` and, when given, `appParams`.
+   */
+  launch(appId: string, options: LaunchOptions = {}): Promise<ReceiverApplication> {
     if (this.state !== "connected") {
       return Promise.reject(new CastConnectionError("not connected"));
     }
     const requestId = this.nextRequestId++;
-    const timeoutMs = this.options.launchTimeoutMs ?? 30000;
+    // CastMessageHandler::LaunchSession caps the launch timeout at kLaunchMaxTimeout (2 minutes)
+    const timeoutMs = Math.min(options.timeoutMs ?? this.options.launchTimeoutMs ?? DEFAULT_LAUNCH_TIMEOUT_MS, MAX_LAUNCH_TIMEOUT_MS);
+    const payload: Record<string, unknown> = {
+      type: "LAUNCH",
+      requestId,
+      appId,
+      language: this.identity.locale,
+      supportedAppTypes: options.supportedAppTypes !== undefined && options.supportedAppTypes.length > 0 ? [...options.supportedAppTypes] : ["WEB"],
+    };
+    if (options.appParams !== undefined) payload.appParams = options.appParams;
     return new Promise<ReceiverApplication>((resolve, reject) => {
       const waiter: LaunchWaiter = {
         appId,
         requestId,
+        onStatus: options.onStatus,
+        // The timer is started once: USER_PENDING_AUTHORIZATION does not restart it (PendingRequests::AddLaunchRequest)
         timer: setTimeout(() => {
           this.removeLaunchWaiter(waiter);
           reject(new CastTimeoutError(`launch of ${appId} timed out after ${timeoutMs} ms`));
@@ -274,7 +330,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         reject,
       };
       this.launchWaiters.push(waiter);
-      this.write(buildMessage(this.senderId, NS.RECEIVER, PLATFORM_RECEIVER_ID, { type: "LAUNCH", appId, requestId }));
+      this.write(buildMessage(this.senderId, NS.RECEIVER, PLATFORM_RECEIVER_ID, payload));
     });
   }
 
@@ -304,12 +360,16 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     return out;
   }
 
-  /** Open a virtual connection to a transport (idempotent). */
-  connectTransport(transportId: string): void {
+  /**
+   * Open a virtual connection to a transport (idempotent). It is a strong one unless the page's source says
+   * `invisibleSender=true` (`CastMediaSource::connection_type`, used by `CastActivityManager::EnsureConnection`).
+   */
+  connectTransport(transportId: string, options?: { invisible?: boolean }): void {
     if (this.state !== "connected") return;
     if (this.transports.has(transportId)) return;
     this.transports.add(transportId);
-    this.sendJson(NS.CONNECTION, transportId, { type: "CONNECT", ...this.options.connectPayload });
+    const connType = options?.invisible === true ? VIRTUAL_CONNECTION_INVISIBLE : VIRTUAL_CONNECTION_STRONG;
+    this.sendJson(NS.CONNECTION, transportId, { type: "CONNECT", ...connectFields(this.identity, connType), ...this.options.connectPayload });
   }
 
   /** Close a virtual connection to a transport. */
@@ -325,7 +385,6 @@ export class CastClient extends EventEmitter<CastClientEvents> {
       return;
     }
     if (this.state !== "connected") return;
-    this.resetLiveness();
     let bodies: Buffer[];
     try {
       bodies = this.decoder.push(chunk);
@@ -341,6 +400,8 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         this.fail(new CastConnectionError(`protocol error: ${describe(err)}`, { cause: err instanceof Error ? err : undefined }));
         return;
       }
+      // KeepAliveHandler::HandleMessage: every received message, not every chunk of bytes, restarts both timers
+      this.resetTimers();
       this.handleMessage(msg);
       if (this.state !== "connected") return;
     }
@@ -386,7 +447,8 @@ export class CastClient extends EventEmitter<CastClientEvents> {
 
   private handleMessage(msg: CastMessage): void {
     if (msg.namespace === NS.HEARTBEAT) {
-      if (this.jsonType(msg) === "PING") this.sendJson(NS.HEARTBEAT, msg.sourceId, { type: "PONG" });
+      // KeepAliveHandler::HandleMessage: a payload that contains "PING" is a ping, anything else is taken as a PONG
+      if (msg.payloadUtf8?.includes("PING") === true) this.sendKeepAlive("PONG");
       return;
     }
     if (msg.namespace === NS.CONNECTION) {
@@ -421,6 +483,8 @@ export class CastClient extends EventEmitter<CastClientEvents> {
       const status = this.normalizeStatus(reply.status);
       this.emit("receiverStatus", status);
       this.settleLaunches(status);
+    } else if (type === "LAUNCH_STATUS") {
+      this.handleLaunchStatus(reply);
     } else if (type === "LAUNCH_ERROR" || type === "INVALID_REQUEST") {
       this.rejectLaunches(reply);
     }
@@ -449,13 +513,32 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     }
   }
 
+  /**
+   * cast_message_util.cc `GetLaunchSessionResponse`: USER_PENDING_AUTHORIZATION and USER_ALLOWED keep the launch open
+   * (`HandleLaunchSessionResponseMiddleStages`); any other status is an empty response, which fails the launch.
+   */
+  private handleLaunchStatus(reply: Record<string, unknown>): void {
+    const requestId = reply.requestId;
+    if (typeof requestId !== "number") return;
+    const status = reply.status;
+    for (const waiter of [...this.launchWaiters]) {
+      if (waiter.requestId !== requestId) continue;
+      if (status === "USER_PENDING_AUTHORIZATION") waiter.onStatus?.("pending_authorization");
+      else if (status === "USER_ALLOWED") waiter.onStatus?.("allowed");
+      else {
+        this.removeLaunchWaiter(waiter);
+        waiter.reject(new CastLaunchError(reply, "error", "Failed to launch session. "));
+      }
+    }
+  }
+
   private rejectLaunches(reply: Record<string, unknown>): void {
     const requestId = reply.requestId;
     if (typeof requestId !== "number") return;
     for (const waiter of [...this.launchWaiters]) {
       if (waiter.requestId !== requestId) continue;
       this.removeLaunchWaiter(waiter);
-      waiter.reject(new CastRequestError(reply));
+      waiter.reject(launchErrorOf(reply));
     }
   }
 
@@ -488,15 +571,17 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     return undefined;
   }
 
+  /**
+   * KeepAliveHandler::Start. Both timers are one-shot (base::RetainingOneShotTimer): the ping timer fires once after
+   * a quiet interval and is started again by the next message received, not by itself.
+   */
   private startHeartbeat(): void {
     this.stopTimers();
-    this.heartbeatTimer = setInterval(() => {
-      this.sendJson(NS.HEARTBEAT, PLATFORM_RECEIVER_ID, { type: "PING" });
-    }, this.options.heartbeatIntervalMs ?? 5000);
-    this.resetLiveness();
+    this.pingTimer = setTimeout(() => this.sendKeepAlive("PING"), this.options.heartbeatIntervalMs ?? 5000);
+    this.startLiveness();
   }
 
-  private resetLiveness(): void {
+  private startLiveness(): void {
     if (this.livenessTimer !== null) clearTimeout(this.livenessTimer);
     const timeoutMs = this.options.heartbeatTimeoutMs ?? 10000;
     this.livenessTimer = setTimeout(() => {
@@ -504,10 +589,33 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     }, timeoutMs);
   }
 
+  /** KeepAliveHandler::ResetTimers, run for every message received. */
+  private resetTimers(): void {
+    if (this.pingTimer === null) return;
+    clearTimeout(this.pingTimer);
+    this.pingTimer = setTimeout(() => this.sendKeepAlive("PING"), this.options.heartbeatIntervalMs ?? 5000);
+    this.startLiveness();
+  }
+
+  /**
+   * KeepAliveHandler::SendKeepAliveMessage: from sender-0 to receiver-0. A write that fails closes the channel
+   * (CAST_SOCKET_ERROR); one that completes restarts the liveness timer only.
+   */
+  private sendKeepAlive(type: "PING" | "PONG"): void {
+    this.write(buildMessage(PLATFORM_SENDER_ID, NS.HEARTBEAT, PLATFORM_RECEIVER_ID, { type }), (err) => {
+      if (this.state !== "connected") return;
+      if (err !== undefined && err !== null) {
+        this.fail(new CastConnectionError(`socket error: failed to send ${type}: ${err.message}`, { cause: err }));
+        return;
+      }
+      this.startLiveness();
+    });
+  }
+
   private stopTimers(): void {
-    if (this.heartbeatTimer !== null) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
+    if (this.pingTimer !== null) {
+      clearTimeout(this.pingTimer);
+      this.pingTimer = null;
     }
     if (this.livenessTimer !== null) {
       clearTimeout(this.livenessTimer);
@@ -552,10 +660,28 @@ export class CastClient extends EventEmitter<CastClientEvents> {
     this.write(buildMessage(this.senderId, namespace, destinationId, payload));
   }
 
-  private write(msg: CastMessage): void {
+  private write(msg: CastMessage, done?: (err?: Error | null) => void): void {
     const socket = this.socket;
-    if (socket !== null) socket.write(frame(encodeCastMessage(msg)));
+    if (socket !== null) socket.write(frame(encodeCastMessage(msg)), done);
   }
+}
+
+/**
+ * cast_message_util.cc `GetLaunchSessionResponse` for a LAUNCH_ERROR (or INVALID_REQUEST, which is not a launch
+ * response and so is an unknown failure), with the message `CastActivityManager::HandleLaunchSessionResponse` gives.
+ */
+function launchErrorOf(reply: Record<string, unknown>): CastLaunchError {
+  if (reply.type === "LAUNCH_ERROR") {
+    // cast_message_util.h kUserNotAllowedError, kNotificationDisabledError
+    if (reply.extendedError === "USER_NOT_ALLOWED") {
+      return new CastLaunchError(reply, "user_not_allowed", "Failed to launch session as the user declined the cast request.");
+    }
+    if (reply.extendedError === "USER_NOTIFICATIONS_DISABLED") {
+      return new CastLaunchError(reply, "notification_disabled", "Failed to launch session as the notifications are disabled on the receiver device.");
+    }
+    return new CastLaunchError(reply, "error", "Failed to launch session. " + (typeof reply.error === "string" ? reply.error : ""));
+  }
+  return new CastLaunchError(reply, "error", "Failed to launch session. ");
 }
 
 function describe(err: unknown): string {

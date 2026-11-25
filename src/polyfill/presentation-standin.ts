@@ -196,7 +196,13 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       this.__teardown();
       bridge.call(state === "closed" ? "close" : "terminate", { connectionId: this.connectionId });
       connections.delete(this.connectionId);
-      this.dispatchEvent(new EV(state === "closed" ? "close" : "terminate"));
+      const ev = new EV(state === "closed" ? "close" : "terminate");
+      // close(): DoClose(CLOSED) then DidClose(reason), whose message is empty (presentation_connection.cc)
+      if (state === "closed") {
+        ev.reason = "closed";
+        ev.message = "";
+      }
+      this.dispatchEvent(ev);
     }
   }
   // An invalid value is ignored, as for any IDL enum attribute
@@ -362,8 +368,10 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       conn.__teardown();
       connections.delete(e.connectionId);
       const ev = new EV(terminated ? "terminate" : "close");
-      ev.reason = e.reason ?? null;
-      ev.message = e.message ?? null;
+      if (!terminated) {
+        ev.reason = e.reason ?? "closed";
+        ev.message = e.message ?? "";
+      }
       conn.dispatchEvent(ev);
       return;
     }

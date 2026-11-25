@@ -287,7 +287,7 @@ test("closing the connection leaves the route and the app running, and a reconne
   await tick(20);
 
   await pcall(wc, "close", { connectionId: "k1" });
-  assert.deepEqual(wc.events().at(-1), { type: "statechange", connectionId: "k1", state: "closed" });
+  assert.deepEqual(wc.events().at(-1), { type: "statechange", connectionId: "k1", state: "closed", reason: "closed", message: "" });
   assert.equal(http.calls.filter((c) => c.method === "DELETE").length, 0, "nothing is stopped");
   assert.equal(manager.getRoutes().length, 1);
   assert.equal(manager.getRoutes()[0]!.parked, true);

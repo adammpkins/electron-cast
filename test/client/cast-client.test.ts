@@ -64,7 +64,9 @@ test("connect opens a virtual connection to receiver-0 with a random sender id",
   assert.equal(m.sourceId, client.senderId);
   assert.equal(m.destinationId, "receiver-0");
   assert.equal(m.payloadType, PayloadType.STRING);
-  assert.deepEqual(m.json, { type: "CONNECT", userAgent: "electron-cast-test" });
+  // connectPayload is applied over the fields Chrome sends
+  assert.equal(m.json?.type, "CONNECT");
+  assert.equal(m.json?.userAgent, "electron-cast-test");
 });
 
 test("a custom sender id is used", async () => {
@@ -108,7 +110,7 @@ test("a RECEIVER_STATUS without applications normalizes to an empty list", async
 });
 
 test("launch resolves with the launched app, then app messages flow over its transport", async () => {
-  const { fake, client } = await setup();
+  const { fake, client } = await setup({ sender: { locale: "en-US" } });
   await client.connect();
   await fake.ready();
   const app = await client.launch("233637DE");
@@ -117,7 +119,7 @@ test("launch resolves with the launched app, then app messages flow over its tra
   assert.equal(app.transportId, "transport-1");
   assert.deepEqual(app.namespaces, [{ name: APP_NS }]);
   const launch = fake.received.find((m) => m.json?.type === "LAUNCH");
-  assert.deepEqual(launch?.json, { type: "LAUNCH", appId: "233637DE", requestId: 1 });
+  assert.deepEqual(launch?.json, { type: "LAUNCH", requestId: 1, appId: "233637DE", language: "en-US", supportedAppTypes: ["WEB"] });
 
   client.connectTransport(app.transportId);
   client.connectTransport(app.transportId); // idempotent
@@ -312,9 +314,14 @@ test("pings on the heartbeat interval and answers the device's PING with PONG", 
     assert.equal(pings().length, 0, "no PING before the interval");
     mock.timers.tick(1);
     await until(() => pings().length === 1, "the first PING");
-    mock.timers.tick(30);
-    await until(() => pings().length === 2, "the second PING");
-    assert.ok(pings().every((p) => p.destinationId === "receiver-0" && p.sourceId === client.senderId));
+    // The ping timer is one-shot: the second PING comes after the PONG has restarted it, one quiet interval later
+    for (let i = 0; i < 200 && pings().length < 2; i++) {
+      mock.timers.tick(30);
+      for (let j = 0; j < 20; j++) await new Promise((r) => setImmediate(r));
+    }
+    assert.equal(pings().length, 2, "the second PING");
+    // KeepAliveHandler sends from sender-0 to receiver-0
+    assert.ok(pings().every((p) => p.destinationId === "receiver-0" && p.sourceId === "sender-0"));
     fake.sendJson(NS_HEARTBEAT, "receiver-0", client.senderId, { type: "PING" });
     await until(() => fake.received.some((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PONG"), "PONG");
   } finally {

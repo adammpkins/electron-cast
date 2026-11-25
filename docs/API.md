@@ -476,11 +476,11 @@ class CastClient extends EventEmitter<CastClientEvents> {
   request<T = Record<string, unknown>>(namespace: string, destinationId: string,
     payload: Record<string, unknown>, options?: { timeoutMs?: number }): Promise<T>
   getStatus(): Promise<ReceiverStatus>
-  launch(appId: string): Promise<ReceiverApplication>
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication>
   stop(sessionId: string): Promise<ReceiverStatus>
   setVolume(volume: { level: number } | { muted: boolean }): Promise<ReceiverStatus>
   getAppAvailability(appIds: string[]): Promise<Record<string, boolean>>
-  connectTransport(transportId: string): void
+  connectTransport(transportId: string, options?: { invisible?: boolean }): void
   closeTransport(transportId: string): void
 }
 ```
@@ -501,12 +501,13 @@ challenge that `connect()` runs by default (see [SECURITY.md](../SECURITY.md#tls
 | `verifyDevice` | `boolean` | `true` | Verify the device is a genuine Google-certified Cast device before use. `false` skips the challenge, for uncertified receivers. |
 | `authTimeoutMs` | `number` | `10000` | Limit for the device's reply to the authentication challenge, counted from the end of the TLS handshake. |
 | `deviceAuth` | `DeviceAuthOptions` | none | Trust roots and clock overrides for the check, for tests and private Cast deployments (see [below](#deviceauthoptions)). |
-| `requestTimeoutMs` | `number` | `10000` | Default limit for `request` and the calls built on it. |
-| `launchTimeoutMs` | `number` | `30000` | Limit for `launch`. |
+| `requestTimeoutMs` | `number` | `5000` | Default limit for `request` and the calls built on it: Chrome's `kRequestTimeout`. |
+| `launchTimeoutMs` | `number` | `60000` | Limit for `launch` (Chrome's default launch timeout; a launch is never held longer than 2 minutes). |
 | `heartbeatIntervalMs` | `number` | `5000` | How often a PING is sent. |
 | `heartbeatTimeoutMs` | `number` | `10000` | The connection fails after this long with no traffic. |
 | `tls` | `Omit<tls.ConnectionOptions, "host" \| "port">` | none | Extra `tls.connect` options, applied after the defaults (so they can override `rejectUnauthorized`). |
-| `connectPayload` | `Record<string, unknown>` | none | Extra fields merged into every CONNECT message. |
+| `connectPayload` | `Record<string, unknown>` | none | Extra fields merged over those of every CONNECT message. |
+| `sender` | `Partial<{ userAgent, browserVersion, locale, platform }>` | what Chrome on this machine sends | What CONNECT and LAUNCH tell the receiver about the sender ([DESIGN](DESIGN.md#what-the-channel-sends-and-waits-for)). For tests. |
 
 #### Methods
 
@@ -518,11 +519,11 @@ challenge that `connect()` runs by default (see [SECURITY.md](../SECURITY.md#tls
 | `send(namespace, destinationId, payload)` | Sends a message. A string is sent as is, an object as JSON, a `Uint8Array` as a binary payload. Throws `CastConnectionError` when not connected. |
 | `request(namespace, destinationId, payload, options?)` | Adds a `requestId`, sends, and resolves with the matching reply. Rejects with `CastRequestError` for an error reply, `CastTimeoutError` on timeout, `CastConnectionError` if the connection ends. |
 | `getStatus()` | The receiver's current status. |
-| `launch(appId)` | Launches an app and resolves when it appears in a `RECEIVER_STATUS`. Rejects with `CastRequestError` (for `LAUNCH_ERROR` or `INVALID_REQUEST`) or `CastTimeoutError`. |
+| `launch(appId, options?)` | Launches an app and resolves when it appears in a `RECEIVER_STATUS`. The LAUNCH carries `language`, `supportedAppTypes` (`options.supportedAppTypes`, else `["WEB"]`) and `appParams` (`options.appParams`). `options.timeoutMs` replaces `launchTimeoutMs` (2 minutes at most); `options.onStatus` hears `pending_authorization` and `allowed` (`LAUNCH_STATUS`), which do not extend the timeout. Rejects with `CastLaunchError` (for `LAUNCH_ERROR`, `INVALID_REQUEST` or an unknown `LAUNCH_STATUS`) or `CastTimeoutError`. |
 | `stop(sessionId)` | Stops a session. Resolves with the new status. |
 | `setVolume(volume)` | Sets the device volume level (0 to 1) or muted flag. Resolves with the new status. |
 | `getAppAvailability(appIds)` | Which of the apps the receiver can run. |
-| `connectTransport(transportId)` | Opens a virtual connection to an app's transport. Idempotent. Needed before messaging the app. Ignored when not connected. |
+| `connectTransport(transportId, options?)` | Opens a virtual connection to an app's transport, strong unless `options.invisible`. Idempotent. Needed before messaging the app. Ignored when not connected. |
 | `closeTransport(transportId)` | Closes it. |
 
 #### Events
@@ -604,6 +605,7 @@ All are `Error` subclasses with `name` set to the class name.
 | `CastConnectionError` | The connection could not be made, was closed, failed, or timed out on heartbeat; `send` while disconnected. | `cause` (the underlying error, if any) |
 | `CastTimeoutError` | The TLS handshake, a request, or a launch did not finish in time. | none |
 | `CastAuthError` | The device did not prove it is a genuine Cast device (reasons below). The message names the device address when known. | `reason: CastAuthReason`, `host: string \| undefined` |
+| `CastLaunchError` | A `launch` failed (a `CastRequestError`). | `failure: CastLaunchFailure` (`"user_not_allowed"`, `"notification_disabled"` or `"error"`), `description: string` (Chrome's text for it) |\| "notification_disabled" \| "error"`, `description: string` (Chrome's text for it) |
 | `CastRequestError` | The receiver replied with an error: type `INVALID_REQUEST`, `LOAD_FAILED`, `LOAD_CANCELLED`, `INVALID_PLAYER_STATE`, or ending in `_ERROR`. | `type: string`, `reason: string \| undefined`, `response: Record<string, unknown>` |
 
 `CastAuthReason` (an exported type) is one of:

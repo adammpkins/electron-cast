@@ -123,13 +123,46 @@ Namespaces (JSON payloads, `payload_type` STRING):
 
 | Namespace | Messages |
 |---|---|
-| `urn:x-cast:com.google.cast.tp.connection` | `{type:"CONNECT"}` opens a virtual connection to a destination id; `{type:"CLOSE"}` closes it. |
-| `urn:x-cast:com.google.cast.tp.heartbeat` | `PING` / `PONG`. The sender pings every 5 s; no inbound traffic for 10 s means the connection is dead. Answer the device's `PING` with `PONG`. |
-| `urn:x-cast:com.google.cast.receiver` | `GET_STATUS`, `LAUNCH {appId}`, `STOP {sessionId}`, `SET_VOLUME {volume:{level}}` or `{volume:{muted}}`, `GET_APP_AVAILABILITY {appId:[…]}`. Replies: `RECEIVER_STATUS`, `LAUNCH_ERROR`, `INVALID_REQUEST`, and the availability reply. Requests carry an integer `requestId`; replies echo it. |
+| `urn:x-cast:com.google.cast.tp.connection` | `{type:"CONNECT", userAgent, connType, origin: {}, senderInfo}` opens a virtual connection to a destination id; `{type:"CLOSE"}` closes it. See [What the channel sends](#what-the-channel-sends-and-waits-for). |
+| `urn:x-cast:com.google.cast.tp.heartbeat` | `PING` / `PONG`, sent from `sender-0` to `receiver-0`. A PING goes out after 5 s with nothing received; 10 s after the last message or completed keep-alive write the connection is dead. Answer the device's `PING` with `PONG`. |
+| `urn:x-cast:com.google.cast.receiver` | `GET_STATUS`, `LAUNCH {appId, language, supportedAppTypes, appParams?}`, `STOP {sessionId}`, `SET_VOLUME {volume:{level}}` or `{volume:{muted}}`, `GET_APP_AVAILABILITY {appId:[…]}`. Replies: `RECEIVER_STATUS`, `LAUNCH_STATUS`, `LAUNCH_ERROR`, `INVALID_REQUEST`, and the availability reply. Requests carry an integer `requestId`; replies echo it. |
 
 Ids: the platform receiver is `receiver-0`. Each sender uses `sender-<random>`. After `LAUNCH`, the app's
 `transportId` from `RECEIVER_STATUS.status.applications[]` is the destination for a second `CONNECT` and for all app
 namespace messages.
+
+### What the channel sends and waits for
+
+`CastClient` follows Chrome's `cast_channel` code for what it puts in its messages and for its timers. Everything below is
+tested against a fake receiver and **not yet tried on a real device**.
+
+| Rule | Where | Chromium |
+|---|---|---|
+| CONNECT carries `userAgent`, `connType` (0 strong, 2 invisible), `origin: {}` and `senderInfo` (`sdkType` 2, `version` and `browserVersion`, `platform` 3 on Windows, 4 on macOS, 6 on Linux, `connectionType` 1, and `systemVersion`, the first parentheses of the user agent) | `sender-info.ts` `connectFields` | `cast_message_util.cc`: `CreateVirtualConnectionRequest`, `GetVirtualConnectPlatformValue` |
+| The connection to `receiver-0` is strong. The app's transport is strong too, and invisible only when the presentation URL says `invisibleSender=true` | `CastClient.connect`, `connectTransport(id, { invisible })` | `cast_message_util.cc`: `GetConnectionType`; `cast_activity_manager.cc`: `EnsureConnection`; `cast_media_source.cc`: `invisibleSender` |
+| LAUNCH carries `language` (the locale), `supportedAppTypes` (`["WEB"]` when the URL names none) and `appParams` (the URL's JSON, left out when empty or `null`; text that is not JSON fails the launch with "Invalid JSON Format of appParams" before anything is sent) | `CastClient.launch`, `session-service.ts` `launchOn` | `cast_message_util.cc`: `CreateLaunchRequest`; `cast_activity_manager.cc`: `LaunchSession`; `cast_media_source.cc`: `SupportedAppTypesFromString` |
+| `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` and `USER_ALLOWED` keep the launch open and are reported (`onLaunchStatus` of the session service, `LaunchOptions.onStatus` of the client). **The launch timeout is not extended**: its timer is started once, so a user who takes longer than the timeout makes the launch time out. Any other status fails the launch | `CastClient.handleLaunchStatus` | `cast_message_util.cc`: `GetLaunchSessionResponse`; `cast_message_handler.cc`: `AddLaunchRequest`; `cast_activity_manager.cc`: `HandleLaunchSessionResponseMiddleStages`, `SendPendingUserAuthNotification` |
+| `LAUNCH_ERROR` with `extendedError` `USER_NOT_ALLOWED` or `USER_NOTIFICATIONS_DISABLED` are told apart (`CastLaunchError.failure`), and the page's request rejects with Chrome's text: "Failed to launch session as the user declined the cast request.", "Failed to launch session as the notifications are disabled on the receiver device.", "Failed to launch session due to timeout.", otherwise "Failed to launch session. " and the receiver's `error`. The page sees an `OperationError` (Chrome's `PresentationErrorType::UNKNOWN`) with that text | `CastClient.launch`, `session-service.ts` | `cast_activity_manager.cc`: `HandleLaunchSessionResponse`, `HandleLaunchSessionResponseFailures`; `start_presentation_context.cc`: `HandleRouteResponse`; `media_router_desktop.cc`: `RouteResponseReceived` |
+| A launch waits for the URL's `launchTimeout` (60 s by default), never more than 2 minutes. Other requests (app availability, stop, volume, and status) wait 5 s | `CastClient` `launch`, `request` | `cast_media_source.h`: `kDefaultLaunchTimeout`; `cast_message_handler.cc`: `kLaunchMaxTimeout`; `cast_message_handler.h`: `kRequestTimeout` |
+| Keep-alive: a PING after 5 s of silence, once (the timer is one-shot and the next message received starts it again); every message received restarts the ping and liveness timers; a keep-alive write that completes restarts the liveness timer only; one that fails closes the channel. A payload containing `PING` is answered with `PONG`, anything else in the heartbeat namespace is taken as a `PONG` | `CastClient.startHeartbeat`, `resetTimers`, `sendKeepAlive` | `keep_alive_handler.cc`: `Start`, `HandleMessage`, `ResetTimers`, `SendKeepAliveMessageComplete`, `LivenessTimeout`; `cast_message_util.cc`: `CreateKeepAliveMessage` |
+| A close event carries blink's reason: `closed` for a page's `close()` and for `leave_session`, `wentaway` for a page that is destroyed (invisible: nobody is left to see it), and an empty message. `error` (`CONNECTION_ERROR`) is what Chrome gives a route whose launch failed, which has no page connection yet, so no page sees it. A session the receiver ends is `terminate`, which has no reason | `presentation-handler.ts` `Conn.end`, `main.ts`, `presentation-standin.ts` | `presentation_connection.cc`: `ConnectionCloseReasonToEnum`, `DoClose`, `CloseConnection`; `cast_activity.cc`: `HandleLeaveSession`; `cast_activity_manager.cc`: `RemoveActivity` |
+
+Where electron-cast differs, on purpose or because Chrome's input is not there:
+
+- Chrome takes the user agent, the browser version and the locale from the browser (`embedder_support::GetUserAgent`,
+  `version_info::GetVersionNumber`, `GetApplicationLocale`, in `chrome_cast_message_handler.cc`). electron-cast builds the
+  user agent as Chrome's reduced desktop one (`Chrome/<major>.0.0.0` with the unified platform token of
+  `user_agent_utils.cc` `GetUnifiedPlatform`; whether Chrome's reduced form is on for every user was not checked in the
+  source), takes the version from `process.versions.chrome` (empty in plain Node) and the locale from `Intl`. The app's own
+  user agent, with its name and Electron's, is not sent.
+- Chrome sends GET_STATUS without waiting for the reply. `CastClient.getStatus` waits for it, so it gets the same 5 s bound
+  as the other requests.
+- When the device's channel is lost, the session ends for the page as `disconnect_session` and a `closed` connection.
+  Chrome ends it when the sink goes (`CastSessionTracker::OnSinkRemoved`, then `OnSessionRemoved`) as a
+  `terminated` connection. This is not changed here.
+- The stand-in reports whatever reason the main process sends (`closed`, `error` or `wentaway`; tested), but on the Cast
+  route only `closed` reaches a page that is still alive; `wentaway` is sent for a sender that is gone, which no page sees.
+- A join does not carry the source's `invisibleSender`: the transport of a joined session connects strong.
 
 ## Discovery layer (`src/discovery/`)
 
