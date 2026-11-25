@@ -198,15 +198,15 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">DIAL TVs</th>
-                <td colspan="3">Discovery and device descriptions tested on real Chromecasts (1st gen, Ultra). Launching an app over DIAL needs a DIAL-only TV and is untested: see the call below.</td>
+                <td colspan="3">Discovery and device descriptions tested on real Chromecasts (1st gen, Ultra). DIAL dedup tested with real Chromecasts: three that answer both mDNS and DIAL were each listed once, as Cast sinks. Launching an app over DIAL needs a DIAL-only TV and is untested: see the call below.</td>
               </tr>
               <tr>
                 <th scope="row">Casting from the app's own UI, sessions other senders started</th>
-                <td colspan="3">Unit tests and the CI smoke test only so far.</td>
+                <td colspan="3">Casting from the app's own UI tested on a Nest Hub Max: <code>startCasting</code> from the main process started a session, the page got <code>connectionavailable</code>, media reached PLAYING and <code>terminateRoute</code> ended it. Sessions other senders started: unit tests and the CI smoke test only so far.</td>
               </tr>
               <tr>
                 <th scope="row">Casting from iframes</th>
-                <td colspan="3">Unit tests only. No real device has been through it yet.</td>
+                <td colspan="3">Tested on a Nest Hub Max, from a same-origin and a cross-origin iframe (media reached PLAYING). Moving or removing an iframe while it casts is unit-tested only.</td>
               </tr>
             </tbody>
           </table>
