@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 // The built package entry through its own name, so the exports map and dist/ are what gets tested.
 import { createCastManager } from "electron-cast/main";
 import { FakeClient, FakeDiscovery, TV } from "./fakes.mjs";
+import { runMirroringScenario } from "./mirroring.mjs";
 
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 60_000;
 const SCHEME = "smoke";
 const PAGE_ORIGIN = `${SCHEME}://app`;
 const APP_ID = "233637DE";
@@ -207,6 +208,9 @@ async function main() {
     pass("requestSession() with a user gesture resolved a session from the fake client");
     win.destroy();
   }
+
+  // 3. tab mirroring against the fake receiver
+  await runMirroringScenario({ pass, fail });
 
   await cast.dispose();
   clearTimeout(timer);

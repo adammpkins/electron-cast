@@ -39,7 +39,7 @@ export class PortBackend implements MirroringBackend {
   }
 
   private onAgentMessage(m: AgentToEngine): void {
-    if (this.stopped) return;
+    if (this.stopped || typeof m !== "object" || m === null) return;
     switch (m.t) {
       case "ready":
         break;

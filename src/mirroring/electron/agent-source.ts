@@ -127,10 +127,15 @@ export const AGENT_SOURCE = String.raw`
   async function pumpVideo(track, params) {
     videoInfo = params;
     videoReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    let lastAcceptedAt = -1e9;
     for (;;) {
       const { value: frame, done } = await videoReader.read();
       if (done || stopped) { if (frame) frame.close(); return; }
       if (paused) { frame.close(); continue; }
+      // The capture may deliver faster than the requested rate (a 60 Hz page); keep the minimum frame interval.
+      const nowMs = performance.now();
+      if (nowMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { frame.close(); continue; }
+      lastAcceptedAt = nowMs;
       if (firstTimestamp === null) firstTimestamp = frame.timestamp;
       // Presentation time in RTP ticks (90 kHz), made strictly increasing.
       let rtp = Math.round(((frame.timestamp - firstTimestamp) * 90) / 1000) + 90000;
@@ -151,7 +156,7 @@ export const AGENT_SOURCE = String.raw`
         const info = inFlight.shift();
         const data = new ArrayBuffer(chunk.byteLength);
         chunk.copyTo(data);
-        send({ t: "video-chunk", rtp: info ? info.rtp : 0, key: chunk.type === "key", data, encodeMs: info ? performance.now() - info.startedAt : 0 }, [data]);
+        send({ t: "video-chunk", rtp: info ? info.rtp : 0, key: chunk.type === "key", data, encodeMs: info ? performance.now() - info.startedAt : 0 });
       },
       error: (err) => send({ t: "encoder-status", kind: "video", status: "codec_runtime_error" }) || fail("encoder", err),
     });
@@ -202,7 +207,7 @@ export const AGENT_SOURCE = String.raw`
         const seq = audioInFlight.shift();
         const data = new ArrayBuffer(chunk.byteLength);
         chunk.copyTo(data);
-        send({ t: "audio-chunk", seq: seq === undefined ? 0 : seq, data }, [data]);
+        send({ t: "audio-chunk", seq: seq === undefined ? 0 : seq, data });
       },
       error: (err) => { send({ t: "encoder-status", kind: "audio", status: "codec_runtime_error" }); fail("encoder", err); },
     });

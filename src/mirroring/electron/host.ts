@@ -48,6 +48,8 @@ export interface UtilityProcessLike {
   on(event: "exit", listener: (code: number) => void): unknown;
   on(event: "spawn", listener: () => void): unknown;
   kill(): boolean;
+  readonly stdout?: { on(event: "data", listener: (chunk: Buffer) => void): unknown } | null;
+  readonly stderr?: { on(event: "data", listener: (chunk: Buffer) => void): unknown } | null;
 }
 
 /** The Electron pieces mirroring needs. */
@@ -148,11 +150,14 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         wc.session.setPermissionCheckHandler((_wc, permission) => permission === "media");
 
         let capture: CaptureSource;
+        let mintTabSource: (() => CaptureSource) | undefined;
         if (source.type === "tab") {
           const tabId = Number(source.id.slice(source.id.lastIndexOf(":") + 1));
           const target = e.webContents.fromId(tabId);
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
-          capture = { kind: "tab", mediaSourceId: target.getMediaSourceId(wc) };
+          // The id is bound to the requesting frame, so it can only be minted once the agent page has loaded.
+          mintTabSource = () => ({ kind: "tab", mediaSourceId: target.getMediaSourceId(wc) });
+          capture = { kind: "tab", mediaSourceId: "" };
         } else {
           const id = desktopStreamId(source.id) ?? "";
           const sources = await e.desktopCapturer.getSources({ types: ["screen", "window"] });
@@ -164,6 +169,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         }
 
         await win.loadFile(join(dir, "agent.html"));
+        if (mintTabSource !== undefined) capture = mintTabSource();
         // Feature-detect what WebCodecs can encode here; VP8 first, anything else only when asked for.
         const supported = (await wc.executeJavaScript(
           `(async () => { const out = []; for (const [name, codec] of Object.entries(${JSON.stringify(PROBE)})) {` +
@@ -178,8 +184,11 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         const channelMain = new e.MessageChannelMain();
         wc.postMessage(PORT_CHANNEL, null, [channelMain.port1]);
         const enginePath = options.engineModulePath ?? defaultEngineModulePath();
-        const proc = e.utilityProcess.fork(enginePath, [], { serviceName: "electron-cast mirroring", stdio: "inherit" });
+        const proc = e.utilityProcess.fork(enginePath, [], { serviceName: "electron-cast mirroring", stdio: "pipe" });
         child = proc;
+        // The engine's own output (an exception, say) goes to the log, not to the app's console.
+        proc.stdout?.on("data", (c) => log("info", `engine: ${c.toString().trimEnd()}`));
+        proc.stderr?.on("data", (c) => log("error", `engine: ${c.toString().trimEnd()}`));
         proc.on("message", (m) => {
           switch (m.type) {
             case "send": channel.send(m.namespace, m.json); break;
