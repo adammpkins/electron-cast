@@ -161,6 +161,8 @@ The package root exports every layer, if you want to use them without Electron:
 
 See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
 
+More docs: [API reference](docs/API.md), [security notes](SECURITY.md) and a [runnable example app](examples/electron-app).
+
 ## License
 
 MIT

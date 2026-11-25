@@ -1,0 +1,69 @@
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { createCastManager } from "electron-cast/main";
+
+const here = (name) => fileURLToPath(new URL(name, import.meta.url));
+
+// The page is served over http on loopback so it has a real origin that allowOrigin can name. (A file: page has an
+// opaque origin, and Google's Cast SDK is meant to run on http(s) pages.)
+const files = { "/": ["index.html", "text/html"], "/page.js": ["page.js", "text/javascript"] };
+const server = createServer(async (req, res) => {
+  const entry = files[req.url ?? ""];
+  if (entry === undefined) {
+    res.writeHead(404).end();
+    return;
+  }
+  res.writeHead(200, { "content-type": `${entry[1]}; charset=utf-8` }).end(await readFile(here(entry[0])));
+});
+
+let win;
+let pageOrigin;
+
+const cast = createCastManager({
+  ipcMain,
+  // Only our own page may cast.
+  allowOrigin: (origin) => origin === pageOrigin,
+  // Called when the page asks to start a session. Resolve a device, "stop" or null (cancel).
+  async selectDevice(devices, request) {
+    const buttons = devices.map((d) => `${d.name} (${d.model})`);
+    if (request.session) buttons.push("Stop casting");
+    buttons.push("Cancel");
+    const { response } = await dialog.showMessageBox(win, {
+      type: "question",
+      message: "Cast to",
+      buttons,
+      cancelId: buttons.length - 1,
+      noLink: true,
+    });
+    if (response < devices.length) return devices[response];
+    if (request.session && response === devices.length) return "stop";
+    return null;
+  },
+});
+
+// Not a top-level `await app.whenReady()`: in an ESM main that never lets Electron finish starting up.
+app.whenReady().then(async () => {
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  pageOrigin = `http://127.0.0.1:${server.address().port}`;
+  await cast.start();
+
+  win = new BrowserWindow({
+    width: 700,
+    height: 500,
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: here("preload.bundle.cjs"),
+    },
+  });
+  await win.loadURL(pageOrigin);
+});
+
+app.on("window-all-closed", () => app.quit());
+app.on("will-quit", () => {
+  server.close();
+  void cast.dispose();
+});

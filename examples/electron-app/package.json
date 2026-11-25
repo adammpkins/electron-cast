@@ -1,0 +1,19 @@
+{
+  "name": "electron-cast-example",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A minimal Electron app that casts with Google's Cast SDK through electron-cast.",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "build:preload": "esbuild preload.js --bundle --platform=node --format=cjs --external:electron --outfile=preload.bundle.cjs",
+    "start": "npm run build:preload && electron ."
+  },
+  "dependencies": {
+    "electron-cast": "file:../.."
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "esbuild": "^0.25.0"
+  }
+}
