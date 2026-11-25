@@ -20,6 +20,9 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type {
+  MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
+} from "./media-controller.ts";
+export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
   MediaSinksQuery, SinkIconType,
 } from "./manager-api.ts";
@@ -439,6 +442,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     terminateSession: (id) => service.terminateSession(id),
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
+    sendSessionMessage: (id, ns, m) => service.sendSessionMessage(id, ns, m),
+    observeSessionMessages: (l) => service.observeSessionMessages(l),
+    sessionVolume: (id) => service.sessionVolume(id),
   });
   let disposed = false;
   return {

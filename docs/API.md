@@ -72,6 +72,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `channel` | `string` | `"electron-cast"` | Prefix of the IPC channel names. Must match the preload's `channel`. |
 | `presentation` | `boolean` | `true` | Serve the preload's default (`"presentation"`) mode. With `false`, only `mode: "chromecast"` pages are served, and `ipcMain.on` and `removeListener` are not needed. |
 | `verifyDevices` | `boolean` | `true` | Verify each device is a genuine Google-certified Cast device when connecting, as Chrome does (see [device authentication](#device-authentication)). `false` allows uncertified receivers such as open-source ones. A device that fails is still listed by discovery and the picker; casting to it fails as for an unreachable device. |
+| `allowAllIPs` | `boolean` | `false` | Connect to devices at any address. Chrome opens no Cast channel to a publicly routable or loopback address unless its `MediaRouterCastAllowAllIPs` policy is set, so by default such a device is not listed, offered or connected to (see [SECURITY.md](../SECURITY.md#device-addresses)). Applies to a `discovery` you pass too. |
 
 #### `CastManager`
 
@@ -80,7 +81,7 @@ main frame and a synthetic id (2^30 and up) for an iframe.
 | `start(): Promise<void>` | Starts discovery: opens an mDNS socket on every external IPv4 interface and on each adapter's IPv6 link-local address, and queries (see [Discovery](#discovery)). Safe to call more than once. Rejects only if the manager was disposed. |
 | `devices(): CastDevice[]` | The devices known right now. Fresh copies, sorted. |
 | `dispose(): Promise<void>` | Removes the IPC handlers, stops discovery, closes every device connection and ends all sessions. Idempotent. A disposed manager cannot be restarted; create a new one. |
-| `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
+| `registerMediaSinksObserver(observer, query?)`, `registerMediaRoutesObserver(observer)`, `getRoutes()`, `terminateRoute(id)`, `detachRoute(id)`, `getRouteController(id)`, `getMediaController(id, observer?)` | The main-process Media Router API: observe devices (sinks) and sessions (routes), stop or detach a session, set its volume. Documented in [MAIN-API.md](MAIN-API.md), with the types `MediaSink`, `MediaSinksObserver`, `MediaSinksQuery`, `SinkIconType`, `MediaRoute`, `MediaRoutesObserver`, `MediaRouteController`, `MediaController`, `MediaStatus`, `MediaStatusObserver`, `CastManagerApi`, `DevicePickerContext` and the error class `MediaRouteError`, all exported from `electron-cast/main`. |
 
 #### `selectDevice`
 
@@ -128,6 +129,19 @@ gesture.", what Chromium's `PresentationServiceImpl::StartPresentation` reports 
 The page-side stand-in rejects with `InvalidAccessError` first, as Blink's `PresentationRequest::start()` does.
 `mode: "chromecast"` has no gesture check. See [SECURITY.md](../SECURITY.md#user-gesture) for what this does and does
 not protect against.
+
+#### Sources electron-cast does not serve
+
+electron-cast launches receiver apps; it does not mirror or remote. A presentation URL that names a Cast Streaming app
+(`0F5096E8` or `85CDB22F`, in `cast:` or the legacy `https://google.com/cast#__castAppId__=` form, also when
+listed beside ordinary apps in one legacy URL) is a mirroring source in Chrome, and a `remote-playback:` source (made
+by `HTMLMediaElement.remote`) is served by media remoting. Neither is launched here: the request reads as having no
+screen, so `getAvailability()` resolves `false` and `start()` rejects with `NotFoundError` ("No screens found.").
+When a request lists several URLs, the first ordinary Cast app URL is served, so a normal app next to a mirroring one
+still casts. The stand-in's `PresentationRequest` keeps only `http`, `https`, `cast` and `cast-dial` URLs and throws
+`NotSupportedError` ("An empty sequence of URLs is not supported.") when none is left, as Blink does, so a page cannot
+make a `remote-playback:` request. `video.remote` is not touched and never reports a device. See
+[DESIGN.md](DESIGN.md#presentation-sources).
 
 #### Rejoining after a reload or restart
 

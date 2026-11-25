@@ -5,6 +5,7 @@
 import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import type { DeviceSource } from "./session-service.ts";
+import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast devices. */
 export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group";
@@ -62,7 +63,7 @@ export interface MediaRoutesObserver {
   onRoutesUpdated(routes: MediaRoute[]): void;
 }
 
-/** Chrome: `media_router::mojom::MediaController`, here only the volume half (`SetMute`, `SetVolume`). */
+/** The volume half of `media_router::mojom::MediaController` (`SetMute`, `SetVolume`); see {@link MediaController} for all of it. */
 export interface MediaRouteController {
   setMute(muted: boolean): Promise<void>;
   /** 0 to 1. */
@@ -93,6 +94,12 @@ export interface CastManagerApi {
   detachRoute(routeId: string): void;
   /** `MediaRouter::GetMediaController` / `mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
   getRouteController(routeId: string): MediaRouteController;
+  /**
+   * `MediaRouter::GetMediaController`: play, pause, seek, skip and volume on the route's media, and the media status as
+   * `CastMediaController` reports it to the observer (now if the receiver volume is known, then on each change). Call
+   * `close()` on the controller to stop the reports.
+   */
+  getMediaController(routeId: string, observer?: MediaStatusObserver): MediaController;
 }
 
 /**
@@ -110,11 +117,10 @@ export interface DevicePickerContext {
 }
 
 /** What the session service exposes to the API (a narrow slice of it). */
-export interface SessionHost {
+export interface SessionHost extends Omit<MediaControllerHost, "hasRoute"> {
   mediaRoutes(): MediaRoute[];
   observeSessions(listener: () => void): () => void;
   terminateSession(sessionId: string): Promise<BridgeResult>;
-  setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult>;
   detachSession(sessionId: string): BridgeResult;
 }
 
@@ -268,6 +274,10 @@ export function createManagerApi(
   const routeObservers = new ObserverSet<MediaRoute>(() => host.mediaRoutes());
   const unobserve = host.observeSessions(() => routeObservers.notify());
 
+  const controllers = createMediaControllers(
+    { ...host, hasRoute: (id) => host.mediaRoutes().some((r) => r.id === id) },
+    (code, message) => new MediaRouteError(code, message),
+  );
   const need = (routeId: string): void => {
     if (!host.mediaRoutes().some((r) => r.id === routeId)) {
       throw new MediaRouteError("route_not_found", `no route ${routeId}`);
@@ -303,7 +313,9 @@ export function createManagerApi(
         },
       };
     },
+    getMediaController: (routeId, observer) => controllers.get(routeId, observer),
     dispose() {
+      controllers.dispose();
       unobserve();
       routeObservers.clear();
       sinks.dispose();

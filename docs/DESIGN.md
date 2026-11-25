@@ -157,6 +157,20 @@ Observed on real devices (fixtures in `test/fixtures/mdns/`):
   that only it heard are removed at once rather than after their TTL, and a timer that fires far too late (the
   machine slept) makes discovery replace its sockets and query again.
 
+### Device addresses
+
+Chrome opens a Cast channel only to an address that is neither publicly routable nor loopback, unless the
+`MediaRouterCastAllowAllIPs` policy is set: `CastMediaSinkServiceImpl::OpenChannel`
+(`chrome/browser/media/router/discovery/mdns/cast_media_sink_service_impl.cc`) logs "Did not open a channel to the IP
+endpoint" and reports the channel as not opened, so the sink never appears; the policy is wired in
+`cast_media_sink_service.cc`. The predicates are `net::IPAddress::IsPubliclyRoutable` and `IsLoopback`
+(`net/base/ip_address.cc`), ported in `src/discovery/ip-policy.ts`: IPv4 is routable unless inside one of
+`kReservedIPv4Ranges` (`0/8`, `10/8`, `100.64/10`, `127/8`, `169.254/16`, `172.16/12`, `192.0.0/24`, `192.0.2/24`,
+`192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`, `203.0.113/24`, `224/3`); IPv6 only inside `2000::/3` and
+`ff00::/8` (unique-local, link-local, `::`, `::1` are not), an IPv4-mapped address by its IPv4 part; a string that is not an
+address counts as routable. Loopback is `127/8` and exactly `::1`, so `::ffff:127.0.0.1` passes, as in Chrome.
+`src/electron/address-filter.ts` hides refused devices from the manager.
+
 ## Polyfill layer (`src/polyfill/`)
 
 Implements the legacy Chrome sender API (`chrome.cast`, API version `[1, 2]`), as documented at
@@ -255,6 +269,28 @@ electron-cast does the same:
 Not done: Chrome also cancels a pending start whose frame navigated to another origin while the picker was open
 (`HandleStartPresentationResponse` in the controller delegate); here a pending start is cancelled when the frame is
 removed or navigates, not on an origin change alone.
+
+### Presentation sources
+
+Chrome's Cast provider builds a `CastMediaSource` from each presentation URL
+(`components/media_router/common/providers/cast/cast_media_source.cc`, `FromMediaSource`): `remote-playback:` and plain
+https URLs become tab-mirroring sources, a `cast:` URL one app (`ParseCastUrl`), the legacy `https://google.com/cast#` form
+every `__castAppId__` (`ParseLegacyCastUrl`). `ContainsStreamingApp()` (exact match against
+`openscreen::cast::GetCastStreamingAppIds()`: `0F5096E8`, `85CDB22F`) sends the whole source to a `MirroringActivity` in
+`CastActivityManager::DoLaunchSession`, and `IsSiteInitiatedMirroringSource` restricts it to `kPresentationApiAllowlist`
+origins (`CastMediaRouteProvider::GetOrigins`; for others `MediaSinksObserver::OnSinksUpdated` sees an empty list, so
+availability is `UNAVAILABLE`). For `remote-playback:`, `CastMediaRouteProvider::OnSinkQueryUpdated` reports only sinks of
+models known to remote the codec (`media::remoting`). electron-cast has no sink that mirrors or remotes, so
+`src/electron/presentation-source.ts` classifies each URL the same way and the handler treats those as having no sink:
+available `false`, `start` `NotFoundError` "No screens found." (`PresentationServiceImpl::StartPresentation`). Without a
+controller delegate Electron's own browser side reports every URL `UNAVAILABLE`
+(`PresentationServiceImpl::ListenForScreenAvailability`), so `video.remote` never lights up. Several URLs are separate
+sources (`PresentationFrame` listens per URL; `PresentationAvailabilityState::GetScreenAvailability` is available when any
+is), so the first ordinary one is served. Blink drops URLs of unknown protocol in the constructor
+(`PresentationRequest::Create`, `IsKnownProtocolForPresentationUrl`: http family, `cast`, `cast-dial`), which the stand-in
+repeats. Site-initiated mirroring for the allowlisted origins (docs, meet, music.youtube.com) is not available here
+either, though Chrome offers it there. A plain https URL (Chrome's one-UA tab mirroring) is still rejected as
+`NotSupportedError`, not `NotFoundError`.
 
 ## Electron layer (`src/electron/`)
 

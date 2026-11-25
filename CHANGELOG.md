@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Public and loopback device addresses are refused, as in Chrome.** Chrome opens no Cast channel to a publicly
+  routable or loopback address unless `MediaRouterCastAllowAllIPs` is set (`CastMediaSinkServiceImpl::OpenChannel`).
+  The manager now hides such devices (not listed, offered or connected to); the new `allowAllIPs` option on
+  `createCastManager` turns it off. Private, link-local, unique-local and `100.64.0.0/10` addresses are unaffected.
+  `isPubliclyRoutable`, `isLoopback` and `isCastAddressAllowed` are exported from the discovery layer.
+- **Mirroring and remote-playback sources are never launched as ordinary apps.** A presentation URL naming a Cast
+  Streaming app (`0F5096E8`, `85CDB22F`), alone or beside other apps in one legacy URL, and a `remote-playback:` URL
+  are unavailable (`getAvailability()` is `false`) and `start()` rejects with `NotFoundError` ("No screens found.").
+  Of several URLs the first ordinary Cast app one is served. The stand-in's `PresentationRequest` drops URLs of unknown
+  protocol like Blink and throws `NotSupportedError` when none is left.
+- **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
+  `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
+  `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
+  images). See docs/MAIN-API.md.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge

@@ -248,6 +248,7 @@ export class CastSessionService {
   private readonly senders = new Map<number, SenderRecord>();
   private readonly sessions = new ObservedMap<string, SessionRecord>((kind, rec) => this.notifySession(kind, rec));
   private readonly sessionListeners = new Set<() => void>();
+  private readonly messageListeners = new Set<(sessionId: string, namespace: string, data: string) => void>();
   private readonly sinks;
   private readonly clients = new Map<string, ClientEntry>();
   private readonly pendingRequests = new Map<number, PendingRequest>();
@@ -750,6 +751,7 @@ export class CastSessionService {
     if (typeof msg.data !== "string") return;
     for (const rec of this.sessions.values()) {
       if (rec.client !== client || rec.app.transportId !== msg.sourceId) continue;
+      for (const l of [...this.messageListeners]) l(rec.app.sessionId, msg.namespace, msg.data);
       for (const member of rec.members) {
         this.emitTo(member, {
           type: "message",
@@ -870,6 +872,29 @@ export class CastSessionService {
       return bad("session_error", describe(err));
     }
     return good(undefined);
+  }
+
+  /** Receivers send a session's messages to main as well as to its pages; for the media controller (see media-controller.ts). */
+  observeSessionMessages(listener: (sessionId: string, namespace: string, data: string) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => void this.messageListeners.delete(listener);
+  }
+
+  /** Send a message to a session's receiver app from main, with no page involved. */
+  sendSessionMessage(sessionId: string, namespace: string, message: string): BridgeResult {
+    const rec = this.sessions.get(sessionId);
+    if (rec === undefined) return bad("session_error", "unknown session");
+    try {
+      rec.client.send(namespace, rec.app.transportId, message);
+    } catch (err) {
+      return bad("channel_error", describe(err));
+    }
+    return good(undefined);
+  }
+
+  /** The volume the receiver last reported for a session (Chrome: `receiver.volume` of the CastSession). */
+  sessionVolume(sessionId: string): ReceiverVolume | undefined {
+    return this.sessions.get(sessionId)?.lastVolume;
   }
 
   /** Detach every page from the session and close its transport; the receiver app keeps running. */
