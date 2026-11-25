@@ -1,0 +1,20 @@
+{
+  "name": "electron-cast-live-mirroring",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Mirrors a demo page (tab) or a screen (desktop) to a real Cast device with electron-cast. Run it by hand; the tests never touch a real device.",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --list",
+    "list": "electron . --list",
+    "tab": "electron . --mode tab --sink",
+    "desktop": "electron . --mode desktop --sink"
+  },
+  "dependencies": {
+    "electron-cast": "file:../.."
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}
