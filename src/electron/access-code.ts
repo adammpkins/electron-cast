@@ -10,7 +10,11 @@ import type { CastSinkService, OpenBackoff } from "./sink-service.ts";
 
 /** The device a discovery server returned, as `DiscoveryDevice` (discovery_resources.proto) carries it, flattened. */
 export interface AccessCodeDevice {
-  /** The device's unique id (`DiscoveryDevice.id`); `uuid:` and dashes are dropped and case folded, as for an mDNS id. */
+  /**
+   * The device's unique id (`DiscoveryDevice.id`). `uuid:` and dashes are dropped and case folded, as for an mDNS id, and
+   * the sink's id is that in angle brackets (Chrome: `cast:<%s>`, where an mDNS sink is `cast:%s`), so a device found by
+   * mDNS and by address is two sinks until the same-address rule removes one, as in Chrome.
+   */
   id: string;
   /** `display_name`. */
   name: string;
@@ -207,7 +211,8 @@ export function createAccessCodeSink(input: unknown): CreatedAccessCodeSink {
   const port = portOf(input["port"]);
   if (port === undefined) return failed("missing_or_invalid_port", `"${String(input["port"])}" is not a port`);
 
-  const id = processDeviceUuid(input["id"]);
+  // CreateAccessCodeMediaSink: base::StringPrintf("cast:<%s>", processed_uuid); electron-cast's mDNS ids carry no "cast:"
+  const id = `<${processDeviceUuid(input["id"])}>`;
   return {
     ok: true,
     device: {
@@ -408,11 +413,15 @@ export class AccessCodeSinks {
     if (this.host.hasSink(device.id)) {
       this.log("info", "The sink already exists in the media router, no channel needs to be opened.", device.id);
       // Only refresh data if this new sink came from typing in an access code. The store gets the new data, the existing
-      // sink only its name and capabilities (it keeps the endpoint it has a channel to).
+      // sink only its name and capabilities (it keeps the endpoint it has a channel to). A sink this service did not open
+      // is only refreshed: remembering and expiring it would let a timer remove a sink it does not own (in Chrome the ids
+      // of the two kinds differ, so this cannot arise there).
       if (kind === "manual") {
-        this.storeSinkInPrefs(device);
-        this.setExpirationTimer(device.id);
         this.updateExistingSink(device);
+        if (this.kinds.has(device.id)) {
+          this.storeSinkInPrefs(device);
+          this.setExpirationTimer(device.id);
+        }
       }
       return { code: "ok", sinkId: device.id };
     }

@@ -167,3 +167,9 @@ discovered device. It is removed `deviceDuration` seconds after it was added (pl
 that. A public or loopback address is refused as for any device, unless `sinks.allowAllIps` is set. Call `networksChanged()`
 when the machine's network changes. `configureAccessCode({ enabled, deviceDuration })` changes the settings while running,
 `rememberedSinks()` lists what is remembered, and `accessCode.store` (`load`, `save`) keeps it between runs.
+
+**Validate the address.** In Chrome it comes from Google's server; here it comes from your app. electron-cast only applies
+Chrome's rules, which allow every private address and every port, so an address a user typed and you passed on unchecked
+lets that user make the app open TLS connections to any host and port on your network and read from the result whether
+something answered. Accept only addresses you expect (a known subnet, port 8009 unless you know otherwise) before
+calling `addSinkByAddress`. The sink's id is `<` and the device id in lower case without dashes `>` (Chrome's `cast:<uuid>`).

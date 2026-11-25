@@ -412,7 +412,7 @@ multicast domain (another VLAN or subnet, as in a school or office); it does not
 | Access code casting is off unless enabled; with it off nothing is added, remembered or timed (default `false`) | `accessCode.enabled`, `AccessCodeCastDisabledError` | `access_code_cast_feature.cc`: `GetAccessCodeCastEnabledPref`; `access_code_cast_sink_service_factory.cc`: `GetForProfile`, `BuildServiceInstanceForBrowserContext`; `AccessCodeCastEnabled.yaml` |
 | The device must be an object with a string name and id and a capabilities object whose present values are booleans; otherwise the reply is malformed | `createAccessCodeSink` (`response_malformed`) | `access_code_cast_discovery_interface.cc`: `ConstructDiscoveryDeviceFromJson` |
 | A sink needs, in this order: an IP literal (IPv6 preferred over IPv4), a non-empty id, a non-empty name, a port (a decimal integer in 0..65535, default 8009) | `createAccessCodeSink` (`sink_creation_error` and its `reason`) | `access_code_media_sink_util.cc`: `CreateAccessCodeMediaSink`, `GetIPAddress`; `net/base/port_util.cc`: `IsPortValid`; `mdns/media_sink_util.cc`: `CreateCastMediaSinkResult` |
-| The id is processed as an mDNS id is (`uuid:` and dashes dropped, lower case); the model name is `Chromecast Cast Moderator`; capabilities are the five flags as the same bits an mDNS `ca` record has | `createAccessCodeSink` | `access_code_media_sink_util.cc`: `kDefaultAccessCodeModelName`, `ConvertDeviceCapabilities`; `components/media_router/common/discovery/media_sink_internal.cc`: `ProcessDeviceUUID` |
+| The id is processed as an mDNS id is (`uuid:` and dashes dropped, lower case) and put in angle brackets as the sink id (`cast:<%s>`; an mDNS sink is `cast:%s`); the model name is `Chromecast Cast Moderator`; capabilities are the five flags as the same bits an mDNS `ca` record has | `createAccessCodeSink` | `access_code_media_sink_util.cc`: `kDefaultAccessCodeModelName`, `ConvertDeviceCapabilities`; `components/media_router/common/discovery/media_sink_internal.cc`: `ProcessDeviceUUID` |
 | A device already listed keeps its channel (and endpoint); only its name and capabilities are refreshed, and its stored data and time are replaced | `addSinkToMediaRouter`, `updateExistingSink` | `access_code_cast_sink_service.cc`: `OpenChannelIfNecessary`, `UpdateExistingSink` |
 | Otherwise a channel is opened with its own quick parameters: connect 2 s, liveness 8 s, ping 4 s, retried 1 s apart (50% jitter, no growth) up to the sink service's 3 attempts; a failure is `channel_open_error` | `CastSinkService.openSink` (`params`, `backoff`), `MANUAL_ENTRY_PARAMS`, `MANUAL_ENTRY_BACKOFF` | `access_code_cast_sink_service.cc`: `kConnectTimeoutInSeconds`, `kPingIntervalInSeconds`, `kLivenessTimeoutInSeconds`, `backoff_policy_`, `OpenChannelIfNecessary`, `OnChannelOpenedResult`; `cast_media_sink_service_impl.cc`: `OnChannelErrorMayRetry` |
 | The address rules of discovered devices apply: a public or loopback address is not opened to | `CastSinkService.openChannel` | `cast_media_sink_service_impl.cc`: `OpenChannel` |
@@ -432,9 +432,15 @@ Where electron-cast differs from Chrome here:
   may be a number as well as the server's string; Chrome would ignore a number and use 8009, which here would hide a typo.
   An address that is not a string counts as absent, as in Chrome.
 - Chrome names an access code sink `cast:<uuid>`, with literal angle brackets, where an mDNS sink is `cast:uuid`, so a
-  device found both ways is two sinks there until the same-address rule removes one. electron-cast's sinks are named by the
-  plain processed id, so one device found both ways is one sink, and a device already listed by mDNS takes the "already
-  exists" path. Either way a device has one sink per address.
+  device found both ways is two sinks until the same-address rule removes one. That is kept: electron-cast's mDNS ids have
+  no `cast:` scheme, so an address-added sink is `<uuid>`. As a guard Chrome does not need, the service only remembers and
+  expires a sink it opened itself; an already listed sink with the same id (a custom discovery could produce one) is only
+  refreshed, so an expiry timer can never remove a device discovery found.
+- Chrome does not check the address beyond `OpenChannel`'s rule (below), and its server is trusted to name real devices.
+  Here the address comes from the app, so the app must validate what a user typed: private addresses and any port pass
+  Chrome's rules, so an unchecked address turns `addSinkByAddress` into a probe of the LAN (a TLS connection to any
+  host and port, and the error says whether it answered). An IPv4-mapped IPv6 address is judged by the IPv4 address in it
+  (`net/base/ip_address.cc`: `IsPubliclyRoutableIPv6`); `IsLoopback` does not look inside it.
 - The prefs become `AccessCodeStore` (`load` once when enabled, `save` the whole list after each change), with the app
   deciding where it lives; one entry holds the data of Chrome's two dictionaries. The default store is memory.
 - Chrome learns of a network change from `DiscoveryNetworkMonitor`; electron-cast does not track networks, so the app calls

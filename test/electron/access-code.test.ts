@@ -13,6 +13,10 @@ import type { CastDevice } from "../../src/discovery/index.ts";
 
 const WALL = { id: "a1b2c3d4e5f60718293a4b5c6d7e8f90", name: "Seminar Room 4", capabilities: { videoOut: true, audioOut: true }, ipV4Address: "10.20.30.40" };
 
+/** The sink id of a device id: Chrome's `cast:<%s>` without the scheme electron-cast's ids leave out. */
+const sinkOf = (id: string): string => `<${id}>`;
+const SINK = sinkOf(WALL.id);
+
 const entry = (over: Partial<AccessCodeDevice> = {}): AccessCodeDevice => ({ ...WALL, ...over });
 
 class FakeRoutes {
@@ -85,7 +89,7 @@ test("a device from the server is checked as CreateAccessCodeMediaSink checks it
   const ok = createAccessCodeSink(entry({ id: "uuid:A1B2C3D4-E5F6-0718-293A-4B5C6D7E8F90", port: "8010" }));
   assert.ok(ok.ok);
   assert.deepEqual(ok.device, {
-    id: "a1b2c3d4e5f60718293a4b5c6d7e8f90", name: "Seminar Room 4", model: "Chromecast Cast Moderator", host: "10.20.30.40",
+    id: SINK, name: "Seminar Room 4", model: "Chromecast Cast Moderator", host: "10.20.30.40",
     addresses: ["10.20.30.40"], port: 8010, capabilities: 1 | 4, isGroup: false, statusText: "", instanceName: "", txt: {},
   }, "the id is processed like an mDNS id, the model name is Chrome's, capabilities are the ca bits");
 
@@ -150,12 +154,12 @@ test("nothing can be added until access code casting is enabled, as Chrome's fac
 test("an added device gets a channel with Chrome's quick open params, is listed, and is remembered", timed(async (clock) => {
   const { access, sinks, params, store } = setup(clock, { options: { deviceDuration: 3600 } });
   const result = await access.addSinkByAddress(entry());
-  assert.deepEqual(result, { code: "ok", sinkId: WALL.id });
+  assert.deepEqual(result, { code: "ok", sinkId: SINK });
   assert.deepEqual(params, [{ connectTimeoutMs: 2000, livenessTimeoutMs: 8000, pingIntervalMs: 4000 }], "CreateCastSocketOpenParams: 2 s, 8 s, ping 4 s");
   await clock.advance(1);
-  assert.deepEqual(sinks.devices().map((d) => [d.id, d.name, d.host, d.port, d.model]), [[WALL.id, "Seminar Room 4", "10.20.30.40", 8009, "Chromecast Cast Moderator"]]);
-  assert.deepEqual(store.saved, [{ id: WALL.id, name: "Seminar Room 4", ip: "10.20.30.40", port: 8009, capabilities: 5, model: "Chromecast Cast Moderator", addedAt: 0 }]);
-  assert.deepEqual(access.remembered().map((r) => r.id), [WALL.id]);
+  assert.deepEqual(sinks.devices().map((d) => [d.id, d.name, d.host, d.port, d.model]), [[SINK, "Seminar Room 4", "10.20.30.40", 8009, "Chromecast Cast Moderator"]]);
+  assert.deepEqual(store.saved, [{ id: SINK, name: "Seminar Room 4", ip: "10.20.30.40", port: 8009, capabilities: 5, model: "Chromecast Cast Moderator", addedAt: 0 }]);
+  assert.deepEqual(access.remembered().map((r) => r.id), [SINK]);
   access.dispose();
   sinks.dispose();
 }));
@@ -200,6 +204,59 @@ test("the address rules of discovered devices apply: a public or loopback addres
   assert.equal((await allowed.access.addSinkByAddress(entry({ ipV4Address: "8.8.8.8" }))).code, "ok");
   allowed.access.dispose();
   allowed.sinks.dispose();
+}));
+
+test("an IPv4-mapped IPv6 address is judged by the IPv4 address in it, as Chrome does", timed(async (clock) => {
+  const refused = setup(clock);
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    for (const ip of ["::ffff:8.8.8.8", "::ffff:808:808", "0:0:0:0:0:ffff:808:808"]) {
+      const r = await refused.access.addSinkByAddress(entry({ ipV4Address: undefined, ipV6Address: ip }));
+      assert.equal(r.code, "channel_open_error", ip);
+    }
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(refused.clients.length, 0, "no connection is made to a public address");
+  // a mapped private address is allowed, and so is a mapped loopback one: IsLoopback does not look into it, and
+  // IsPubliclyRoutable says no for 127/8
+  const ok = await refused.access.addSinkByAddress(entry({ ipV4Address: undefined, ipV6Address: "::ffff:192.168.1.5" }));
+  assert.equal(ok.code, "ok");
+  const loop = await refused.access.addSinkByAddress(entry({ id: "dddddddddddddddddddddddddddddddd", ipV4Address: undefined, ipV6Address: "::ffff:127.0.0.1" }));
+  assert.equal(loop.code, "ok");
+  assert.equal(refused.clients.length, 2);
+  refused.access.dispose();
+  refused.sinks.dispose();
+}));
+
+test("a sink that is not this service's is refreshed but never remembered or expired by it", timed(async (clock) => {
+  const { access, sinks, source, store } = setup(clock);
+  // a sink found by discovery whose id happens to equal the one this service would use
+  source.up({ id: SINK, name: "Found by mDNS", model: "Chromecast", host: "10.20.30.40", addresses: ["10.20.30.40"], port: 8009, capabilities: 5, isGroup: false, statusText: "", instanceName: "x", txt: {} });
+  await clock.advance(1);
+  assert.equal(sinks.sinks().length, 1);
+  const r = await access.addSinkByAddress(entry({ name: "Typed in" }));
+  assert.deepEqual(r, { code: "ok", sinkId: SINK });
+  await clock.advance(1);
+  assert.equal(sinks.sinks()[0]?.name, "Typed in", "its name is refreshed");
+  assert.deepEqual(store.saved, [], "nothing is remembered");
+  await clock.advance(120_000);
+  assert.equal(sinks.sinks().length, 1, "and no timer removes it");
+  access.dispose();
+  sinks.dispose();
+}));
+
+test("a device found by mDNS and added by address is two sinks until the same-address rule removes one, as in Chrome", timed(async (clock) => {
+  const { access, sinks, source } = setup(clock, { options: { deviceDuration: 3600 } });
+  source.up({ id: WALL.id, name: "Found by mDNS", model: "Chromecast", host: "10.20.30.40", addresses: ["10.20.30.40"], port: 8009, capabilities: 5, isGroup: false, statusText: "", instanceName: "x", txt: {} });
+  await clock.advance(1);
+  assert.deepEqual(sinks.sinks().map((d) => d.id), [WALL.id]);
+  assert.equal((await access.addSinkByAddress(entry())).code, "ok");
+  await clock.advance(1);
+  assert.deepEqual(sinks.sinks().map((d) => d.id), [SINK], "one sink per address: the newer replaces the mDNS one");
+  access.dispose();
+  sinks.dispose();
 }));
 
 test("a malformed or incomplete device is refused before any channel is opened", timed(async (clock) => {
@@ -247,7 +304,7 @@ test("a device a page is casting to is kept past its time, and goes 450 ms after
   const { access, sinks, routes } = setup(clock);
   await access.addSinkByAddress(entry());
   await clock.advance(1);
-  routes.set([{ id: "route-1", sinkId: WALL.id, isLocal: true }]);
+  routes.set([{ id: "route-1", sinkId: SINK, isLocal: true }]);
   await clock.advance(60_000);
   assert.equal(sinks.sinks().length, 1, "OnExpiration waits for a local route to end");
   assert.equal(access.remembered().length, 1, "and the device is still remembered");
@@ -265,11 +322,11 @@ test("a device a page is casting to is kept past its time, and goes 450 ms after
 test("a route that ends and is replaced straight away does not expire the device", timed(async (clock) => {
   const { access, sinks, routes } = setup(clock);
   await access.addSinkByAddress(entry());
-  routes.set([{ id: "route-1", sinkId: WALL.id, isLocal: true }]);
+  routes.set([{ id: "route-1", sinkId: SINK, isLocal: true }]);
   await clock.advance(60_000);
   routes.set([]);
   await clock.advance(100);
-  routes.set([{ id: "route-2", sinkId: WALL.id, isLocal: true }]);
+  routes.set([{ id: "route-2", sinkId: SINK, isLocal: true }]);
   await clock.advance(5000);
   assert.equal(sinks.sinks().length, 1);
   assert.equal(access.remembered().length, 1);
@@ -280,7 +337,7 @@ test("a route that ends and is replaced straight away does not expire the device
 test("a route that ends before the duration has passed leaves the device listed", timed(async (clock) => {
   const { access, sinks, routes } = setup(clock, { options: { deviceDuration: 3600 } });
   await access.addSinkByAddress(entry());
-  routes.set([{ id: "route-1", sinkId: WALL.id, isLocal: true }]);
+  routes.set([{ id: "route-1", sinkId: SINK, isLocal: true }]);
   await clock.advance(5000);
   routes.set([]);
   await clock.advance(5000);
@@ -293,7 +350,7 @@ test("a route that ends before the duration has passed leaves the device listed"
 test("a route that is not this app's does not keep the device past its time", timed(async (clock) => {
   const { access, sinks, routes } = setup(clock);
   await access.addSinkByAddress(entry());
-  routes.set([{ id: "route-1", sinkId: WALL.id, isLocal: false }]);
+  routes.set([{ id: "route-1", sinkId: SINK, isLocal: false }]);
   await clock.advance(21_000);
   assert.deepEqual(access.remembered(), [], "OnExpiration waits only for local routes");
   await clock.advance(450);
@@ -307,7 +364,7 @@ test("entering a code again for a listed device opens no channel, refreshes its 
   await access.addSinkByAddress(entry());
   await clock.advance(50_000);
   const again = await access.addSinkByAddress(entry({ name: "Seminar Room 4 (new)", capabilities: { audioOut: true }, ipV4Address: "10.20.30.41" }));
-  assert.deepEqual(again, { code: "ok", sinkId: WALL.id });
+  assert.deepEqual(again, { code: "ok", sinkId: SINK });
   assert.equal(clients.length, 1, "HasSink: the channel is kept");
   await clock.advance(1);
   const [d] = sinks.devices();
@@ -326,8 +383,8 @@ test("one device is not remembered twice under two ids at one address", timed(as
   await access.addSinkByAddress(entry());
   await access.addSinkByAddress(entry({ id: "ffffffffffffffffffffffffffffffff", name: "Renamed" }));
   await clock.advance(1);
-  assert.deepEqual(store.saved.map((e) => (e as { id: string }).id), ["ffffffffffffffffffffffffffffffff"], "UpdateDevicesDict removes the entry with the same IP endpoint");
-  assert.deepEqual(sinks.sinks().map((d) => d.id), ["ffffffffffffffffffffffffffffffff"], "and the sink service keeps one sink per address");
+  assert.deepEqual(store.saved.map((e) => (e as { id: string }).id), [sinkOf("ffffffffffffffffffffffffffffffff")], "UpdateDevicesDict removes the entry with the same IP endpoint");
+  assert.deepEqual(sinks.sinks().map((d) => d.id), [sinkOf("ffffffffffffffffffffffffffffffff")], "and the sink service keeps one sink per address");
   access.dispose();
   sinks.dispose();
 }));
@@ -388,14 +445,14 @@ test("when the network changes, devices with no route leave and the remembered o
   const { access, sinks, routes } = setup(clock, { options: { deviceDuration: 3600 } });
   await access.addSinkByAddress(entry());
   await access.addSinkByAddress(entry({ id: "cccccccccccccccccccccccccccccccc", name: "In use", ipV4Address: "10.20.30.60" }));
-  routes.set([{ id: "r", sinkId: "cccccccccccccccccccccccccccccccc", isLocal: true }]);
+  routes.set([{ id: "r", sinkId: sinkOf("cccccccccccccccccccccccccccccccc"), isLocal: true }]);
   await clock.advance(1);
   access.networksChanged();
   await clock.advance(450);
-  assert.deepEqual(sinks.sinks().map((d) => d.id), ["cccccccccccccccccccccccccccccccc"], "a device in use stays");
+  assert.deepEqual(sinks.sinks().map((d) => d.id), [sinkOf("cccccccccccccccccccccccccccccccc")], "a device in use stays");
   assert.equal(access.remembered().length, 2, "and nothing is forgotten");
   await clock.advance(4000);
-  assert.deepEqual(sinks.sinks().map((d) => d.id).sort(), [WALL.id, "cccccccccccccccccccccccccccccccc"].sort(), "remembered devices are added again");
+  assert.deepEqual(sinks.sinks().map((d) => d.id).sort(), [SINK, sinkOf("cccccccccccccccccccccccccccccccc")].sort(), "remembered devices are added again");
   access.dispose();
   sinks.dispose();
 }));
