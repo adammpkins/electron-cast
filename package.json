@@ -86,6 +86,7 @@
     "canary": "node tools/sdk-canary.mjs",
     "docs:check": "node tools/docs-check.mjs",
     "docs:check:chromium": "node tools/docs-check-chromium.mjs",
+    "trace:capture": "node tools/capture-trace.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run docs:check",
     "prepack": "npm run build",
     "smoke": "npm run build && node smoke/run.mjs"
