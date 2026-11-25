@@ -152,3 +152,31 @@ test("each stream logs how its feedback arrives every five seconds", async () =>
     h.close();
   }
 });
+
+// Chrome's freeze pauses only the video capture device (MirroringMediaControllerHostImpl::Freeze ->
+// CastMirroringServiceHost::Pause -> VideoCaptureHost::Pause): the senders, the refresh timer and the audio stream are not
+// told. The sender must then go on with RTCP sender reports for both streams and with audio, and resume video cleanly.
+test("a long silence on the video stream leaves audio, RTCP sender reports and the in-flight limits as they were", async () => {
+  const h = await startVirtualHarness({ oneWayDelayMs: 15 });
+  try {
+    await h.clock.advance(10_000);
+    const s = h.receiver.stats;
+    const before = { audio: s.validAudioFrames, videoSr: s.videoSenderReports, audioSr: s.audioSenderReports, video: s.validVideoFrames };
+    h.backend.pauseVideoCapture();
+    await h.clock.advance(15_000);
+    const during = { audio: s.validAudioFrames, videoSr: s.videoSenderReports, audioSr: s.audioSenderReports, video: s.validVideoFrames };
+    assert.ok(during.video - before.video <= 3, "no video frames while the capture is paused");
+    assert.ok(during.audio - before.audio >= 1450, `audio kept flowing: ${during.audio - before.audio} frames in 15 s`);
+    // One report every 500 ms per stream (RTCP_REPORT_INTERVAL), including the video stream with nothing to send.
+    assert.ok(during.videoSr - before.videoSr >= 28, `video sender reports: ${during.videoSr - before.videoSr}`);
+    assert.ok(during.audioSr - before.audioSr >= 28, `audio sender reports: ${during.audioSr - before.audioSr}`);
+    h.backend.resumeVideoCapture(JSON.parse(JSON.stringify(h.backend["lastVideoParams"])), h.backend["videoSink"]!);
+    await h.clock.advance(10_000);
+    assert.ok(s.validVideoFrames - during.video >= 290, "video resumed");
+    assert.deepEqual(h.errors, []);
+    assert.deepEqual([...h.host.audio!.dropReasons], []);
+    assert.deepEqual([...h.host.video!.dropReasons], []);
+  } finally {
+    h.close();
+  }
+});

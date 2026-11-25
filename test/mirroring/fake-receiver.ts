@@ -81,6 +81,9 @@ export interface FakeReceiverStats {
   videoKeyFrames: number;
   invalidFrames: number;
   videoBytes: number;
+  /** RTCP sender reports received, per stream. */
+  videoSenderReports: number;
+  audioSenderReports: number;
   /** Opus payload bytes: a silent buffer encodes to a few bytes, a tone to hundreds. */
   audioBytes: number;
   firstFrameAt?: number;
@@ -109,6 +112,8 @@ export class FakeReceiver {
     videoFrames: 0,
     audioFrames: 0,
     audioBytes: 0,
+    videoSenderReports: 0,
+    audioSenderReports: 0,
     validVideoFrames: 0,
     validAudioFrames: 0,
     videoKeyFrames: 0,
@@ -249,6 +254,8 @@ export class FakeReceiver {
       if (stream !== undefined) {
         stream.lastSr = { middle: Number((buf.readBigUInt64BE(8) >> 16n) & 0xffffffffn), arrivalMs: now };
         stream.dirty = true;
+        if (stream.kind === "video") this.stats.videoSenderReports++;
+        else this.stats.audioSenderReports++;
       }
       return;
     }
