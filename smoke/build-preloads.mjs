@@ -1,5 +1,7 @@
 // A sandboxed preload cannot import files or ESM, so (like any app that uses electron-cast) bundle it to one CJS file.
 // Bundling the built package entry `electron-cast/preload` also proves it pulls in nothing Node-only.
+// The mirroring scenarios' fake receiver is TypeScript, which the Node of older Electrons (35) cannot load, so it is
+// bundled to plain JavaScript as well.
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 
@@ -27,3 +29,13 @@ for (const mode of ["presentation", "chromecast"]) {
     logLevel: "warning",
   });
 }
+
+await build({
+  entryPoints: [fileURLToPath(new URL("../test/mirroring/fake-receiver.ts", import.meta.url))],
+  outfile: fileURLToPath(new URL(".out/fake-receiver.mjs", import.meta.url)),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node20",
+  logLevel: "warning",
+});

@@ -5,7 +5,8 @@
 import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
 import { EventEmitter } from "node:events";
 import { createCastManager } from "electron-cast/main";
-import { FakeReceiver } from "../test/mirroring/fake-receiver.ts";
+// test/mirroring/fake-receiver.ts, bundled by build-preloads.mjs (run `npm run smoke` once, or `node smoke/build-preloads.mjs`).
+import { FakeReceiver } from "./.out/fake-receiver.mjs";
 
 const args = process.argv.slice(2);
 const value = (name, fallback) => {

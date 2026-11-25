@@ -35,12 +35,15 @@ await import("./build-preloads.mjs");
 const { ELECTRON_RUN_AS_NODE: _unused, ...env } = process.env;
 const child = spawn(electron, [fileURLToPath(new URL("main.mjs", import.meta.url))], { cwd: root, stdio: "inherit", env });
 // Backstop for a hang before main.mjs arms its own timeout
+let timedOut = false;
 const killer = setTimeout(() => {
-  console.error("smoke: FAIL electron did not exit within 180 s");
+  timedOut = true;
+  console.error("smoke: FAIL electron did not exit within 240 s");
   child.kill();
 }, 240_000);
 child.on("exit", (code, signal) => {
   clearTimeout(killer);
   if (code === null) console.error(`smoke: FAIL electron was killed by ${signal}`);
-  process.exit(code ?? 1);
+  // Electron on Linux exits 0 on SIGTERM, which must not pass for a run that was killed.
+  process.exit(timedOut ? 1 : (code ?? 1));
 });

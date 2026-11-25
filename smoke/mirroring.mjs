@@ -9,8 +9,11 @@
 import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createCastManager } from "electron-cast/main";
-import { FakeReceiver } from "../test/mirroring/fake-receiver.ts";
+// test/mirroring/fake-receiver.ts, bundled by build-preloads.mjs (the Node of Electron 35 cannot load TypeScript).
+import { FakeReceiver } from "./.out/fake-receiver.mjs";
 
 const mirrorPage = (width, height) => `<!doctype html><meta charset=utf-8><body style="margin:0"><canvas id=c width=${width} height=${height}></canvas><script>
   const c = document.getElementById("c"), g = c.getContext("2d");
@@ -21,6 +24,20 @@ const mirrorPage = (width, height) => `<!doctype html><meta charset=utf-8><body 
   ctx.resume().catch(() => {});
 </script>`;
 const MIRROR_PAGE = mirrorPage(640, 360);
+
+/** The audio output devices a page sees (`enumerateDevices`), which desktop loopback audio needs one of. */
+async function audioOutputCount() {
+  const probe = new BrowserWindow({ show: false });
+  try {
+    // A file page: navigator.mediaDevices is only there in a secure context, which a data: URL is not.
+    const blank = fileURLToPath(new URL(".out/blank.html", import.meta.url));
+    writeFileSync(blank, "<!doctype html>");
+    await probe.loadFile(blank);
+    return await probe.webContents.executeJavaScript(`navigator.mediaDevices.enumerateDevices().then((d) => d.filter((x) => x.kind === "audiooutput").length)`);
+  } finally {
+    probe.destroy();
+  }
+}
 
 const LOOPBACK_TV = {
   id: "dev-loopback", name: "Loopback TV", model: "Fake", host: "127.0.0.1", addresses: ["127.0.0.1"], port: 8009,
@@ -46,9 +63,17 @@ export async function runMirroringScenario({ pass, fail, engineModulePath, mode 
 
 async function runScenario({ pass, fail, engineModulePath, mode, hardware, content, name }) {
   let screen;
+  let withAudio = true;
   if (mode === "desktop") {
     [screen] = await desktopCapturer.getSources({ types: ["screen"] });
     if (screen === undefined) { pass("desktop mirroring skipped: this machine has no screen to capture"); return; }
+    // System audio is the loopback of an output device. A machine with none (CI runners) cannot open it, and Chrome
+    // then ends the session (OpenscreenSessionHost::ReportAndLogError, AUDIO_CAPTURE_ERROR), so mirror the screen
+    // without audio there and say so.
+    if ((await audioOutputCount()) === 0) {
+      withAudio = false;
+      console.log(`smoke: NOTICE [${name}] this machine has no audio output device, so there is no system audio to loop back: desktop mirroring is tested without audio`);
+    }
   }
   // A desktop capture is damage driven, so a still screen yields few frames; give it something that moves.
   let mover;
@@ -101,7 +126,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   await cast.settled();
 
   const sinks = [];
-  const stopObserving = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => sinks.push(s) }, { castMode: mode === "desktop" ? "desktop_mirror" : "tab_mirror", withAudio: mode === "desktop" });
+  const stopObserving = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => sinks.push(s) }, { castMode: mode === "desktop" ? "desktop_mirror" : "tab_mirror", withAudio: mode === "desktop" && withAudio });
   assert.equal(sinks[0]?.length, 1, "the loopback TV is not listed for tab mirroring");
   stopObserving();
 
@@ -114,7 +139,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   const route = await cast.startCasting(
     LOOPBACK_TV.id,
     mode === "desktop"
-      ? { castMode: "desktop_mirror", desktopSourceId: screen.id, withAudio: true }
+      ? { castMode: "desktop_mirror", desktopSourceId: screen.id, withAudio }
       : { castMode: "tab_mirror", webContentsId: page.webContents.id },
   );
   assert.equal(route.description, mode === "desktop" ? "Casting screen" : "Casting tab");
@@ -123,7 +148,8 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
 
   const deadline = Date.now() + 15_000;
   const s = receiver.stats;
-  while (Date.now() < deadline && !(s.validVideoFrames >= 30 && s.validAudioFrames >= 60)) await new Promise((r) => setTimeout(r, 100));
+  const audioWanted = mode !== "desktop" || withAudio;
+  while (Date.now() < deadline && !(s.validVideoFrames >= 30 && (!audioWanted || s.validAudioFrames >= 60))) await new Promise((r) => setTimeout(r, 100));
   await new Promise((r) => setTimeout(r, 3000));
   const seconds = ((s.lastFrameAt ?? 0) - (s.firstFrameAt ?? 0)) / 1000;
   const codec = receiver.selectedVideoCodec;
@@ -148,12 +174,13 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     const [w, h] = size.split("x").map(Number);
     assert.ok(Math.abs(w / h - 16 / 9) < 0.02, `a ${size} frame is not 16:9`);
   }
-  assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
+  if (audioWanted) assert.ok(s.validAudioFrames >= 60, `only ${s.validAudioFrames} valid Opus frames reached the receiver`);
+  else assert.equal(s.audioFrames, 0, "audio reached the receiver from a session without audio");
   assert.equal(s.invalidFrames, 0);
   // A key frame is asked for once at the start; more would be bitrate spikes. (libvpx VP9 cuts a key frame by itself at a
   // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.)
   assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= 2, `${s.videoKeyFrames} key frames reached the receiver`);
-  pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder) and Opus frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
+  pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder)${audioWanted ? " and Opus" : ""} frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
 
   let page2;
   if (mode === "tab") {
