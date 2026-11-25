@@ -82,9 +82,11 @@ function startAgent() {
     }
   }
 
+  const timeouts: number[] = [];
   const context = createContext({
     window: { addEventListener: (_: string, l: typeof listener) => { listener = l; } },
     performance: { timeOrigin: 0, now: () => now },
+    setTimeout: (cb: () => void, ms: number) => { timeouts.push(ms); return setTimeout(cb, 0); },
     navigator: { mediaDevices: {
       getDisplayMedia: async (constraints: Record<string, unknown>) => {
         displayMedia.push(constraints);
@@ -108,7 +110,7 @@ function startAgent() {
 
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    sent, encoders, settle, tracks, requests, refuse, supportChecks, userMedia, displayMedia, control,
+    sent, encoders, settle, tracks, timeouts, requests, refuse, supportChecks, userMedia, displayMedia, control,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
     capture: async (ts: number, options: FrameOptions = {}) => {
@@ -663,4 +665,33 @@ test("agent: pairs of frames 17 ms apart with 90 ms gaps are all kept (Chrome's 
     t += 16.7 + 90;
   }
   assert.equal(a.sent.filter((m) => m.t === "frame").length, 80);
+});
+
+test("agent: a wake request is answered after the delay it asks for, by the renderer's timer", async () => {
+  const a = await startAgent();
+  await a.command({ t: "wake", id: 7, ms: 9.5 });
+  assert.deepEqual(a.timeouts, [9.5]);
+  assert.deepEqual(a.sent.filter((m) => m.t === "wake").map((m) => (m as { id: number }).id), [7]);
+  await a.command({ t: "stop" });
+  await a.command({ t: "wake", id: 8, ms: 1 });
+  assert.equal(a.sent.filter((m) => m.t === "wake").length, 1, "nothing is sent on a closed port");
+});
+
+test("port backend: a wake is asked of the agent and runs once when the agent answers; a stopped backend asks nothing", () => {
+  const port = new FakePort();
+  const backend = new PortBackend(port, { kind: "tab", mediaSourceId: "x" });
+  const ran: string[] = [];
+  backend.requestWake(9.5, () => ran.push("a"));
+  backend.requestWake(2, () => ran.push("b"));
+  const asked = port.out.filter((m) => m.t === "wake") as { t: "wake"; id: number; ms: number }[];
+  assert.deepEqual(asked.map((m) => m.ms), [9.5, 2]);
+  assert.notEqual(asked[0]!.id, asked[1]!.id);
+  port.emit({ t: "wake", id: asked[1]!.id });
+  port.emit({ t: "wake", id: asked[1]!.id });
+  assert.deepEqual(ran, ["b"]);
+  port.emit({ t: "wake", id: asked[0]!.id });
+  assert.deepEqual(ran, ["b", "a"]);
+  backend.stopAll();
+  backend.requestWake(1, () => ran.push("c"));
+  assert.equal(port.out.filter((m) => m.t === "wake").length, 2);
 });

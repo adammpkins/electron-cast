@@ -90,6 +90,8 @@ export class PortBackend implements MirroringBackend {
   private audioConfig: { sampleRate: number; channels: number } | undefined;
   private audioSenderConfig: FrameSenderConfig | undefined;
   private stopped = false;
+  private readonly wakes = new Map<number, () => void>();
+  private nextWakeId = 0;
   log: ((message: string) => void) | undefined;
   private readonly stages = new StageStats(() => performance.now(), () => this.log);
 
@@ -104,6 +106,12 @@ export class PortBackend implements MirroringBackend {
     switch (m.t) {
       case "ready":
         break;
+      case "wake": {
+        const wake = this.wakes.get(m.id);
+        this.wakes.delete(m.id);
+        wake?.();
+        break;
+      }
       case "error":
         if (m.where === "video") this.videoSink?.onCaptureError(m.message);
         else if (m.where === "audio") this.audioSink?.onCaptureError(m.message);
@@ -457,10 +465,22 @@ export class PortBackend implements MirroringBackend {
     }
   }
 
+  /**
+   * `WakeSource`: the agent's renderer has Chromium's timers, which keep time on Windows where Node's wait for the
+   * 15.6 ms system tick. The caller keeps its own Node timer, so a busy or stopped agent costs punctuality, not the task.
+   */
+  requestWake(delayMs: number, wake: () => void): void {
+    if (this.stopped) return;
+    const id = this.nextWakeId++;
+    this.wakes.set(id, wake);
+    this.port.postMessage({ t: "wake", id, ms: delayMs });
+  }
+
   stopAll(): void {
     if (this.stopped) return;
     this.port.postMessage({ t: "stop" });
     this.stopped = true;
+    this.wakes.clear();
     this.port.close();
   }
 }

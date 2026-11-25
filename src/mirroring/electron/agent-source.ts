@@ -123,6 +123,8 @@ export const AGENT_SOURCE = String.raw`
       case "capture-size": captureSize = { width: m.width, height: m.height }; return;
       case "encode-audio": return encodeAudio(m.seq);
       case "drop-audio": { const d = pendingAudio.get(m.seq); pendingAudio.delete(m.seq); if (d) d.close(); return; }
+      // The engine's timer. A timer set from a message event is not nested, so it is not clamped to 4 ms.
+      case "wake": setTimeout(() => { if (!stopped) send({ t: "wake", id: m.id }); }, m.ms); return;
       case "stop": return stop();
     }
   }
