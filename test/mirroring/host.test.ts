@@ -83,7 +83,8 @@ async function start(alreadyMuted = false, options: Partial<Parameters<typeof cr
   (electron as { app?: unknown }).app = { commandLine: commandLine(args) };
   page.muted = alreadyMuted;
   if (found !== undefined) state.found = found;
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", ...options });
+  // A fixed platform: the probes (Baseline H.264 on a Mac) and the desktop audio mode depend on it, not on the test machine.
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js", ...options }, "linux");
   const errors: string[] = [];
   const service = host.factory(
     { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
@@ -167,7 +168,9 @@ test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep
     let streams: { video?: unknown; audio?: string } | undefined;
     state.display!(null, (r) => { streams = r; });
     assert.equal(streams?.audio, expected);
-    assert.deepEqual(streams?.video, { id: "screen:1:0", name: "Screen 1" });
+    // The media id goes through as it came (CastMirroringServiceHost does not list the sources again). Electron wants a
+    // name too, which only labels the track; the id stands in for it.
+    assert.deepEqual(streams?.video, { id: "screen:1:0", name: "screen:1:0" });
     host.dispose();
   }
 });
@@ -182,7 +185,7 @@ test("host: switching the source tab moves the local mute, mints the new tab's c
   const next = otherPage(page, 8);
   const pages: Record<number, unknown> = { 7: page, 8: next };
   (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
   const service = host.factory(
     { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
     {},
@@ -214,7 +217,7 @@ test("host: a tab that was already muted stays muted through a switch, and a mut
   const third = otherPage(page, 9);
   const pages: Record<number, unknown> = { 7: page, 8: next, 9: third };
   (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
   const service = host.factory(
     { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
     {},
@@ -252,7 +255,7 @@ test("host: the mirrored tab being destroyed ends the session (WebContentsDestro
     const next = otherPage(page, 8);
     const pages: Record<number, unknown> = { 7: page, 8: next };
     (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
-    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+    const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
     const stops: string[] = [];
     const service = host.factory(
       { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
@@ -320,7 +323,7 @@ test("host: --disable-features=CastStreamingVp9 takes VP9 out of the probes, --e
 
 test("host: without app.commandLine only Chrome's defaults apply", async () => {
   const { electron, state } = fakeElectron();
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
   host.factory({ type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never, {}, { send() {} }, { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never);
   for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
   assert.deepEqual(state.probes.filter((p) => !p.hardware).map((p) => p.codec), ["vp8", "vp9"]);
@@ -330,7 +333,7 @@ test("host: without app.commandLine only Chrome's defaults apply", async () => {
 test("host: a hardware codec the engine reports as failed stays out of later sessions for the app's run", async () => {
   const { electron, state } = fakeElectron();
   state.found = [{ codec: "h264", hardware: true }, { codec: "vp8", hardware: false }];
-  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" }, "linux");
   const begin = async (n: number): Promise<{ hardwareDenyList: string[] }> => {
     host.factory({ type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never, {}, { send() {} }, { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never);
     for (let i = 0; i < 100 && state.procs.length < n; i++) await sleep(5);

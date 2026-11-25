@@ -62,6 +62,7 @@ function startAgent() {
   };
   const supportChecks: Record<string, unknown>[] = [];
   const userMedia: Record<string, unknown>[] = [];
+  const displayMedia: Record<string, unknown>[] = [];
   const control = { supported: (_config: Record<string, unknown>) => true };
 
   class FakeEncoder {
@@ -84,7 +85,14 @@ function startAgent() {
   const context = createContext({
     window: { addEventListener: (_: string, l: typeof listener) => { listener = l; } },
     performance: { timeOrigin: 0, now: () => now },
-    navigator: { mediaDevices: { getUserMedia: async (constraints: (typeof requests)[number]) => { requests.push(constraints); userMedia.push(constraints as Record<string, unknown>); if (refuse.next) { refuse.next = false; throw new Error("denied"); } const track = makeTrack(); return { getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] }; } } },
+    navigator: { mediaDevices: {
+      getDisplayMedia: async (constraints: Record<string, unknown>) => {
+        displayMedia.push(constraints);
+        const v = makeTrack(), au = makeTrack();
+        tracks.splice(tracks.indexOf(au), 1);
+        return { getVideoTracks: () => [v], getAudioTracks: () => [au], getTracks: () => [v, au] };
+      },
+      getUserMedia: async (constraints: (typeof requests)[number]) => { requests.push(constraints); userMedia.push(constraints as Record<string, unknown>); if (refuse.next) { refuse.next = false; throw new Error("denied"); } const track = makeTrack(); return { getVideoTracks: () => [track], getAudioTracks: () => [], getTracks: () => [track] }; } } },
     MediaStreamTrackProcessor: class {
       readable: { getReader(): { read(): Promise<{ value?: FakeFrame; done: boolean }> } };
       constructor({ track }: { track: FakeTrack }) {
@@ -92,14 +100,15 @@ function startAgent() {
       }
     },
     VideoEncoder: FakeEncoder,
-    ArrayBuffer, Uint8Array, Map, String, Math, Promise,
+    AudioEncoder: class { static async isConfigSupported() { return { supported: true }; } state = "configured"; configure() {} encode() {} close() {} },
+    ArrayBuffer, Uint8Array, Float32Array, Map, String, Math, Promise,
   });
   runInContext(AGENT_SOURCE, context);
   listener!({ data: "electron-cast-mirroring:port", ports: [port] });
 
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    sent, encoders, settle, tracks, requests, refuse, supportChecks, userMedia, control,
+    sent, encoders, settle, tracks, requests, refuse, supportChecks, userMedia, displayMedia, control,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
     capture: async (ts: number, options: FrameOptions = {}) => {
@@ -114,6 +123,27 @@ function startAgent() {
     rtps: () => sent.filter((m) => m.t === "frame").map((m) => (m as { rtp: number }).rtp),
   };
 }
+
+test("agent: desktop audio that mutes local playback comes from getDisplayMedia, with no minimum size; the video keeps the session's policy", async () => {
+  const a = startAgent();
+  await a.command({
+    t: "start", source: { kind: "desktop", sourceId: "screen:1:0", audio: "loopbackWithMute" },
+    video: { width: 1920, height: 1080, frameRate: 30, resolutionChangePolicy: "fixed_aspect_ratio" }, audio: { sampleRate: 48000, channels: 2 },
+  });
+  assert.deepEqual(a.sent.filter((m) => m.t === "error"), []);
+  // Blink refuses min (and exact) constraints in getDisplayMedia with a TypeError.
+  assert.deepEqual(JSON.parse(JSON.stringify(a.displayMedia)), [{ audio: true, video: { frameRate: { max: 30 }, width: { max: 1920 }, height: { max: 1080 } } }]);
+  assert.equal(a.userMedia.length, 1);
+  const video = (a.userMedia[0] as { audio: unknown; video: { mandatory: Record<string, number | string> } });
+  assert.equal(video.audio, false);
+  assert.equal(video.video.mandatory.chromeMediaSource, "desktop");
+  assert.equal(video.video.mandatory.chromeMediaSourceId, "screen:1:0");
+  assert.equal(blinkPolicy(video.video.mandatory as Record<string, number>), "fixed_aspect_ratio");
+  // getDisplayMedia's own video track is stopped; the frames come from the getUserMedia track.
+  assert.equal(a.tracks[0]!.stopped, true);
+  await a.capture(0, { width: 1920, height: 1080 });
+  assert.equal(a.rtps().length, 1);
+});
 
 test("agent: repeated bitrate changes reconfigure in place, force no key frame, and keep chunks paired with their frames", async () => {
   const a = startAgent();

@@ -873,8 +873,12 @@ Chrome decides whether the sender's own speakers stay on, and we match it (`Cast
   going, when `kCastDesktopMirroringKeepLocalAudio` is enabled (on by default there, `media_router_feature.cc`;
   muting the endpoint silences the loopback on some drivers). Every other platform gets `kLoopbackWithMuteDeviceId`,
   which mutes local playback while mirroring. Here: Windows captures with `getUserMedia` and `chromeMediaSource:
-  'desktop'` (loopback, no mute); other platforms use `getDisplayMedia` on the capture window's private session, whose
-  `setDisplayMediaRequestHandler` answers with the app's source and `audio: 'loopbackWithMute'`. The choice is Chrome's, and like
+  'desktop'` (loopback, no mute); other platforms take the audio from `getDisplayMedia` on the capture window's private
+  session, whose `setDisplayMediaRequestHandler` answers with the app's source id and `audio: 'loopbackWithMute'` (the
+  video still comes from `getUserMedia`, see "Letterboxing"). The id goes through as the app gave it,
+  as `CastMirroringServiceHost` parses the media id rather than listing the sources again. A machine with no audio
+  output device has no loopback to open; the capture fails and the session ends with `AUDIO_CAPTURE_ERROR`, as in
+  Chrome (`OpenscreenSessionHost::ReportAndLogError` stops the session). The choice is Chrome's, and like
   `kCastDesktopMirroringKeepLocalAudio` it is an internal flag, not an app setting. The mute path was exercised on Windows (valid Opus reached the fake receiver) but not on
   macOS or Linux, and whether the speakers really went quiet was not listened for.
 - **Tab**: `CreateAudioStream` binds a Muter on the tab's audio group when the first loopback stream is requested, so
@@ -1018,8 +1022,11 @@ device through `getUserMedia`, whose legacy constraints Blink turns back into a 
 runs Blink's rule over them. Before this the agent sent only a maximum, so Blink's default applied (`fixed_resolution` for
 a tab, which made every tab 1920x1080 whatever its size, as measured, and `any_within_limit` for the desktop). The smoke test checks that a 4:3 page and the screen come out 16:9 (a 640x480 page: 1706x960).
 
-`getDisplayMedia`, used for desktop audio off Windows, gets the same limits in its standard syntax (not run here: no
-machine in the tests is off Windows). `fixed_resolution` is only chosen when the receiver recommends the minimum size.
+`getDisplayMedia`, used for desktop audio off Windows, refuses minimum sizes (a TypeError, "min constraints are not
+supported"), so it cannot carry a policy: without a minimum Blink falls back to `any_within_limit` for a screen. The
+agent therefore takes only the audio track from it (asked with the maximums), stops its video track, and captures the
+video with the same `getUserMedia` request as on Windows. `fixed_resolution` is only chosen when the receiver recommends
+the minimum size.
 
 ### Media remoting: capabilities only, the renderer side is not reachable
 

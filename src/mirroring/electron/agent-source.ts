@@ -152,12 +152,13 @@ export const AGENT_SOURCE = String.raw`
     return { ...base, minWidth: w, minHeight: h };
   }
 
-  // The same limits in the standard syntax getDisplayMedia takes.
+  // The maximums in the standard syntax getDisplayMedia takes. It refuses min (and exact) constraints, a TypeError
+  // ("min constraints are not supported"), so it cannot express the resolution change policy.
   function displayConstraints(limits) {
     const video = { frameRate: { max: limits.maxFrameRate || 30 } };
     if (limits.maxWidth) {
-      video.width = { min: limits.minWidth, max: limits.maxWidth };
-      video.height = { min: limits.minHeight, max: limits.maxHeight };
+      video.width = { max: limits.maxWidth };
+      video.height = { max: limits.maxHeight };
     }
     return video;
   }
@@ -227,10 +228,21 @@ export const AGENT_SOURCE = String.raw`
       video: withVideo ? { mandatory: { chromeMediaSource: sourceKind, ...idConstraint, ...limits } } : false,
     });
     try {
-      return !tab && audio && source.audio === "loopbackWithMute"
-        // The host's handler on this window's own session answers with the app's source and 'loopbackWithMute'.
-        ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: displayConstraints(limits) })
-        : await acquire(!!audio, videoWanted);
+      if (!tab && audio && source.audio === "loopbackWithMute") {
+        // Only getDisplayMedia reaches 'loopbackWithMute' (the host's handler on this window's own session answers with
+        // the app's source and it). Its video track is dropped: getDisplayMedia takes no minimum size, so its capture
+        // would always be any_within_limit (SelectResolutionPolicyFromCandidates' default for a screen), where Chrome
+        // captures the screen with the session's policy. The video comes from the same request as without audio.
+        const display = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: displayConstraints(limits) });
+        for (const t of display.getVideoTracks()) t.stop();
+        const audioTracks = display.getAudioTracks();
+        let videoTracks = [];
+        try { videoTracks = (await acquire(false, true)).getVideoTracks(); }
+        catch (err) { for (const t of audioTracks) t.stop(); throw err; }
+        const all = [...audioTracks, ...videoTracks];
+        return { getAudioTracks: () => audioTracks, getVideoTracks: () => videoTracks, getTracks: () => all };
+      }
+      return await acquire(!!audio, videoWanted);
     } catch (err) {
       // One call serves both tracks, so say which one the browser refused: try the video alone.
       let which = video ? "video" : "audio";

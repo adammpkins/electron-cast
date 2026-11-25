@@ -216,9 +216,11 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           capture = { kind: "tab", mediaSourceId: "" };
         } else {
           const id = desktopStreamId(source.id) ?? "";
-          const sources = await e.desktopCapturer.getSources({ types: ["screen", "window"] });
-          const chosen = sources.find((s) => s.id === id);
-          if (chosen === undefined) throw new Error(`no desktop source ${id}`);
+          // CastMirroringServiceHost parses the media id it is given (DesktopMediaID::Parse) and captures it; it does not
+          // list the sources again. Listing them here failed on Linux (X11 under Xvfb), where the screen the app had
+          // just been given was not in a second list; an id that names nothing fails the capture instead. Electron's
+          // handler also wants a name, which only labels the track.
+          const chosen = { id, name: id };
           const withAudio = isDesktopSourceWithAudio(source.id);
           // CastMirroringServiceHost::GetDesktopAudioLoopbackDeviceId: Windows keeps local playback
           // (kLoopbackInputDeviceId, kCastDesktopMirroringKeepLocalAudio is on by default there, as muting the endpoint
