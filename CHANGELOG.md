@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Tab and desktop mirroring.** `createCastManager({ mirroring })` enables `startCasting(sinkId, { castMode:
+  "tab_mirror" | "desktop_mirror", webContentsId, desktopSourceId, withAudio })` in the main process, with `castMode`
+  and `withAudio` filters on `registerMediaSinksObserver`. It is a TypeScript port of Chrome's Cast Streaming sender
+  (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
+  routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route. No new
+  dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
+  tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
+  pause and resume, hardware codecs.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge

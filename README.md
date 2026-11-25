@@ -180,6 +180,10 @@ there describes the top-level await form of the same hang).
   closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
 - A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
   its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
+- Tab and desktop mirroring from the main process (Chrome's "Cast tab" and "Cast screen"): a port of the sender Chrome
+  uses, with VP8 and Opus, encryption, retransmission and bitrate adaptation, tested end to end against a fake receiver.
+  **Not yet tested on a real device** (see [docs/MAIN-API.md](docs/MAIN-API.md#starting-a-cast-from-main) and
+  [examples/live-mirroring](examples/live-mirroring/)).
 
 **Default mode (Google's SDK):**
 

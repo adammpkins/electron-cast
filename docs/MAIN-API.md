@@ -119,6 +119,43 @@ still fails with `receiver_unavailable` before the picker opens.
 
 ## Starting a cast from main
 
-Not supported: a cast needs the page's own SDK state and a user gesture, as in Chrome. To start one from the app's
-menu or tray, tell the page to press its own Cast button (for example `webContents.executeJavaScript` clicking the
-site's cast button, or a message the page listens for). The route then appears in the observers above.
+Casting a page's own content (the page's Cast SDK session) is not supported from main: it needs the page's SDK state and
+a user gesture, as in Chrome. To start one from the app's menu or tray, tell the page to press its own Cast button.
+
+Mirroring is different: the app chooses what to send, so main can start it. This is Chrome's "Cast tab" and "Cast
+screen". It is off unless you pass `mirroring` to `createCastManager`:
+
+```ts
+import { app, BrowserWindow, MessageChannelMain, desktopCapturer, utilityProcess, webContents } from "electron";
+
+const manager = createCastManager({
+  ipcMain,
+  selectDevice,
+  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents } },
+});
+await manager.start();
+
+// Only the devices that can receive this kind of mirroring (audio-only speakers cannot take "desktop_mirror" without audio).
+manager.registerMediaSinksObserver({ onSinksUpdated: showDevices }, { castMode: "tab_mirror" });
+
+const route = await manager.startCasting(sink.id, { castMode: "tab_mirror", webContentsId: win.webContents.id });
+// route.description is "Casting tab"; route.id is Chrome's urn:x-org.chromium:media:route:... form.
+await manager.terminateRoute(route.id); // stops the receiver app, as Chrome does
+```
+
+`startCasting(sinkId, options)`:
+
+- `castMode: "tab_mirror"` with `webContentsId`: mirrors that page (video and its audio).
+- `castMode: "desktop_mirror"` with `desktopSourceId` (an id from `desktopCapturer.getSources`) and optionally
+  `withAudio` (system loopback audio, where the OS provides it).
+- `targetPlayoutDelayMs` overrides the receiver playout delay (Chrome's default is 200 ms, `kDefaultPlayoutDelay`).
+
+It rejects with a `MediaRouteError` (`code`: `sink_not_found`, `unable_to_cast`, `unknown_error`, `cancelled`). A new
+route on a device ends the one already running there, as in Chrome. Mirroring routes show up in
+`registerMediaRoutesObserver` and end on `terminateRoute`, when the receiver's app closes, or on a stream error.
+
+`mirroring` options: `electron` (the Electron objects to use), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
+`engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
+Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
+route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)
+to try it on a real device.
