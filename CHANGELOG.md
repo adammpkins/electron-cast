@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (unreleased)
 
 This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
 channels, the sessions on them are followed whoever started them, the app can cast and control media from its own
@@ -8,46 +8,49 @@ UI, DIAL devices are found and cast to next to Cast devices, a page can present 
 display) with the Presentation Receiver API on the other end, and the app can mirror a tab or the desktop. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
 is frozen and behaves as before for pages; it shares the device list.
 
-### Added
+### Highlights
 
-- **`electron-cast dial-test`, a one-command test for DIAL TVs** (`npx electron-cast@next dial-test`; Node 20 or later, no
-  Electron). It runs the library's own DIAL discovery, device description, app info, launch and stop against a real
-  device, asks before it opens YouTube on it, and writes a Markdown report with names, serial numbers, UUIDs, MAC addresses,
-  IP addresses and URL hosts removed, plus a prefilled GitHub issue link. The package gains a `bin` entry
-  (`electron-cast` -> `dist/cli.js`). See the README's "Test a DIAL TV".
-- **A session tracker follows what every device runs**, from the receiver status and media status on the device's
-  channel, whoever started it (Chrome's `CastSessionTracker`). Sessions started elsewhere, or by this app before it
-  restarted, are reported through the routes observers and `getRoutes()` as non-local routes, as Chrome does;
-  `MediaRoute` gains `isLocal` and `sinkName`, and `origin` is empty on a non-local route. A non-local route can be
-  terminated and have its volume set.
-- **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
-  `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
-  `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
-  images). It works on non-local routes too. Its status comes from the session tracker, as `CastMediaController`'s does:
-  every receiver status and every `MEDIA_STATUS` reaches every observer, changed or not, with media updates merged
-  into what was known and the `supportedMediaCommands` mask turned into a list. Binding sends the session's state
-  first and then `MEDIA_GET_STATUS`. New types `MediaController`, `MediaStatus`, `MediaStatusObserver`, `MediaImage`
-  and `MediaPlayState`. See docs/MAIN-API.md.
-- **Casting from the app's own UI, on the page's default request.** In Chrome a page sets
-  `navigator.presentation.defaultRequest = new PresentationRequest(urls)`; the Cast dialog, opened from the browser's
-  menu or toolbar, offers it as a source, and when the user picks a device Chrome starts the presentation and fires
-  `connectionavailable` on the default request, which Google's Cast SDK adopts. electron-cast now does the same:
-  - The page-side stand-in reports `navigator.presentation.defaultRequest` (set, replaced, cleared) to the main
-    process, and only the window's main frame counts. A navigation or a destroyed window clears it.
-  - New `CastManager` methods, named after Chrome's `WebContentsPresentationManager` and `MediaRouterUI`:
-    `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`,
-    `addPresentationObserver(webContentsId, observer)` and `startCasting(sinkId, { webContentsId })`, which starts the
-    default request on a sink with no picker and no user gesture. The page gets `connectionavailable` with a working
-    connection and the route appears in routes observers. It rejects with `MediaRouteError` carrying Chrome's
-    `RouteRequestResultCode` (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`,
-    `unknown_error`) or `unable_to_cast`. `startCasting` launches anew on a sink that already has a route, stops the
-    route its window launched before, and uses the URL's `__castLaunchTimeout__` or 60 s, all as Chrome's
-    `CastActivityManager` does. New types `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
-  - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
-    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities. A DIAL sink matches a
-    `cast-dial:` URL whose app it has, for the query's new `origin`, and `startCasting` starts a DIAL route on it, as
-    Chrome's dialog offers DIAL sinks for a default request's `cast-dial:` URLs.
-- **DIAL, as Chrome's Media Router does it (presentation mode).** electron-cast now discovers DIAL devices by SSDP and
+- **Tab and desktop mirroring, tested on a Chromecast Ultra.** `createCastManager({ mirroring })` enables
+  `startCasting(sinkId, { castMode: "tab_mirror", webContentsId })` and `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })`
+  in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
+  `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
+  `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
+  (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
+  routing): OFFER/ANSWER, VP8, VP9, H.264 in hardware and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  The video encoder is set up as Chrome's `MediaVideoEncoderWrapper` sets it up (a constant bitrate, the screen content
+  hint), and frame drops are logged by reason.
+  Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
+  runs on the device's one kept-open channel. A mirrored tab is muted locally while it is cast (Chrome's muter);
+  desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,
+  and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
+  software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
+  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
+  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)). Like Chrome, a mirroring session sends `GET_CAPABILITIES`
+  once after the first negotiation and keeps the receiver's remoting capabilities.
+- **Wired displays, as Chrome's `WiredDisplayMediaRouteProvider` has them, tested on a second monitor** (Windows, a
+  1080x1920 portrait display). New `wiredDisplay` option on `createCastManager` (presentation mode): other screens are presentation sinks (`wired_display_<id>`, "Display N"). A
+  `PresentationRequest` whose URL is https (not the legacy Cast URL) or http on localhost can start on a display: the
+  page opens fullscreen in a receiver window that has its own in-memory session (cleared and reused, not one per
+  presentation), no menu or developer tools, no permissions except fullscreen, and ends the presentation if it
+  navigates away. The receiver is sandboxed as Chrome's is (`kPresentationReceiverSandboxFlags`: no modals, popups or
+  top-level navigation) by a `Content-Security-Policy: sandbox` header on every receiver document, so an iframe's
+  `alert()` is refused too. A display connection starts `connecting` and becomes `connected` when the receiver page is
+  ready, as Blink's does.
+  - The receiver page gets `navigator.presentation.receiver` (`connectionList`, `connectionavailable`, `send`, `close`,
+    `terminate`), and the controller can `reconnect(id)`. Closing the window, removing the display or `terminate()`
+    ends the presentation for every controller; a controller that goes away only leaves it.
+  - The display a page is on is left out of the picker by default, found with the new `BrowserWindow` option and
+    `screen.getDisplayMatching`, and `request.observeSinks` follows the window as it moves (`displayOf` overrides it).
+  - A request that lists both a Cast (or `cast-dial:`) URL and a page URL is one picker, as Chrome's dialog lists both
+    kinds of sink: `selectDevice` gets `request.displays` and may answer `{ display }` (new type `DisplayChoice`), and the
+    request starts on the sink it returns. Its `getAvailability()` is true when either kind has a sink.
+  - New exports: `createReceiverWindows` (the Electron `BrowserWindow` part, taking `BrowserWindow`, `session`,
+    `ipcMain` and a folder for the generated receiver preload; calling it twice on one `ipcMain` and channel throws),
+    the display rules (`isWiredDisplaySource`, `availableDisplays`, `wiredDisplaySinks`), and `manager.wiredDisplay`
+    (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+- **DIAL, as Chrome's Media Router does it (presentation mode).** DIAL discovery and device descriptions are tested on
+  real Chromecasts (1st gen, Ultra); launching an app over DIAL needs a DIAL-only TV and is untested. electron-cast now
+  discovers DIAL devices by SSDP and
   serves the `cast-dial:` sources that Google's SDK adds to a request when the page passes a `dialRequest`
   (`chrome.cast.DialRequest`, as YouTube's web app does for non-Cast TVs). Each rule follows a Chromium function,
   cited in [docs/DESIGN.md](docs/DESIGN.md#dial-srcdial): an M-SEARCH on every IPv4 interface (four searches a second
@@ -87,44 +90,61 @@ is frozen and behaves as before for pages; it shares the device list.
   `{ retries: true }`); the type `ChannelParams`.
 - `isPubliclyRoutable`, `isLoopback`, `isCastAddressAllowed` and `parseIpBytes` are exported from the discovery layer
   (ports of `net::IPAddress`). `APP_AVAILABILITY_REFRESH_MS` is exported.
-- **Wired displays, as Chrome's `WiredDisplayMediaRouteProvider` has them.** New `wiredDisplay` option on
-  `createCastManager` (presentation mode): other screens are presentation sinks (`wired_display_<id>`, "Display N"). A
-  `PresentationRequest` whose URL is https (not the legacy Cast URL) or http on localhost can start on a display: the
-  page opens fullscreen in a receiver window that has its own in-memory session (cleared and reused, not one per
-  presentation), no menu or developer tools, no permissions except fullscreen, and ends the presentation if it
-  navigates away. The receiver is sandboxed as Chrome's is (`kPresentationReceiverSandboxFlags`: no modals, popups or
-  top-level navigation) by a `Content-Security-Policy: sandbox` header on every receiver document, so an iframe's
-  `alert()` is refused too. A display connection starts `connecting` and becomes `connected` when the receiver page is
-  ready, as Blink's does.
-  - The receiver page gets `navigator.presentation.receiver` (`connectionList`, `connectionavailable`, `send`, `close`,
-    `terminate`), and the controller can `reconnect(id)`. Closing the window, removing the display or `terminate()`
-    ends the presentation for every controller; a controller that goes away only leaves it.
-  - The display a page is on is left out of the picker by default, found with the new `BrowserWindow` option and
-    `screen.getDisplayMatching`, and `request.observeSinks` follows the window as it moves (`displayOf` overrides it).
-  - A request that lists both a Cast (or `cast-dial:`) URL and a page URL is one picker, as Chrome's dialog lists both
-    kinds of sink: `selectDevice` gets `request.displays` and may answer `{ display }` (new type `DisplayChoice`), and the
-    request starts on the sink it returns. Its `getAvailability()` is true when either kind has a sink.
-  - New exports: `createReceiverWindows` (the Electron `BrowserWindow` part, taking `BrowserWindow`, `session`,
-    `ipcMain` and a folder for the generated receiver preload; calling it twice on one `ipcMain` and channel throws),
-    the display rules (`isWiredDisplaySource`, `availableDisplays`, `wiredDisplaySinks`), and `manager.wiredDisplay`
-    (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
-- **Tab and desktop mirroring.** `createCastManager({ mirroring })` enables `startCasting(sinkId, { castMode:
-  "tab_mirror", webContentsId })` and `startCasting(sinkId, { castMode: "desktop_mirror", desktopSourceId, withAudio })`
-  in the main process, Chrome's `TAB_MIRROR` and `DESKTOP_MIRROR` cast modes, with `castMode` and `withAudio` filters on
-  `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
-  `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
-  (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
-  routing): OFFER/ANSWER, VP8, VP9, H.264 in hardware and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
-  The video encoder is set up as Chrome's `MediaVideoEncoderWrapper` sets it up (a constant bitrate, the screen content
-  hint), and frame drops are logged by reason.
-  Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
-  runs on the device's one kept-open channel. A mirrored tab is muted locally while it is cast (Chrome's muter);
-  desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,
-  and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
-  software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
-  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
-  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)). Like Chrome, a mirroring session sends `GET_CAPABILITIES`
-  once after the first negotiation and keeps the receiver's remoting capabilities.
+- **Access code casting: devices can be added by address, as Chrome's access code casting adds the device a code
+  resolves to.** `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
+  address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
+  with Chrome's checks, quick open parameters (2 s connect, 3 attempts 1 s apart) and expiry: it stays for
+  `accessCode.deviceDuration` seconds (default 0) plus 20 s, a device a page is casting to stays until the cast ends, and a
+  network change removes it and brings the remembered ones back. It is off
+  unless `createCastManager({ accessCode: { enabled: true } })`, as Chrome's `AccessCodeCastEnabled` policy is. Turning a
+  typed code into an address is a private Google service that needs Chrome's sign-in, so it is not part of electron-cast;
+  [DESIGN.md](docs/DESIGN.md#access-code-casting-access-codets) says why. The address comes from the app, not from
+  Google's server as in Chrome, so validate what users type: Chrome's rules allow any private address and port. New: `addSinkByAddress`, `configureAccessCode`,
+  `rememberedSinks`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
+  between runs), and `pingIntervalMs` in `createClient`'s second argument.
+- **`electron-cast dial-test`, a one-command test for DIAL TVs** (`npx electron-cast@next dial-test`; Node 20 or later, no
+  Electron), run on a real network: it found three Chromecasts over DIAL and flagged them as Cast devices. It runs the
+  library's own DIAL discovery, device description, app info, launch and stop against a real device, asks before it opens YouTube on it, and writes a Markdown report with names, serial numbers, UUIDs, MAC addresses,
+  IP addresses and URL hosts removed, plus a prefilled GitHub issue link. The package gains a `bin` entry
+  (`electron-cast` -> `dist/cli.js`). See the README's "Test a DIAL TV".
+
+Not yet tried on real devices: casting from the app's own UI (`startCasting` from its menu) and the sessions that other
+senders started. Both are covered by unit tests with fakes.
+
+### Added
+
+- **A session tracker follows what every device runs**, from the receiver status and media status on the device's
+  channel, whoever started it (Chrome's `CastSessionTracker`). Sessions started elsewhere, or by this app before it
+  restarted, are reported through the routes observers and `getRoutes()` as non-local routes, as Chrome does;
+  `MediaRoute` gains `isLocal` and `sinkName`, and `origin` is empty on a non-local route. A non-local route can be
+  terminated and have its volume set.
+- **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
+  `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
+  `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,
+  images). It works on non-local routes too. Its status comes from the session tracker, as `CastMediaController`'s does:
+  every receiver status and every `MEDIA_STATUS` reaches every observer, changed or not, with media updates merged
+  into what was known and the `supportedMediaCommands` mask turned into a list. Binding sends the session's state
+  first and then `MEDIA_GET_STATUS`. New types `MediaController`, `MediaStatus`, `MediaStatusObserver`, `MediaImage`
+  and `MediaPlayState`. See docs/MAIN-API.md.
+- **Casting from the app's own UI, on the page's default request.** In Chrome a page sets
+  `navigator.presentation.defaultRequest = new PresentationRequest(urls)`; the Cast dialog, opened from the browser's
+  menu or toolbar, offers it as a source, and when the user picks a device Chrome starts the presentation and fires
+  `connectionavailable` on the default request, which Google's Cast SDK adopts. electron-cast now does the same:
+  - The page-side stand-in reports `navigator.presentation.defaultRequest` (set, replaced, cleared) to the main
+    process, and only the window's main frame counts. A navigation or a destroyed window clears it.
+  - New `CastManager` methods, named after Chrome's `WebContentsPresentationManager` and `MediaRouterUI`:
+    `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`,
+    `addPresentationObserver(webContentsId, observer)` and `startCasting(sinkId, { webContentsId })`, which starts the
+    default request on a sink with no picker and no user gesture. The page gets `connectionavailable` with a working
+    connection and the route appears in routes observers. It rejects with `MediaRouteError` carrying Chrome's
+    `RouteRequestResultCode` (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`,
+    `unknown_error`) or `unable_to_cast`. `startCasting` launches anew on a sink that already has a route, stops the
+    route its window launched before, and uses the URL's `__castLaunchTimeout__` or 60 s, all as Chrome's
+    `CastActivityManager` does. New types `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
+  - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
+    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities. A DIAL sink matches a
+    `cast-dial:` URL whose app it has, for the query's new `origin`, and `startCasting` starts a DIAL route on it, as
+    Chrome's dialog offers DIAL sinks for a default request's `cast-dial:` URLs.
 - **Switch the mirrored tab, freeze the picture.** `switchMirroringSourceTab(routeId, webContentsId)` moves a
   `tab_mirror` route to another page without ending or renegotiating the session (Chrome's "share this tab instead":
   capture and the audio stream restart on the new page, encoders and timelines carry on, local muting moves to the new
@@ -157,18 +177,6 @@ is frozen and behaves as before for pages; it shares the device list.
   cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
   no longer upscaled to 1920x1080. The hardware encoders, the new offer after an encoder failure and the
   letterboxing are tested against the fake receiver and in the smoke test; not yet on a real device.
-- **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
-  `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
-  address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,
-  with Chrome's checks, quick open parameters (2 s connect, 3 attempts 1 s apart) and expiry: it stays for
-  `accessCode.deviceDuration` seconds (default 0) plus 20 s, a device a page is casting to stays until the cast ends, and a
-  network change removes it and brings the remembered ones back. It is off
-  unless `createCastManager({ accessCode: { enabled: true } })`, as Chrome's `AccessCodeCastEnabled` policy is. Turning a
-  typed code into an address is a private Google service that needs Chrome's sign-in, so it is not part of electron-cast;
-  [DESIGN.md](docs/DESIGN.md#access-code-casting-access-codets) says why. The address comes from the app, not from
-  Google's server as in Chrome, so validate what users type: Chrome's rules allow any private address and port. New: `addSinkByAddress`, `configureAccessCode`,
-  `rememberedSinks`, `createAccessCodeSink`, the `accessCode` option (with `store` to keep devices
-  between runs), and `pingIntervalMs` in `createClient`'s second argument.
 - **The manager follows network changes by itself, as Chrome's `DiscoveryNetworkMonitor` tells its media router.** It
   computes Chrome's network id from the connected interfaces and, when it changes, does what Chrome's two observers do:
   DIAL devices given up on as non-Cast are tried again, the sinks of the network being left are remembered and reopened
