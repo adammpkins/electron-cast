@@ -1100,6 +1100,14 @@ of size reconfigures the encoder, as a change of source size already did.
 
 Differences:
 
+- WebCodecs passes on no quantizer, so the one Chrome's encoder would report is read from each encoded frame
+  (`sender/encoder-quantizer.ts`) and normalized as Chrome normalizes it: the slice QP of H.264 and HEVC over 51 and
+  the q index of hardware VP8 and VP9 over 127 and 255 (`VideoEncodeAcceleratorAdapter::BitstreamBufferReady`), and
+  for libvpx the q index on its 0 to 63 scale over 63 (`VpxVideoEncoder::GetEncoderOutput`, which asks for
+  `VP8E_GET_LAST_QUANTIZER_64`; `vp8_reverse_trans` and `vp9_qindex_to_quantizer` are ported for it). A slice QP is
+  where the encoder's rate control starts the picture, not the average over its blocks that a driver may report. AV1
+  is not read and keeps the complexity estimate.
+
 - The capture still happens at the source size, since the browser's capturer never sees our oracle: a smaller capture
   size saves encoder and network load, not capture load.
 - `AnimatedContentSampler` finds animation from damage rectangles, which a page cannot see. Frames arriving at most

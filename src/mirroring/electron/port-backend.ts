@@ -9,7 +9,7 @@ import type {
 } from "../backend.ts";
 import type { FrameSenderConfig, ResolutionChangePolicy, VideoCaptureParams } from "../mirror-settings.ts";
 import { CaptureSizeOracle, suggestConstraints } from "../sender/capture-size-oracle.ts";
-import { H264QuantizerReader, normalizedH264Quantizer } from "../sender/h264-quantizer.ts";
+import { EncoderQuantizerReader } from "../sender/encoder-quantizer.ts";
 import { EncoderUtilizationAverage, calculateEncoderUtilization, computeLossiness } from "../sender/video-encoder-metrics.ts";
 import type { RawVideoFrame, VideoEncoderPort } from "../sender/video-sender.ts";
 import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.ts";
@@ -82,8 +82,7 @@ export class PortBackend implements MirroringBackend {
   private frameInterval = 1000 / 30;
   private targetBitrate = 0;
   private isHardwareEncoder = false;
-  private videoCodec: FrameSenderConfig["videoCodec"];
-  private h264Quantizer = new H264QuantizerReader();
+  private quantizer = new EncoderQuantizerReader(undefined, false);
   /** Whether the agent estimates the complexity of the frames it encodes; a new encoder always does. */
   private agentEstimatesComplexity = true;
   private readonly utilizationAverage = new EncoderUtilizationAverage();
@@ -149,16 +148,16 @@ export class PortBackend implements MirroringBackend {
         const data = Buffer.from(m.data);
         // MediaVideoEncoderWrapper::OnEncodedFrame: the quantizer the encoder used, normalized to [0, 1], when there is
         // one (`output.qp`), else the complexity estimated for the frame; a frame with neither has no lossiness.
-        // WebCodecs passes no quantizer on, so an H.264 frame's is read from its slice header (h264-quantizer.ts).
-        const qp = this.videoCodec === "h264" && data.length > 0 ? this.h264Quantizer.read(data) : undefined;
-        const complexity = qp !== undefined ? normalizedH264Quantizer(qp) : m.complexity;
+        // WebCodecs passes no quantizer on, so it is read from the frame's own header (encoder-quantizer.ts).
+        const qp = this.quantizer.read(data);
+        const complexity = qp !== undefined ? qp.normalized : m.complexity;
         if (data.length > 0) this.estimateComplexityUnless(qp !== undefined, m.complexity !== undefined);
         const durationMs = m.durationMs ?? this.frameInterval;
         const lossiness =
           complexity !== undefined && this.targetBitrate > 0
             ? computeLossiness(data.length, durationMs, this.targetBitrate, complexity)
             : undefined;
-        if (qp !== undefined) this.stages.add("video QP", qp);
+        if (qp !== undefined) this.stages.add(`video QP (of ${qp.max})`, qp.qp);
         if (lossiness !== undefined) this.stages.add("video lossiness x100", lossiness * 100);
         else this.stages.add("video frames without lossiness", 1);
         if (this.targetBitrate > 0 && durationMs > 0) {
@@ -266,8 +265,7 @@ export class PortBackend implements MirroringBackend {
     // CalculateEncoderUtilization treats hardware and software encoders differently; the session host says which one
     // this is (a WebCodecs hardware encoder was found for the codec).
     this.isHardwareEncoder = config.useHardwareEncoder;
-    this.videoCodec = config.videoCodec;
-    this.h264Quantizer = new H264QuantizerReader();
+    this.quantizer = new EncoderQuantizerReader(config.videoCodec, config.useHardwareEncoder);
     this.agentEstimatesComplexity = true;
     this.port.postMessage({ t: "set-codec", codec: config.videoCodec ?? "vp8", codecString: config.codecParameter, hardware: config.useHardwareEncoder });
     this.port.postMessage({ t: "set-bitrate", bps: config.startBitrate });
