@@ -8,6 +8,7 @@
  * state allow it.
  */
 import type { VideoCodec } from "./protocol/constants.ts";
+import type { CommandLineLike } from "../electron/switches.ts";
 
 /** What the capture side found WebCodecs able to encode at the session's resolution and frame rate. */
 export interface EncodingProbe {
@@ -15,11 +16,7 @@ export interface EncodingProbe {
   software: ReadonlySet<VideoCodec>;
 }
 
-/** The part of Chrome's `base::CommandLine` this module reads; Electron's `app.commandLine` has exactly these two. */
-export interface CommandLineLike {
-  hasSwitch(name: string): boolean;
-  getSwitchValue(name: string): string;
-}
+export type { CommandLineLike };
 
 /**
  * What Chrome's command line and feature defaults say about the codecs, as `encoding_support.cc` reads them.
