@@ -12,6 +12,7 @@
     "presentation-api"
   ],
   "license": "MIT",
+  "homepage": "https://adammpkins.github.io/electron-cast/",
   "author": "Adam Perkins",
   "repository": {
     "type": "git",

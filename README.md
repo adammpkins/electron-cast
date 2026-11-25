@@ -1,4 +1,23 @@
+<div align="center">
+  <a href="https://adammpkins.github.io/electron-cast/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.jpg">
+      <img src="docs/readme/hero-light.jpg" width="100%" alt="The electron-cast front page: the headline 'Chromecast for Electron.' in heavy condensed type on a faint blueprint grid, a one-line explanation that Electron ships the Presentation API with nothing behind it, the install command npm install electron-cast, a Read the docs button and a link to the source on GitHub.">
+    </picture>
+  </a>
+</div>
+
 # electron-cast
+
+<p>
+  <img src="docs/readme/badges/node.svg" alt="node >=20">
+  <img src="docs/readme/badges/electron.svg" alt="electron >=35">
+  <img src="docs/readme/badges/license.svg" alt="license MIT">
+  <img src="docs/readme/badges/dependencies.svg" alt="runtime dependencies 0">
+  <a href="https://github.com/adammpkins/electron-cast/actions/workflows/ci.yml"><img src="https://github.com/adammpkins/electron-cast/actions/workflows/ci.yml/badge.svg" alt="GitHub CI"></a>
+</p>
+
+**Google's own Cast SDK, running unchanged in your Electron app.** Docs: [adammpkins.github.io/electron-cast](https://adammpkins.github.io/electron-cast/).
 
 Chrome's Cast support for Electron: pages run Google's own, unmodified Cast SDK, and your main process supplies the
 Media Router that Electron lacks.
@@ -89,6 +108,11 @@ cd examples/electron-app && npm install && npm start
 Click the cast button, pick a device, then "Play sample video". With no Cast device on the network the button stays
 hidden.
 
+<div align="center">
+  <img src="docs/readme/trace.svg" width="100%" alt="A recorded Cast v2 session between electron-cast 0.4.0 and a Chromecast Ultra, replayed as a log: device authentication, CONNECT, GET_STATUS, LAUNCH of the Default Media Receiver, RECEIVER_STATUS, media LOAD, MEDIA_STATUS moving from buffering to playing, PING and PONG, PAUSE and PLAY, then STOP and CLOSE. ON AIR lights from LOAD to STOP.">
+  <br><sub>A real session, frame by frame. Silences over 1.5 seconds are marked and shortened.</sub>
+</div>
+
 ## What you get
 
 - **Google's own SDK, unmodified.** The page's `cast_sender.js` and `cast.framework` run as in Chrome. electron-cast
@@ -168,6 +192,16 @@ and macOS. Its network is faked: no real device. Real-device runs used Electron 
 IPv6 discovery, and the Cast channel with TLS and device authentication over IPv6 unique-local (ULA) and link-local
 addresses, were verified on real devices. Iframes are covered by unit tests only; the smoke test does not load an iframe.
 
+<details>
+<summary><b>From the site</b>: the parity table and the replay at rest</summary>
+<br>
+<div align="center">
+  <img src="docs/readme/parity.jpg" width="100%" alt="The 'As Chrome does it' table from the front page: each row names a rule, what Chrome does, what electron-cast does, and the Chromium source file it is tied to, with the first row open.">
+  <br><br>
+  <img src="docs/readme/nosignal.jpg" width="100%" alt="The recorded-session replay before it starts: a greyscale test card with a NO SIGNAL plate, play, back, step and reset controls and a scrub bar.">
+</div>
+</details>
+
 ## Staying compatible with Google's SDK
 
 The page runs Google's SDK, which Google can change per Chrome major without an electron-cast release. `npm run canary`
@@ -192,6 +226,8 @@ on Windows). It is Electron's ESM startup, not electron-cast. Use `app.whenReady
 | [Architecture](docs/ARCHITECTURE.md), [design](docs/DESIGN.md), [Chromium map](docs/CHROMIUM-MAP.md) | How it works and which Chromium code it mirrors |
 | [Security](SECURITY.md) | Threat model, what crosses IPC, how to report a vulnerability |
 | [Contributing](CONTRIBUTING.md) | Setup, tests, the Chrome rule, releases |
+
+<div align="center"><img src="docs/readme/board.jpg" width="100%" alt="The electron-cast brand board: the mark, a square-cornered c with a red square in its opening, on paper and on ink; the palette of ink, paper, tally red, graphite and rule; Archivo and Commit Mono type; lockups; and icon sizes from 512 down to 16 pixels."></div>
 
 ## License
 

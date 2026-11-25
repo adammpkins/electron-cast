@@ -1,0 +1,1048 @@
+{
+  "version": 1,
+  "recordedAt": "2026-11-25",
+  "device": {
+    "model": "Chromecast Ultra"
+  },
+  "library": "electron-cast@0.4.0",
+  "frames": [
+    {
+      "t": 34,
+      "dir": "out",
+      "source": "sender-0",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.deviceauth",
+      "type": "binary",
+      "payload": {
+        "binary": "22 bytes, auth challenge"
+      }
+    },
+    {
+      "t": 309,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.deviceauth",
+      "type": "binary",
+      "payload": {
+        "binary": "5968 bytes, certificate chain"
+      }
+    },
+    {
+      "t": 314,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.connection",
+      "type": "CONNECT",
+      "payload": {
+        "type": "CONNECT"
+      }
+    },
+    {
+      "t": 315,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "GET_STATUS",
+      "payload": {
+        "type": "GET_STATUS",
+        "requestId": 1
+      }
+    },
+    {
+      "t": 322,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "RECEIVER_STATUS",
+      "payload": {
+        "requestId": 1,
+        "status": {
+          "applications": [
+            {
+              "appId": "E8C28D3C",
+              "appType": "WEB",
+              "displayName": "Backdrop",
+              "iconUrl": "",
+              "isIdleScreen": true,
+              "launchedFromCloud": false,
+              "namespaces": [
+                {
+                  "name": "urn:x-cast:com.google.cast.debugoverlay"
+                },
+                {
+                  "name": "urn:x-cast:com.google.cast.cac"
+                },
+                {
+                  "name": "urn:x-cast:com.google.cast.sse"
+                },
+                {
+                  "name": "urn:x-cast:com.google.cast.remotecontrol"
+                }
+              ],
+              "sessionId": "transport-0001",
+              "statusText": "",
+              "transportId": "transport-0001",
+              "universalAppId": "E8C28D3C"
+            }
+          ],
+          "userEq": {},
+          "volume": {
+            "controlType": "attenuation",
+            "level": 0.2800000011920929,
+            "muted": false,
+            "stepInterval": 0.05000000074505806
+          }
+        },
+        "type": "RECEIVER_STATUS"
+      }
+    },
+    {
+      "t": 322,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "LAUNCH",
+      "payload": {
+        "type": "LAUNCH",
+        "appId": "CC1AD845",
+        "requestId": 2
+      }
+    },
+    {
+      "t": 386,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "RECEIVER_STATUS",
+      "payload": {
+        "requestId": 0,
+        "status": {
+          "userEq": {},
+          "volume": {
+            "controlType": "attenuation",
+            "level": 0.2800000011920929,
+            "muted": false,
+            "stepInterval": 0.05000000074505806
+          }
+        },
+        "type": "RECEIVER_STATUS"
+      }
+    },
+    {
+      "t": 2217,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "RECEIVER_STATUS",
+      "payload": {
+        "requestId": 2,
+        "status": {
+          "applications": [
+            {
+              "appId": "CC1AD845",
+              "appType": "WEB",
+              "displayName": "Default Media Receiver",
+              "iconUrl": "",
+              "isIdleScreen": false,
+              "launchedFromCloud": false,
+              "namespaces": [
+                {
+                  "name": "urn:x-cast:com.google.cast.debugoverlay"
+                },
+                {
+                  "name": "urn:x-cast:com.google.cast.cac"
+                },
+                {
+                  "name": "urn:x-cast:com.google.cast.media"
+                }
+              ],
+              "sessionId": "session-0001",
+              "statusText": "Default Media Receiver",
+              "transportId": "session-0001",
+              "universalAppId": "CC1AD845"
+            }
+          ],
+          "userEq": {},
+          "volume": {
+            "controlType": "attenuation",
+            "level": 0.2800000011920929,
+            "muted": false,
+            "stepInterval": 0.05000000074505806
+          }
+        },
+        "type": "RECEIVER_STATUS"
+      }
+    },
+    {
+      "t": 2218,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.connection",
+      "type": "CONNECT",
+      "payload": {
+        "type": "CONNECT"
+      }
+    },
+    {
+      "t": 2218,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "LOAD",
+      "payload": {
+        "type": "LOAD",
+        "autoplay": true,
+        "currentTime": 0,
+        "media": {
+          "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+          "streamType": "BUFFERED",
+          "contentType": "video/webm"
+        },
+        "sessionId": "session-0001",
+        "requestId": 3
+      }
+    },
+    {
+      "t": 2346,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 2371,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "IDLE",
+            "currentTime": 0,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "media": {
+              "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+              "streamType": "BUFFERED",
+              "contentType": "video/webm",
+              "mediaCategory": "VIDEO"
+            },
+            "currentItemId": 1,
+            "extendedStatus": {
+              "playerState": "LOADING",
+              "media": {
+                "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+                "streamType": "BUFFERED",
+                "contentType": "video/webm",
+                "mediaCategory": "VIDEO"
+              },
+              "mediaSessionId": 1
+            },
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 3
+      }
+    },
+    {
+      "t": 3323,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 3437,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 3437,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "BUFFERING",
+            "currentTime": 0,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 3437,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 0,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "media": {
+              "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+              "streamType": "BUFFERED",
+              "contentType": "video/webm",
+              "mediaCategory": "VIDEO",
+              "duration": 634.571,
+              "tracks": [
+                {
+                  "trackId": 1,
+                  "type": "VIDEO"
+                }
+              ],
+              "breakClips": [],
+              "breaks": []
+            },
+            "currentItemId": 1,
+            "items": [
+              {
+                "itemId": 1,
+                "media": {
+                  "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+                  "streamType": "BUFFERED",
+                  "contentType": "video/webm",
+                  "mediaCategory": "VIDEO",
+                  "duration": 634.571
+                },
+                "autoplay": true,
+                "orderId": 0
+              }
+            ],
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 3
+      }
+    },
+    {
+      "t": 4043,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "BUFFERING",
+            "currentTime": 0,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 4043,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "BUFFERING",
+            "currentTime": 0.07733,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 4372,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 0.417844,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 4373,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "GET_STATUS",
+      "payload": {
+        "type": "GET_STATUS",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 4
+      }
+    },
+    {
+      "t": 4492,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 0.417844,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "media": {
+              "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+              "streamType": "BUFFERED",
+              "contentType": "video/webm",
+              "mediaCategory": "VIDEO",
+              "duration": 634.571,
+              "tracks": [
+                {
+                  "trackId": 1,
+                  "type": "VIDEO"
+                }
+              ],
+              "breakClips": [],
+              "breaks": []
+            },
+            "currentItemId": 1,
+            "items": [
+              {
+                "itemId": 1,
+                "media": {
+                  "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+                  "streamType": "BUFFERED",
+                  "contentType": "video/webm",
+                  "mediaCategory": "VIDEO",
+                  "duration": 634.571
+                },
+                "autoplay": true,
+                "orderId": 0
+              }
+            ],
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 4
+      }
+    },
+    {
+      "t": 6328,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 6365,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 7506,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "GET_STATUS",
+      "payload": {
+        "type": "GET_STATUS",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 5
+      }
+    },
+    {
+      "t": 7576,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 3.63375,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "media": {
+              "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+              "streamType": "BUFFERED",
+              "contentType": "video/webm",
+              "mediaCategory": "VIDEO",
+              "duration": 634.571,
+              "tracks": [
+                {
+                  "trackId": 1,
+                  "type": "VIDEO"
+                }
+              ],
+              "breakClips": [],
+              "breaks": []
+            },
+            "currentItemId": 1,
+            "items": [
+              {
+                "itemId": 1,
+                "media": {
+                  "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+                  "streamType": "BUFFERED",
+                  "contentType": "video/webm",
+                  "mediaCategory": "VIDEO",
+                  "duration": 634.571
+                },
+                "autoplay": true,
+                "orderId": 0
+              }
+            ],
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 5
+      }
+    },
+    {
+      "t": 9343,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 9352,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 9576,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "PAUSE",
+      "payload": {
+        "type": "PAUSE",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 6
+      }
+    },
+    {
+      "t": 9611,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PAUSED",
+            "currentTime": 5.704044,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 6
+      }
+    },
+    {
+      "t": 12346,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 12351,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 13619,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "PLAY",
+      "payload": {
+        "type": "PLAY",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 7
+      }
+    },
+    {
+      "t": 13669,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 5.752644,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 0
+      }
+    },
+    {
+      "t": 13675,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 5.752644,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "currentItemId": 1,
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 7
+      }
+    },
+    {
+      "t": 15356,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 15361,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 18356,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PING",
+      "payload": {
+        "type": "PING"
+      }
+    },
+    {
+      "t": 18360,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.heartbeat",
+      "type": "PONG",
+      "payload": {
+        "type": "PONG"
+      }
+    },
+    {
+      "t": 19679,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "GET_STATUS",
+      "payload": {
+        "type": "GET_STATUS",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 8
+      }
+    },
+    {
+      "t": 19699,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "PLAYING",
+            "currentTime": 11.734433,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "videoInfo": {
+              "width": 1280,
+              "height": 720,
+              "hdrType": "sdr"
+            },
+            "activeTrackIds": [],
+            "media": {
+              "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+              "streamType": "BUFFERED",
+              "contentType": "video/webm",
+              "mediaCategory": "VIDEO",
+              "duration": 634.571,
+              "tracks": [
+                {
+                  "trackId": 1,
+                  "type": "VIDEO"
+                }
+              ],
+              "breakClips": [],
+              "breaks": []
+            },
+            "currentItemId": 1,
+            "items": [
+              {
+                "itemId": 1,
+                "media": {
+                  "contentId": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm",
+                  "streamType": "BUFFERED",
+                  "contentType": "video/webm",
+                  "mediaCategory": "VIDEO",
+                  "duration": 634.571
+                },
+                "autoplay": true,
+                "orderId": 0
+              }
+            ],
+            "repeatMode": "REPEAT_OFF"
+          }
+        ],
+        "requestId": 8
+      }
+    },
+    {
+      "t": 19699,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "STOP",
+      "payload": {
+        "type": "STOP",
+        "mediaSessionId": 1,
+        "sessionId": "session-0001",
+        "requestId": 9
+      }
+    },
+    {
+      "t": 19757,
+      "dir": "in",
+      "source": "session-0001",
+      "destination": "*",
+      "namespace": "urn:x-cast:com.google.cast.media",
+      "type": "MEDIA_STATUS",
+      "payload": {
+        "type": "MEDIA_STATUS",
+        "status": [
+          {
+            "mediaSessionId": 1,
+            "playbackRate": 1,
+            "playerState": "IDLE",
+            "currentTime": 0,
+            "supportedMediaCommands": 274447,
+            "volume": {
+              "level": 1,
+              "muted": false
+            },
+            "currentItemId": 1,
+            "idleReason": "CANCELLED"
+          }
+        ],
+        "requestId": 9
+      }
+    },
+    {
+      "t": 19757,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "STOP",
+      "payload": {
+        "type": "STOP",
+        "sessionId": "session-0001",
+        "requestId": 10
+      }
+    },
+    {
+      "t": 19825,
+      "dir": "in",
+      "source": "receiver-0",
+      "destination": "sender-0001",
+      "namespace": "urn:x-cast:com.google.cast.receiver",
+      "type": "RECEIVER_STATUS",
+      "payload": {
+        "requestId": 10,
+        "status": {
+          "userEq": {},
+          "volume": {
+            "controlType": "attenuation",
+            "level": 0.2800000011920929,
+            "muted": false,
+            "stepInterval": 0.05000000074505806
+          }
+        },
+        "type": "RECEIVER_STATUS"
+      }
+    },
+    {
+      "t": 19826,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "session-0001",
+      "namespace": "urn:x-cast:com.google.cast.tp.connection",
+      "type": "CLOSE",
+      "payload": {
+        "type": "CLOSE"
+      }
+    },
+    {
+      "t": 19826,
+      "dir": "out",
+      "source": "sender-0001",
+      "destination": "receiver-0",
+      "namespace": "urn:x-cast:com.google.cast.tp.connection",
+      "type": "CLOSE",
+      "payload": {
+        "type": "CLOSE"
+      }
+    }
+  ]
+}

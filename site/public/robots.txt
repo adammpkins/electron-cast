@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://adammpkins.github.io/electron-cast/sitemap.xml
