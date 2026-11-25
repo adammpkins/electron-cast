@@ -476,3 +476,20 @@ test("connect times out when the TLS handshake never completes", async () => {
   await assert.rejects(client.connect(), CastTimeoutError);
   assert.ok(Date.now() - t0 < 2000);
 });
+
+test("messageSent reports what requests and sends put on the channel, not the handshake or keep-alive", async () => {
+  const { fake, client } = await setup();
+  const sent: { namespace: string; destinationId: string; data: unknown }[] = [];
+  client.on("messageSent", (m) => sent.push({ namespace: m.namespace, destinationId: m.destinationId, data: m.data }));
+  await client.connect();
+  assert.equal(sent.length, 0);
+  client.send(APP_NS, "tr-1", "hello");
+  client.closeTransport("tr-1");
+  const status = client.getStatus();
+  status.catch(() => undefined);
+  assert.deepEqual(sent.map((m) => [m.namespace, m.destinationId]), [[APP_NS, "tr-1"], [NS.CONNECTION, "tr-1"], [NS.RECEIVER, PLATFORM_RECEIVER_ID]]);
+  assert.equal(sent[0]!.data, "hello");
+  assert.equal(sent[1]!.data, '{"type":"CLOSE"}');
+  assert.match(sent[2]!.data as string, /"type":"GET_STATUS"/);
+  void fake;
+});

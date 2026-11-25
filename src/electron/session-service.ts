@@ -17,6 +17,7 @@ import type { NetworkMonitor } from "./network-monitor.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
 import { CastAppDiscovery, type CastAppSource } from "./app-discovery.ts";
 import { EventEmitter } from "node:events";
+import type { CastMessageLog, LoggedActivity, LoggedCastMessage } from "./message-logging.ts";
 import {
   AccessCodeSinks, type AccessCodeDevice, type AccessCodeOptions, type AccessCodeRememberedSink, type AddSinkResult,
 } from "./access-code.ts";
@@ -140,6 +141,11 @@ export interface CastSessionServiceOptions {
    * session no local activity has).
    */
   ownsSession?(sessionId: string, sinkId: string): boolean;
+  /**
+   * `CastMessageLogging`: where the messages of a session's channel are written, given only when the feature is on. A client
+   * that does not emit `messageSent` (a custom one) reports no sent messages.
+   */
+  messageLog?: CastMessageLog;
   /**
    * A session is about to be launched for `senderId` (`CastActivityManager::DoLaunchSession`, where the frame's earlier
    * route is stopped and the new one recorded in `routes_by_frame_`, before the LAUNCH is sent). Called before the LAUNCH
@@ -1202,12 +1208,35 @@ export class CastSessionService {
   /** Subscribe to a freshly opened channel's events. */
   private bindClient(client: CastClientLike, _device: CastDevice): void {
     client.on("message", (msg) => this.onClientMessage(client, msg));
+    if (this.options.messageLog !== undefined) {
+      (client as unknown as { on?(event: "messageSent", listener: (msg: LoggedCastMessage) => void): unknown }).on?.("messageSent", (msg) => this.logMessageSent(client, msg));
+    }
     client.on("receiverStatus", (status) => this.onClientStatus(client, status));
     client.on("transportClosed", (transportId) => this.onTransportClosed(client, transportId));
     client.on("close", () => this.onClientClose(client));
   }
 
+  /**
+   * `CastActivityManager::FindActivityByChannelId`: the activity a channel's messages are logged for. A channel with no
+   * session of this service has no activity, so its messages are not logged.
+   */
+  private activityOf(client: CastClientLike): LoggedActivity | undefined {
+    for (const rec of this.sessions.values()) {
+      if (rec.client === client) return { sinkId: rec.device.id, appId: rec.appId, sessionId: rec.app.sessionId };
+    }
+    return undefined;
+  }
+
+  private logMessageSent(client: CastClientLike, msg: LoggedCastMessage): void {
+    const activity = this.activityOf(client);
+    if (activity !== undefined) this.options.messageLog?.sent(activity, msg);
+  }
+
   private onClientMessage(client: CastClientLike, msg: ClientMessage): void {
+    if (this.options.messageLog !== undefined) {
+      const activity = this.activityOf(client);
+      if (activity !== undefined) this.options.messageLog.received(activity, msg);
+    }
     if (typeof msg.data !== "string") return;
     for (const rec of this.sessions.values()) {
       if (rec.client !== client || rec.app.transportId !== msg.sourceId) continue;

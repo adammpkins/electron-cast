@@ -62,6 +62,14 @@ export function showCastPermissionRejectedError(commandLine: CommandLineLike | u
 }
 
 /**
+ * `kCastMessageLogging` (media_router_feature.cc; `IsCastMessageLoggingEnabled`), disabled by default: the messages of a Cast
+ * route go to the media router log (see message-logging.ts).
+ */
+export function castMessageLogging(commandLine: CommandLineLike | undefined): boolean {
+  return featureEnabled(commandLine, "CastMessageLogging", false);
+}
+
+/**
  * `kCastDesktopMirroringKeepLocalAudio`, enabled by default (Windows only: `GetDesktopAudioLoopbackDeviceId` reads it
  * there and uses the muting loopback everywhere else).
  */

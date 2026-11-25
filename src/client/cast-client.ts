@@ -52,6 +52,12 @@ export interface CastClientOptions {
 /** Events emitted by {@link CastClient}. */
 export interface CastClientEvents {
   message: [msg: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
+  /**
+   * A message the caller's requests put on the channel (`send`, `request`, `launch`, `stop`, `setVolume`, `getStatus`, a
+   * closed transport), as `CastMessageHandler::Observer::OnMessageSent` reports the ones `SendCastMessageToSocket` sends. The
+   * handshake, device authentication, virtual connection requests and keep-alive are not reported, as in Chrome.
+   */
+  messageSent: [msg: { namespace: string; sourceId: string; destinationId: string; data: string | Buffer }];
   receiverStatus: [status: ReceiverStatus];
   transportClosed: [transportId: string];
   close: [error?: Error];
@@ -265,7 +271,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   /** Send a raw message; throws {@link CastConnectionError} when not connected. */
   send(namespace: string, destinationId: string, payload: string | Uint8Array | object): void {
     if (this.state !== "connected") throw new CastConnectionError("not connected");
-    this.write(buildMessage(this.senderId, namespace, destinationId, payload));
+    this.writeObserved(buildMessage(this.senderId, namespace, destinationId, payload));
   }
 
   /** Send a request and wait for the matching reply. */
@@ -292,7 +298,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         reject,
       };
       this.pending.set(requestId, entry);
-      this.write(buildMessage(this.senderId, namespace, destinationId, { ...payload, requestId }));
+      this.writeObserved(buildMessage(this.senderId, namespace, destinationId, { ...payload, requestId }));
     });
   }
 
@@ -336,7 +342,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         reject,
       };
       this.launchWaiters.push(waiter);
-      this.write(buildMessage(this.senderId, NS.RECEIVER, PLATFORM_RECEIVER_ID, payload));
+      this.writeObserved(buildMessage(this.senderId, NS.RECEIVER, PLATFORM_RECEIVER_ID, payload));
     });
   }
 
@@ -382,7 +388,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   closeTransport(transportId: string): void {
     if (this.state !== "connected") return;
     this.transports.delete(transportId);
-    this.sendJson(NS.CONNECTION, transportId, { type: "CLOSE" });
+    this.writeObserved(buildMessage(this.senderId, NS.CONNECTION, transportId, { type: "CLOSE" }));
   }
 
   private onData(chunk: Buffer): void {
@@ -664,6 +670,14 @@ export class CastClient extends EventEmitter<CastClientEvents> {
 
   private sendJson(namespace: string, destinationId: string, payload: Record<string, unknown>): void {
     this.write(buildMessage(this.senderId, namespace, destinationId, payload));
+  }
+
+  /** `CastMessageHandler::SendCastMessageToSocket`: the write, then the observers of the message sent. */
+  private writeObserved(msg: CastMessage): void {
+    this.write(msg);
+    if (this.listenerCount("messageSent") === 0) return;
+    const data = msg.payloadType === PayloadType.STRING ? (msg.payloadUtf8 ?? "") : (msg.payloadBinary ?? Buffer.alloc(0));
+    this.emit("messageSent", { namespace: msg.namespace, sourceId: msg.sourceId, destinationId: msg.destinationId, data });
   }
 
   private write(msg: CastMessage, done?: (err?: Error | null) => void): void {

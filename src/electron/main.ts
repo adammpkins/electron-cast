@@ -27,9 +27,10 @@ import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOpti
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
 import { IssueManager, RouterIssues, originNameForDisplay } from "./issues.ts";
 import { MediaRouterLogger } from "./logger.ts";
+import { CastMessageLog } from "./message-logging.ts";
 import {
   castAllowAllIpsFeature, castMirroringPlayoutDelayMs, developerCertificates, fixedCastDevices, mediaRouterFeatureEnabled,
-  showCastPermissionRejectedError, type CommandLineLike,
+  showCastPermissionRejectedError, castMessageLogging, type CommandLineLike,
 } from "./switches.ts";
 
 /**
@@ -318,6 +319,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // media_router::MediaRouterEnabled: the router "does not support dynamic enabling/disabling"; it is read once
   const routerEnabled = mediaRouterFeatureEnabled(commandLine);
   const logger = new MediaRouterLogger();
+  // IsCastMessageLoggingEnabled: off unless --enable-features=CastMessageLogging; read once, with the other features
+  const messageLog = castMessageLogging(commandLine) ? new CastMessageLog(logger) : undefined;
   const issues = new RouterIssues(new IssueManager(), { showPermissionRejectedError: showCastPermissionRejectedError(commandLine), logger });
   // GetCastAllowAllIPsPref: the policy (here `sinks.allowAllIps`) when set, else the CastAllowAllIPs feature
   const sinkOptions: CastSinkOptions = { ...options.sinks, allowAllIps: options.sinks?.allowAllIps ?? castAllowAllIpsFeature(commandLine) };
@@ -480,6 +483,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   const service = new CastSessionService({
     devices: discovery,
     createClient,
+    ...(messageLog !== undefined ? { messageLog } : {}),
     // a mirroring route's session, or one being launched on the sink, is a local activity
     ownsSession: (sessionId, sinkId) =>
       mirroring?.routes().some((r) => r.sinkId === sinkId && (r.sessionId === sessionId || r.sessionId === "")) ?? false,
@@ -618,6 +622,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       token: hashToken,
       ...(dial !== undefined ? { dial } : {}),
       dialRoutesChanged: notifyRoutes,
+      ...(messageLog !== undefined ? { messageLog } : {}),
       ...(siteMirroring !== undefined ? { mirroring: siteMirroring } : {}),
       // `MediaRouterDesktop::GetCurrentRoutes`: the routes a join can name, by presentation id
       currentRoutes: () => [

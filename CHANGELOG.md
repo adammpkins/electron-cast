@@ -15,6 +15,11 @@ Chrome more closely.
 
 ### Chrome parity
 
+- **`CastMessageLogging` is ported** (`kCastMessageLogging`, off by default). With `--enable-features=CastMessageLogging` the
+  media router log (`getLogs`, `registerLogObserver`) also holds the messages of Cast routes, as Chrome logs them: the
+  envelopes to and from the page and the messages to and from the receiver, at `Info` in the `Route` category, with the JSON
+  written as `base::WriteJson` writes it. `CastClient` has a new `messageSent` event for the messages its requests send.
+
 - **Cast presentation URLs are read as Chrome reads them** (`CastMediaSource::FromMediaSource`). New fields:
   `supportedAppTypes`, `appParams`, `invisibleSender`, `streamingTargetPlayoutDelayMillis` and `streamingCaptureAudio`.
   A legacy URL with several `__castAppId__` is no longer reduced to its last app: a sink is offered the URL when it has
