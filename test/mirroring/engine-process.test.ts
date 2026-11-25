@@ -95,7 +95,7 @@ test("the engine process streams frames from a port-driven agent to the receiver
       type: "start",
       params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1" },
       source: { kind: "tab", mediaSourceId: "tab-id" },
-      softwareCodecs: ["vp8"],
+      hardwareCodecs: [], softwareCodecs: ["vp8"], hardwareDenyList: [], encodingPolicy: { hardwareFeatures: [], softwareFeatures: ["vp8"], forceEnable: [], forceDisable: [] },
       env: {},
     },
     ports: [agent],
@@ -107,7 +107,7 @@ test("the engine process streams frames from a port-driven agent to the receiver
     assert.deepEqual(start.source, { kind: "tab", mediaSourceId: "tab-id" });
     assert.equal(start.video?.frameRate, 30);
     assert.equal(start.audio?.sampleRate, 48000);
-    assert.deepEqual(agent.received.find((m) => m.t === "set-codec"), { t: "set-codec", codec: "vp8", codecString: "" });
+    assert.deepEqual(agent.received.find((m) => m.t === "set-codec"), { t: "set-codec", codec: "vp8", codecString: "", hardware: false });
     const s = receiver.stats;
     console.log(`engine process: video ${s.videoFrames} frames (${s.videoKeyFrames} key), audio ${s.audioFrames} frames, invalid ${s.invalidFrames}`);
     assert.ok(s.validVideoFrames > 20, `video ${s.validVideoFrames}`);
@@ -145,7 +145,7 @@ test("the engine process relays a tab switch and freeze and unfreeze to the agen
       type: "start",
       params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1" },
       source: { kind: "tab", mediaSourceId: "old-tab" },
-      softwareCodecs: ["vp8"],
+      hardwareCodecs: [], softwareCodecs: ["vp8"], hardwareDenyList: [], encodingPolicy: { hardwareFeatures: [], softwareFeatures: ["vp8"], forceEnable: [], forceDisable: [] },
       env: {},
     },
     ports: [agent],
@@ -194,7 +194,7 @@ test("the engine process answers get-stats with the session's statistics", async
       type: "start",
       params: { type: "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-1", destinationId: "transport-1", enableRtcpReporting: true },
       source: { kind: "tab", mediaSourceId: "tab-id" },
-      softwareCodecs: ["vp8"],
+      hardwareCodecs: [], softwareCodecs: ["vp8"], hardwareDenyList: [], encodingPolicy: { hardwareFeatures: [], softwareFeatures: ["vp8"], forceEnable: [], forceDisable: [] },
       env: {},
     },
     ports: [agent],

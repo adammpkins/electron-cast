@@ -71,6 +71,8 @@ export interface MirroringManagerOptions {
    * frame in `routes_by_frame_` for every kind of route, so a page that becomes a mirroring source loses them.
    */
   terminateRoutesOfPage?(webContentsId: number): void;
+  /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
+  commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
 }
 
@@ -150,6 +152,7 @@ export class MirroringManager {
       webContentsId: source.type === "tab" ? options.webContentsId : undefined,
       client,
       createService: this.options.createService,
+      commandLine: this.options.commandLine,
       log,
       shouldFetchMirroringStats: () => this.fetchMirroringStats,
       onMirroringStats: (stats) => {

@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { MirroringStats } from "../stats/statistics.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
+import { encodingPolicyFromCommandLine, hardwareCodecsToProbe, softwareCodecsToProbe, type CommandLineLike } from "../encoding-support.ts";
+import { getCodecParameterString } from "../mirror-settings.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
 import type { CaptureSource } from "./agent-protocol.ts";
 import { AGENT_PRELOAD_SOURCE, AGENT_SOURCE } from "./agent-source.ts";
@@ -63,15 +65,17 @@ export interface ElectronMirroringApi {
   MessageChannelMain: new () => { port1: PortMainLike; port2: PortMainLike };
   desktopCapturer: { getSources(options: { types: string[] }): Promise<{ id: string; name: string }[]> };
   webContents: { fromId(id: number): WebContentsMirrorLike | undefined };
+  /**
+   * `app`: its `commandLine` is where Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>`,
+   * `--enable-features` / `--disable-features` (`CastStreamingVp8`, `Vp9`, `Av1`, `HardwareHevc`, `Win/MacHardwareH264`)
+   * and `--disable-cast-letterboxing` are read, including switches the app appended itself. Without it only
+   * Chrome's defaults apply.
+   */
+  app?: { commandLine: CommandLineLike };
 }
 
 export interface ElectronMirroringOptions {
   electron: ElectronMirroringApi;
-  /**
-   * Video codecs the sender may offer when WebCodecs can encode them, in addition to VP8 (always). Chrome's software
-   * list is VP8 and VP9 (`encoding_support.cc`); default none, so a stream is VP8 unless you opt in.
-   */
-  extraVideoCodecs?: ("vp9")[];
   /** Absolute path of the engine entry (`engine-process.js` next to this file in the built package). */
   engineModulePath?: string;
   /** Environment for the session host (`CHROME_MIRRORING_PLAYOUT_DELAY`); default none. */
@@ -91,14 +95,23 @@ function defaultEngineModulePath(): string {
 const PORT_CHANNEL = "electron-cast-mirroring:port";
 const PAGE = "<!doctype html><meta charset=\"utf-8\"><title>electron-cast capture</title>";
 
-/** Codec strings probed in the agent window (`GetCodecParameterString` for 720p at 30 fps). */
-const PROBE: Record<string, string> = { vp8: "vp8", vp9: "vp09.00.40.08" };
+/** Where the encoder is asked about software codecs (`GetCodecParameterString` for 720p at 30 fps). */
+const SOFTWARE_PROBE_SIZE = { width: 1280, height: 720 };
+
+/** The `codec_parameter` the offer carries, which is also what the encoder is asked about. */
+function probeString(codec: VideoCodec, width: number, height: number, macBaseline: boolean): string {
+  const s = getCodecParameterString(codec, width, height, 30, macBaseline ? "baseline" : "main");
+  return s === "" ? codec : s;
+}
 
 /** `platform` is for tests only: Chrome's choice of desktop loopback device depends on it and is not an app setting. */
 export function createElectronMirroringServiceFactory(options: ElectronMirroringOptions, platform: string = process.platform): { factory: MirroringServiceFactory; dispose(): void } {
   const e = options.electron;
   const log = options.log ?? (() => {});
   const live = new Set<() => void>();
+  // `GetHardwareCodecDenyList()` is process-wide in Chrome: a hardware encoder that failed in one session is not
+  // offered in the next either, for as long as the app runs.
+  const hardwareDenyList = new Set<VideoCodec>();
 
   const factory: MirroringServiceFactory = (params, observer, channel, source): MirroringService => {
     const dir = mkdtempSync(join(tmpdir(), "electron-cast-agent-"));
@@ -220,15 +233,33 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           capture = mintTabSource();
           minted = true;
         }
-        // Feature-detect what WebCodecs can encode here; VP8 first, anything else only when asked for.
-        const supported = (await wc.executeJavaScript(
-          `(async () => { const out = []; for (const [name, codec] of Object.entries(${JSON.stringify(PROBE)})) {` +
-            ` try { const r = await VideoEncoder.isConfigSupported({ codec, width: 1280, height: 720, bitrate: 2000000, framerate: 30, latencyMode: "realtime" });` +
-            ` if (r.supported) out.push(name); } catch {} } return out; })()`,
-        )) as string[];
-        if (!supported.includes("vp8")) throw new Error("this Electron's WebCodecs cannot encode VP8");
-        const softwareCodecs: VideoCodec[] = ["vp8"];
-        for (const extra of options.extraVideoCodecs ?? []) if (supported.includes(extra)) softwareCodecs.push(extra);
+        // Feature-detect what WebCodecs can encode here. Chrome asks the GPU process for the hardware encoder profiles
+        // (`encoding_support::IsHardwareEnabled`); `prefer-hardware` is the same question: Chromium's VideoEncoder then
+        // accepts the configuration only if a hardware encoder takes it (blink video_encoder.cc: `GetRequiredEncoderType`
+        // is `kHardware`, and `CreateMediaVideoEncoder` returns the accelerated encoder's status without a software
+        // fallback). Hardware is asked about at the session's maximum resolution, as Chrome does; software, VP8 first and
+        // anything else only when asked for, as before.
+        const macBaseline = platform === "darwin";
+        const probes: { codec: VideoCodec; hardware: boolean; string: string; width: number; height: number }[] = [];
+        // Read at every session, as Chrome reads its command line and features whenever it negotiates.
+        const policy = encodingPolicyFromCommandLine(e.app?.commandLine, platform);
+        for (const codec of hardwareCodecsToProbe(policy)) {
+          probes.push({ codec, hardware: true, string: probeString(codec, 1920, 1080, macBaseline), width: 1920, height: 1080 });
+        }
+        for (const codec of softwareCodecsToProbe(policy)) {
+          probes.push({ codec, hardware: false, string: probeString(codec, SOFTWARE_PROBE_SIZE.width, SOFTWARE_PROBE_SIZE.height, macBaseline), ...SOFTWARE_PROBE_SIZE });
+        }
+        const found = (await wc.executeJavaScript(
+          `(async () => { const out = []; for (const p of ${JSON.stringify(probes)}) {` +
+            ` try { const config = { codec: p.string, width: p.width, height: p.height, bitrate: 2000000, framerate: 30, latencyMode: "realtime", hardwareAcceleration: p.hardware ? "prefer-hardware" : "prefer-software" };` +
+            ` if (p.codec === "h264") config.avc = { format: "annexb" }; if (p.codec === "hevc") config.hevc = { format: "annexb" };` +
+            ` const r = await VideoEncoder.isConfigSupported(config);` +
+            ` if (r.supported) out.push({ codec: p.codec, hardware: p.hardware }); } catch {} } return out; })()`,
+        )) as { codec: VideoCodec; hardware: boolean }[];
+        const hardwareCodecs = found.filter((f) => f.hardware).map((f) => f.codec);
+        const softwareCodecs = found.filter((f) => !f.hardware).map((f) => f.codec);
+        if (!softwareCodecs.includes("vp8")) throw new Error("this Electron's WebCodecs cannot encode VP8");
+        log("info", `encoders: hardware [${hardwareCodecs.join(", ")}], software [${softwareCodecs.join(", ")}]${hardwareDenyList.size > 0 ? `, deny-listed hardware [${[...hardwareDenyList].join(", ")}]` : ""}`);
         await wc.executeJavaScript(AGENT_SOURCE);
 
         const channelMain = new e.MessageChannelMain();
@@ -249,6 +280,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
             case "error": observer.onError?.(m.error as never, m.message); teardown(); break;
             case "log": observer.logInfo?.(m.message); break;
             case "stats": pendingStats.get(m.id)?.(m.stats); pendingStats.delete(m.id); break;
+            case "deny-hardware-codec": hardwareDenyList.add(m.codec); break;
           }
         });
         proc.on("exit", (code) => {
@@ -257,7 +289,17 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
             teardown();
           }
         });
-        proc.postMessage({ type: "start", params, source: capture, softwareCodecs, env: options.env }, [channelMain.port2]);
+        proc.postMessage(
+          {
+            type: "start", params, source: capture, hardwareCodecs, softwareCodecs, hardwareDenyList: [...hardwareDenyList],
+            encodingPolicy: {
+              hardwareFeatures: [...policy.hardwareFeatures], softwareFeatures: [...policy.softwareFeatures],
+              forceEnable: [...policy.forceEnable], forceDisable: [...policy.forceDisable],
+            },
+            env: options.env,
+          },
+          [channelMain.port2],
+        );
         ready = true;
         for (const m of queue.splice(0)) proc.postMessage(m);
       } catch (err) {

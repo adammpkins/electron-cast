@@ -114,7 +114,7 @@ is frozen and behaves as before for pages; it shares the device list.
   `registerMediaSinksObserver`. `startCasting` is one method for the three modes (`StartCastingOptions`, a union on
   `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
   (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
-  routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  routing): OFFER/ANSWER, VP8, VP9, H.264 in hardware and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
   The video encoder is set up as Chrome's `MediaVideoEncoderWrapper` sets it up (a constant bitrate, the screen content
   hint), and frame drops are logged by reason.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
@@ -123,8 +123,7 @@ is frozen and behaves as before for pages; it shares the device list.
   and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
   software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
   audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
-  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)), re-offering
-  when the encoder changes, hardware codecs. Like Chrome, a mirroring session sends `GET_CAPABILITIES`
+  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)). Like Chrome, a mirroring session sends `GET_CAPABILITIES`
   once after the first negotiation and keeps the receiver's remoting capabilities.
 - **Switch the mirrored tab, freeze the picture.** `switchMirroringSourceTab(routeId, webContentsId)` moves a
   `tab_mirror` route to another page without ending or renegotiating the session (Chrome's "share this tab instead":
@@ -144,6 +143,20 @@ is frozen and behaves as before for pages; it shares the device list.
   clock offset estimator and analyzer, with the receiver's RTCP event log parsed. Off by default; nothing is uploaded
   (Chrome's UMA is not ported). `examples/live-mirroring` takes `--stats`. Tested against the fake
   receiver; not yet read from a real device.
+- **Mirroring uses a hardware encoder when there is one, as Chrome does.** The capture page asks WebCodecs
+  (`prefer-hardware`) which of H.264, VP8 and VP9 a hardware encoder takes, and offers those hardware-first (H.264 as
+  Annex B); VP8 in software is offered only when no hardware codec is, or when the receiver takes none of the hardware
+  ones. A hardware encoder that fails mid-session no longer stops mirroring: the codec is dropped for the rest of the
+  app's run and the session negotiates again. Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>` and
+  `--disable-cast-letterboxing` switches, and the `CastStreamingVp8` / `Vp9` / `Av1` / `HardwareHevc` / `Win|MacHardwareH264`
+  features of `--enable-features` / `--disable-features`, are honoured, read from `app.commandLine` (so switches the app
+  appends count) when the `electron` object passed as `mirroring.electron` includes `app`.
+- **VP9 is offered by default, as in Chrome.** In hardware when an encoder takes it, in software under the same
+  hardware-first rule as VP8; there is no option for it.
+- **Mirroring letterboxes like Chrome.** The capture now asks for the `fixed_aspect_ratio` policy when the receiver
+  cannot scale (always for a Nest Hub): frames keep a 16:9 shape whatever the page or screen looks like, and a tab is
+  no longer upscaled to 1920x1080. The hardware encoders, the new offer after an encoder failure and the
+  letterboxing are tested against the fake receiver and in the smoke test; not yet on a real device.
 - **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
   `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,

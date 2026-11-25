@@ -508,8 +508,14 @@ finite is the string `"null"`. As in Chrome the structure is for logs, not a con
 id because several routes can run (Chrome's debugger keeps one global copy).
 
 `mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
-`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`, `webContents`), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
-`engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
+`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`, `webContents`, and `app` so that Chrome's
+switches are seen), `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio is always offered. Video is
+chosen as Chrome chooses it: H.264, VP8 and VP9 in hardware when the machine has an encoder for them
+(`VideoEncoder.isConfigSupported` with `prefer-hardware`), VP8 and VP9 in software when it has none; Chrome's own
+switches on `app.commandLine` change that (`--cast-streaming-force-{enable,disable}-hardware-<codec>`,
+`--enable-features` / `--disable-features` with `CastStreamingVp8`, `CastStreamingVp9`, `CastStreamingAv1`,
+`CastStreamingHardwareHevc`, and `--disable-cast-letterboxing`), including ones the app appends itself. A hardware
+encoder that fails during a session is dropped for the rest of the app's run and the session offers again without it.
 Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per
 route. See [DESIGN.md](DESIGN.md#mirroring-srcmirroring) for the layout and [examples/live-mirroring](../examples/live-mirroring/)
 to try it on a real device.

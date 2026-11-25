@@ -63,7 +63,8 @@ export interface AudioEncoderPort {
 export interface VideoEncoderCallbacks {
   /** `referenceTimeMs` is the one the raw frame was inserted with; `frame` is undefined when the encode failed. */
   onEncoded(referenceTimeMs: number, frame: SenderEncodedFrame | undefined): void;
-  onStatus(status: OperationalStatus): void;
+  /** `message` is the encoder's own description of a failure, for the log. */
+  onStatus(status: OperationalStatus, message?: string): void;
 }
 
 export interface AudioEncoderCallbacks {

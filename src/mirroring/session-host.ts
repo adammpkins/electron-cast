@@ -5,13 +5,18 @@
  * (`SetConstraints`), adapts the target bitrate every 500 ms (`UpdateBandwidthEstimate`, the gradual-backoff variant
  * that is enabled by default), asks for refresh frames on a static screen, and maps failures to session errors.
  *
- * Not ported: remoting (`NegotiateRemoting`, `MediaRemoter`, `RemotingStreamData`), GPU factories and the hardware
- * encoder denylist and renegotiation (WebCodecs does not expose the choice), UMA metrics.
+ * A hardware encoder that fails is deny-listed and the session negotiates again (`OnVideoEncoderStatus`,
+ * `MaybeDenylistHardwareCodecAndRenegotiate`); a hardware-first offer the receiver takes nothing from is repeated with
+ * the software codecs (`OnError`, `offering_fallback_codecs_`).
+ *
+ * Not ported: remoting (`NegotiateRemoting`, `MediaRemoter`, `RemotingStreamData`), GPU factories (the hardware
+ * encoder lives in the capture page's WebCodecs), UMA metrics.
  */
 import { SUPPORTED_VIDEO_CODECS, type EncodingSupport } from "./encoding-support.ts";
 import { type MirroringBackend, type CapturedVideoFrame, type OperationalStatus, operationalStatusErrorMessage } from "./backend.ts";
 import { MirrorSettings, getCodecParameterString, LEGACY_MAX_VIDEO_BITRATE, type FrameSenderConfig } from "./mirror-settings.ts";
 import { ErrorCode, type SessionError } from "./protocol/errors.ts";
+import type { VideoCodec } from "./protocol/constants.ts";
 import type { MessagePort } from "./protocol/messenger.ts";
 import type { AudioCaptureConfig, VideoCaptureConfig } from "./protocol/offer.ts";
 import type { Recommendations } from "./protocol/recommendations.ts";
@@ -87,6 +92,8 @@ export interface SessionHostDeps {
   encodingSupport: EncodingSupport;
   observer: SessionObserver;
   env?: Record<string, string | undefined>;
+  /** Decides the H.264 profile of the offer (`ToProfile`: Baseline on macOS); default `process.platform`. */
+  platform?: string;
 }
 
 type State = "initializing" | "mirroring" | "stopped";
@@ -122,6 +129,8 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   private videoCaptureStarted = false;
   private initiallyStarted = false;
   private capabilities: RemotingCapabilities | undefined;
+  /** `offering_fallback_codecs_`: the hardware-first offer got no stream, so software codecs go in the next one. */
+  private offeringFallbackCodecs = false;
 
   constructor(params: SessionParameters, deps: SessionHostDeps) {
     this.params = params;
@@ -209,24 +218,26 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     }
     if (this.params.type !== "audio_only") {
       const resolution = this.settings.maxResolution;
+      const h264Profile = (this.deps.platform ?? process.platform) === "darwin" ? "baseline" : "main";
       let offeredHardwareCodec = false;
       // Hardware encoders first.
       for (const codec of SUPPORTED_VIDEO_CODECS) {
         const config = this.settings.getVideoConfig(codec);
         if (encodingSupport.isHardwareEnabled(codec)) {
           config.useHardwareEncoder = true;
-          config.codecParameter = getCodecParameterString(codec, resolution.width, resolution.height, config.maxFrameRate);
+          config.codecParameter = getCodecParameterString(codec, resolution.width, resolution.height, config.maxFrameRate, h264Profile);
           this.lastOfferedVideoConfigs.push(config);
           videoConfigs.push(toVideoCaptureConfig(config));
           offeredHardwareCodec = true;
         }
       }
-      // kCastStreamingOfferHardwareFirst is enabled by default: software only when no hardware codec was offered.
-      if (!offeredHardwareCodec) {
+      // kCastStreamingOfferHardwareFirst is enabled by default: software only when no hardware codec was offered, or
+      // when the receiver took none of the hardware ones (`offering_fallback_codecs_`).
+      if (this.offeringFallbackCodecs || !offeredHardwareCodec) {
         for (const codec of SUPPORTED_VIDEO_CODECS) {
           const config = this.settings.getVideoConfig(codec);
           if (!encodingSupport.isHardwareEnabled(codec) && encodingSupport.isSoftwareEnabled(codec)) {
-            config.codecParameter = getCodecParameterString(codec, resolution.width, resolution.height, config.maxFrameRate);
+            config.codecParameter = getCodecParameterString(codec, resolution.width, resolution.height, config.maxFrameRate, h264Profile);
             this.lastOfferedVideoConfigs.push(config);
             videoConfigs.push(toVideoCaptureConfig(config));
           }
@@ -245,6 +256,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
 
   /** `OnNegotiated`. */
   onNegotiated(_session: SenderSession, senders: ConfiguredSenders, recommendations: Recommendations): void {
+    this.offeringFallbackCodecs = false;
     if (this.state === "stopped") {
       senders.audioSender?.destroy();
       senders.videoSender?.destroy();
@@ -316,7 +328,8 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     let videoSender: VideoSender | undefined;
     const encoder = this.deps.backend.createVideoEncoder(config, {
       onEncoded: (referenceTimeMs, frame) => { if (this.videoSender === videoSender) videoSender?.onEncodedVideoFrame(referenceTimeMs, frame); },
-      onStatus: (status) => this.onVideoEncoderStatus(status),
+      // Chrome binds the status callback to the encoder it belongs to, and a destroyed encoder reports nothing.
+      onStatus: (status, message) => { if (this.videoSender === videoSender) this.onVideoEncoderStatus(config, status, message); },
     });
     this.videoEncoder = encoder;
     const frameSender = new FrameSender(
@@ -370,6 +383,13 @@ export class OpenscreenSessionHost implements SenderSessionClient {
         this.reportAndLogError("ANSWER_NOT_OK", error.message);
         return;
       case ErrorCode.NoStreamSelected:
+        // The receiver took none of the hardware-first offer: offer the software codecs too, once.
+        if (!this.offeringFallbackCodecs && this.state === "mirroring") {
+          this.deps.observer.logInfo?.("No stream selected for ideal, hardware-accelerated codecs. Attempting fallback to software codecs.");
+          this.offeringFallbackCodecs = true;
+          this.negotiateMirroring();
+          return;
+        }
         this.reportAndLogError("ANSWER_NO_AUDIO_OR_VIDEO", error.message);
         return;
       case ErrorCode.RemotingNotSupported:
@@ -476,8 +496,8 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     if (message !== undefined) this.reportAndLogError("ENCODING_ERROR", message);
   }
 
-  /** `OnVideoEncoderStatus`. Without a hardware encoder to fall back from, a failure is an encoding error. */
-  private onVideoEncoderStatus(status: OperationalStatus): void {
+  /** `OnVideoEncoderStatus`. */
+  private onVideoEncoderStatus(config: FrameSenderConfig, status: OperationalStatus, message?: string): void {
     switch (status) {
       case "uninitialized":
         break;
@@ -488,6 +508,15 @@ export class OpenscreenSessionHost implements SenderSessionClient {
         if (this.state !== "stopped") this.tryResumeCapturingVideo();
         break;
       default:
+        if (message !== undefined) this.deps.observer.logInfo?.(`video encoder ${status}: ${message}`);
+        // A failed hardware encoder is not the end: try 30 fps in place, then stop offering the codec in hardware and
+        // negotiate again (software, or another hardware codec, is offered then).
+        if (config.useHardwareEncoder) {
+          if (this.state !== "mirroring") return;
+          if (this.maybeFallbackHardwareFrameRate(config, status)) return;
+          this.maybeDenyListHardwareCodecAndRenegotiate(config.videoCodec!);
+          return;
+        }
         this.reportAndLogError("ENCODING_ERROR", operationalStatusErrorMessage(status) ?? "Encoder failed.");
     }
   }
@@ -503,6 +532,36 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     this.deps.observer.logInfo?.("Switching the mirroring source tab");
     if (this.videoCaptureStarted && this.videoSender !== undefined) this.deps.backend.switchVideoCaptureHost();
     if (this.audioEncoder !== undefined) this.deps.backend.restartAudioCapture();
+  }
+
+  /**
+   * `MaybeFallbackHardwareFrameRate`: hardware encoding at 30 fps is preferred over software at 60, so a hardware
+   * encoder that fails above 30 fps is lowered to 30 in place and the capture is restarted at that rate. Capture is
+   * limited to 30 fps here (`kCastStreaming60fps` is off and not exposed), so this is never taken today.
+   */
+  private maybeFallbackHardwareFrameRate(config: FrameSenderConfig, status: OperationalStatus): boolean {
+    const defaultMaxFrameRate = 30;
+    if (this.videoSender === undefined || this.videoFrameSender === undefined || this.videoFrameSender.maxRate <= defaultMaxFrameRate) return false;
+    this.deps.observer.logInfo?.(
+      `Hardware ${config.videoCodec} encoder failed at ${this.videoFrameSender.maxRate.toFixed(0)} FPS (${operationalStatusErrorMessage(status)}). Lowering to ${defaultMaxFrameRate} FPS hardware encoding in-place.`,
+    );
+    this.videoSender.setMaxFrameRate(defaultMaxFrameRate);
+    if (this.videoCaptureStarted) {
+      // `VideoCaptureClient::RestartWithParams`.
+      this.deps.backend.pauseVideoCapture();
+      this.startCapturingVideo();
+    }
+    return true;
+  }
+
+  /** `MaybeDenylistHardwareCodecAndRenegotiate`: once per codec. */
+  private maybeDenyListHardwareCodecAndRenegotiate(codec: VideoCodec): void {
+    const { encodingSupport } = this.deps;
+    if (encodingSupport.isHardwareDenyListed(codec)) return;
+    encodingSupport.denyListHardwareCodec(codec);
+    this.deps.observer.logInfo?.(`Hardware ${codec} encoding is disabled for this app run; negotiating again.`);
+    this.stopStreaming();
+    if (this.state === "mirroring") this.negotiateMirroring();
   }
 
   /** `SetTargetPlayoutDelay`. */
@@ -621,6 +680,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   stopSession(): void {
     if (this.state === "stopped") return;
     this.state = "stopped";
+    this.offeringFallbackCodecs = false;
     this.stopStreaming();
     this.cancelBandwidthTimer?.();
     this.cancelBandwidthTimer = undefined;

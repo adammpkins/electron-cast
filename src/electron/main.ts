@@ -906,6 +906,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       terminateRoutesOfPage: (wcId) => {
         for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
       },
+      commandLine: "electron" in m ? m.electron.app?.commandLine : undefined,
       log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
     });
   }

@@ -211,8 +211,7 @@ const tabs = [
           <div>
             <h3>Coming</h3>
             <ul>
-              <li>Mirroring: switching the mirrored tab, freezing the picture and the statistics, tried on a real device</li>
-              <li>Mirroring: a new offer after an encoder failure, hardware encoders</li>
+              <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>DIAL tested on real TVs</li>
             </ul>

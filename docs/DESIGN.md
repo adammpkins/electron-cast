@@ -748,15 +748,17 @@ sender policy, plus the session host, plus the routing.
 | `sender/packet-router.ts` | openscreen `impl/sender_packet_router.cc` |
 | `sender/bandwidth-estimator.ts` | openscreen `impl/bandwidth_estimator.cc` |
 | `sender/frame-sender.ts` | Chromium `media/cast/sender/openscreen_frame_sender.cc`, `video_sender.cc`, `audio_sender.cc`, `media/cast/constants.h` |
-| `session-host.ts` | Chromium `components/mirroring/service/openscreen_session_host.cc`, `mirror_settings.cc`, `mirroring_features.cc`, `media/cast/openscreen/config_conversions.cc`, `media/cast/encoding/encoding_support.cc` |
+| `session-host.ts` | Chromium `components/mirroring/service/openscreen_session_host.cc` (`NegotiateMirroring`, `OnError` fallback offer, `OnVideoEncoderStatus`, `MaybeFallbackHardwareFrameRate`, `MaybeDenylistHardwareCodecAndRenegotiate`), `mirror_settings.cc`, `mirroring_features.cc`, `media/cast/openscreen/config_conversions.cc` |
+| `encoding-support.ts` | Chromium `media/cast/encoding/encoding_support.cc` (`IsHardwareEnabled`, `IsSoftwareEnabled`, the hardware deny list, `GetCodecParameterString`, `ToProfile`) and the `kCastStreamingForce{Enable,Disable}Hardware*` switches of `media/base/media_switches.cc` |
 | `mirroring-activity.ts` | Chromium `mirroring_activity.cc` (`OnAppMessage`, `OnInternalMessage`, `HandleParseJsonResult`, `StartSession`, `StopMirroring`, `ScheduleFetchMirroringStats`, `FetchMirroringStats`) and `cast_activity_manager.cc` (`DoLaunchSession`, `OnActivityStopped`) |
 | `mirroring-manager.ts` | Chromium `cast_activity_manager.cc` (`LaunchSession`, `TerminateSession`, `NotifyAllOnRoutesUpdated`), `media_route.cc` (`GetMediaRouteId`), `media_router_debugger.h` (the mirroring stats methods) |
 | `routing.ts` | Chromium `cast_media_source.cc` (`CastMediaSourceForTabMirroring`, `ForDesktopMirroring`, `ProvidesStreamingAudioCapture`, the streaming `CastAppInfo`s), `components/media_router/common/media_source.cc`, `cast_activity_manager.cc` (`ChooseAppId`), `mirroring_activity.cc` (`StartSession`, `GetRouteDescription`, `GetMirroringNamespace`, `GetScrubbedLogMessage`), `chrome/app/media_router_strings.grdp` |
 | `stats/*.ts` | openscreen `impl/statistics_{collector,dispatcher,analyzer,common}.cc`, `impl/clock_offset_estimator_impl.cc`, `public/statistics.cc`; Chromium `openscreen_stats_client.cc`, `openscreen_session_host.cc` (`GetMirroringStats`), `stats_event_subscriber.cc` (`CastStatToString`) |
 | `engine.ts` | assembles `OpenscreenSessionHost` around a backend, as the Mirroring Service does with its resource provider |
 | `transport/udp-environment.ts` | openscreen `cast/streaming/public/environment.cc` (`SendPacket`, `GetMaxPacketSize`, `OnRead`) and `SenderPacketRouter::OnReceivedPacket` (packets only from the announced endpoint) |
-| `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc`, `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate, utilization), `openscreen_session_host.cc` (`OnEncoderStatusChange`) |
-| `electron/host.ts` | Chromium `chrome/browser/media/cast_mirroring_service_host.cc` (the tab and desktop capture sources) |
+| `electron/agent-source.ts`, `electron/port-backend.ts`, `electron/agent-protocol.ts` | Chromium `components/mirroring/service/video_capture_client.cc`, `audio_capturing_callback.cc`, `media/cast/encoding/{video_encoder,audio_encoder}.cc` (frame ids, key frames, bitrate, utilization), `openscreen_session_host.cc` (`OnVideoEncoderStatus`), `media/capture/video_capture_types.cc` (`SuggestConstraints`), `content/browser/media/capture/frame_sink_video_capture_device.cc` (`SetResolutionConstraints`), blink `media_stream_constraints_util_video_content.cc` (`SelectResolutionPolicyFromCandidates`), blink `video_encoder.cc` (`GetRequiredEncoderType`, `isConfigSupported`) |
+| `electron/host.ts` | Chromium `chrome/browser/media/cast_mirroring_service_host.cc` (the tab and desktop capture sources) and the hardware encoder query of `openscreen_session_host.cc` (`supported_profiles_`), answered by WebCodecs |
+| `mirroring-activity.ts` `shouldForceLetterboxing` | Chromium `mirroring_activity.cc` (`ShouldForceLetterboxing`) |
 
 ### Process split
 
@@ -892,12 +894,59 @@ the client.
 
 ### Codecs
 
-Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) and VP8 are always offered. VP9 is offered
-only when the app asks for it (`extraVideoCodecs: ["vp9"]`) and `VideoEncoder.isConfigSupported` says Electron can
-encode it, which is Chrome's software list (`encoding_support.cc`: VP8 and VP9). H.264, HEVC and AV1 are not offered:
-Chrome offers H.264 only through hardware encoders and its HEVC and AV1 features are off by default, and WebCodecs
-cannot tell us whether an encoder is hardware. The order of offered codecs is `kSupportedVideoCodecs` (HEVC, AV1, VP9,
-H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bundled.
+Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) is always offered. Video follows
+`NegotiateMirroring` and `encoding_support.cc`:
+
+- **Hardware first.** A codec is offered in hardware when the encoder exists, its feature or switch allows it
+  (`IsHardwareEnabled`: H.264, VP8 and VP9 by default; HEVC and AV1 only with
+  `--cast-streaming-force-enable-hardware-hevc` / `-av1`; `--cast-streaming-force-disable-hardware-<codec>` wins) and
+  it is not on the hardware deny list. Software codecs (VP8 and VP9, `IsSoftwareEnabled`; AV1 only with
+  `--enable-features=CastStreamingAv1`) are offered only when no hardware codec was (`kCastStreamingOfferHardwareFirst`, on by default), or in the one fallback
+  offer after the receiver selected no stream (`OnError`, `offering_fallback_codecs_`). The order is
+  `kSupportedVideoCodecs` (HEVC, AV1, VP9, H.264, VP8). Chrome has no software H.264 encoder in the list, and no
+  model-based codec deny list turned up in `openscreen_session_host.cc`, `mirroring_activity.cc` or openscreen's
+  `sender_session.cc`: the one receiver-model rule there is `ShouldForceLetterboxing` (below).
+- **How "hardware" is established.** Chrome asks the GPU process for the `VideoEncodeAccelerator` profiles. Here the
+  capture page asks WebCodecs: `VideoEncoder.isConfigSupported` with `hardwareAcceleration: "prefer-hardware"`, at the
+  session's maximum resolution (1920x1080, 30 fps) and the codec string Chrome would offer (`GetCodecParameterString`).
+  In Chromium's blink `video_encoder.cc` `prefer-hardware` makes `GetRequiredEncoderType` return `kHardware`, and
+  `CreateMediaVideoEncoder` returns the accelerated encoder's status without the software fallback that
+  `no-preference` and `prefer-software` get (it also excludes the OS software encoders, such as Media Foundation's
+  software H.264). So a supported answer means a hardware encoder takes that configuration, and the same setting at
+  `configure` time makes the encoder refuse to run in software. A hardware offer is encoded with
+  `prefer-hardware`, a software offer with `prefer-software`; H.264 is configured as Annex B (`avc: { format: "annexb" }`),
+  which is what Cast Streaming carries, with the parameter sets in the key frames.
+- **Profiles.** Chrome's `GetHardwareCodecParameters` accepts any profile in a codec's range; WebCodecs is asked about
+  the one profile that is offered (H.264 Main level 4.0, `avc1.4d0028`; Baseline, `avc1.420028`, on macOS as
+  `ToProfile` does with `kCastMacForceBaselineProfile`). An encoder that only does another profile is not found.
+- **Failure.** A hardware encoder that reports an error (`codec_runtime_error`, `codec_init_failed`,
+  `unsupported_codec`) is not a session error. As in `OnVideoEncoderStatus`, the frame rate is lowered to 30 in place if
+  it was higher (`MaybeFallbackHardwareFrameRate`; capture is limited to 30 fps here, so this is never taken), else the
+  codec goes on the hardware deny list and the session streams down and negotiates again
+  (`MaybeDenylistHardwareCodecAndRenegotiate`): the next OFFER holds the other hardware codecs or, if none, the
+  software ones. A deny-listed codec is listed once. A software encoder that fails is an `ENCODING_ERROR` and stops the
+  session. Chrome's list is process-wide (`GetHardwareCodecDenyList()` is a static): the main process holds it for as
+  long as the mirroring factory lives and gives it to each engine, which reports additions back. A status from an
+  encoder that has been replaced is ignored, as a destroyed `VideoEncoder` reports nothing.
+
+HEVC and AV1 are off by default in Chrome and so here. No encoder is bundled.
+
+### Letterboxing
+
+`MirrorSettings::GetVideoCaptureParams` gives the capture a `resolution_change_policy`: `fixed_aspect_ratio` when
+sender-side letterboxing is on (a receiver whose ANSWER does not say `scaling: "receiver"`, or any `Nest Hub` model
+unless `--disable-cast-letterboxing`: `ShouldForceLetterboxing`), `any_within_limit` otherwise, `fixed_resolution` at the
+minimum size. Chrome gives those to the capture device, which turns them into `SetResolutionConstraints(min, max,
+fixed_aspect_ratio)` (`VideoCaptureParams::SuggestConstraints`: the minimum is the maximum for `fixed_resolution`, 180
+lines of the same aspect ratio for `fixed_aspect_ratio`, 2x2 for `any_within_limit`) and the capture then keeps the
+aspect ratio of the maximum, 16:9, scaling and padding the source into it. Here the agent reaches the same capture
+device through `getUserMedia`, whose legacy constraints Blink turns back into a policy
+(`SelectResolutionPolicyFromCandidates`), so the agent sends the sizes `SuggestConstraints` would give and a unit test
+runs Blink's rule over them. Before this the agent sent only a maximum, so Blink's default applied (`fixed_resolution` for
+a tab, which made every tab 1920x1080 whatever its size, as measured, and `any_within_limit` for the desktop). The smoke test checks that a 4:3 page and the screen come out 16:9 (a 640x480 page: 1706x960).
+
+`getDisplayMedia`, used for desktop audio off Windows, gets the same limits in its standard syntax (not run here: no
+machine in the tests is off Windows). `fixed_resolution` is only chosen when the receiver recommends the minimum size.
 
 ### Media remoting: capabilities only, the renderer side is not reachable
 
@@ -1016,9 +1065,23 @@ pins; the files are identical on main) unless noted:
   with the live harness in `examples/live-mirroring/`) tab mirroring ran at 1080p30 with Opus and VP8 in software, the
   picture smooth and the audio in sync and only on the TV; desktop mirroring sent picture and system audio, with local
   audio kept on Windows as Chrome keeps it there. Linux and macOS have not been tried.
-- Not ported: Remoting (RPC playback; see "Media remoting" below), UMA (see Mirroring statistics), the
-  GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
-  letterboxing.
+- Not ported: Remoting (RPC playback; see "Media remoting" below), UMA (see Mirroring statistics).
+- Hardware encoding differs from Chrome in how it is found out and run: the GPU factories (`MirroringGpuFactoriesFactory`,
+  `OnGpuFactoryContextLost`) have no counterpart because the encoder is WebCodecs in the capture page; a lost GPU
+  surfaces as an encoder error, which takes the same deny-list path. Which profile a hardware encoder supports is a
+  yes or no for the offered profile, not Chrome's range check. The `VideoEncodeAccelerator` frame rate is not
+  consulted (Chrome stopped doing that too: crbug.com/586527429).
+- A receiver that answers a hardware-first offer with audio only (it took no video codec) gets no fallback offer: the
+  fallback is sent on `NoStreamSelected`, which needs the ANSWER to select nothing at all. This is Chrome's behaviour.
+- Chrome sends the fallback offer after any `NoStreamSelected`, with or without a hardware codec in the first offer.
+- `kCastStreamingForceEnableHardware*`, `kCastStreamingForceDisableHardware*`, `--disable-cast-letterboxing` and the
+  `CastStreaming*` features (`--enable-features` / `--disable-features`: Vp8, Vp9, Av1, HardwareHevc, Win/MacHardwareH264)
+  are read from Electron's `app.commandLine` (`hasSwitch`, `getSwitchValue`), as Chrome reads `base::CommandLine`, so
+  switches the app appended with `app.commandLine.appendSwitch` count too. The app's `electron` object carries `app`
+  already; there is no option for it. Only these features are read, not the whole `base::FeatureList` (field trials,
+  `::` params); a feature named in both lists is disabled, as there.
+- `PortBackend` restarts nothing when the 30 fps fallback asks for a capture restart (`RestartWithParams`); it is
+  never asked to, as above.
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the
   session's, which reads as swapped for a message from the receiver; `MirroringActivity` here takes the transport as
   the source and the sender's id (or `*`) as the destination.

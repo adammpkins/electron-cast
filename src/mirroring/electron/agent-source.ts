@@ -36,7 +36,7 @@ export const AGENT_SOURCE = String.raw`
   let audioTimestamp = 0;
   let videoEncoder = null;
   let audioEncoder = null;
-  let videoCodec = { codec: "vp8", string: "vp8" };
+  let videoCodec = { codec: "vp8", string: "vp8", hardware: false };
   let videoBitrate = 2000000;
   let audioBitrate = 128000;
   let keyNext = true;
@@ -80,7 +80,17 @@ export const AGENT_SOURCE = String.raw`
   async function onCommand(m) {
     switch (m.t) {
       case "start": return start(m);
-      case "set-codec": videoCodec = { codec: m.codec, string: m.codecString || m.codec }; return;
+      case "set-codec":
+        // A new offer made a new encoder: the old one (another codec, or the same one that failed) is dropped and the
+        // next frame configures the one the offer chose.
+        videoCodec = { codec: m.codec, string: m.codecString || m.codec, hardware: m.hardware === true };
+        if (videoEncoder) {
+          if (videoEncoder.state !== "closed") { try { videoEncoder.close(); } catch {} }
+          videoEncoder = null;
+          encoderSize = null;
+          abandonInFlight();
+        }
+        return;
       case "set-bitrate":
         videoBitrate = m.bps;
         // Chrome only adjusts the bitrate of the running encoder (media_video_encoder_wrapper.cc ChangeOptions): no new
@@ -108,6 +118,68 @@ export const AGENT_SOURCE = String.raw`
       case "drop-audio": { const d = pendingAudio.get(m.seq); pendingAudio.delete(m.seq); if (d) d.close(); return; }
       case "stop": return stop();
     }
+  }
+
+  // The Chromium capture device takes VideoCaptureParams (requested size, resolution_change_policy). A getUserMedia
+  // request reaches the same device with the policy Blink derives from the min and max sizes
+  // (SelectResolutionPolicyFromCandidates), so the sizes are chosen to give the policy the session host asked for. The
+  // minimums are those of VideoCaptureParams::SuggestConstraints.
+  //   fixed_resolution:   min = max, every frame is the requested size, the content letterboxed into it.
+  //   fixed_aspect_ratio: min is 180 lines of the same aspect ratio, frames keep the aspect ratio of the maximum
+  //                       (sender-side letterboxing: a receiver that cannot scale gets a constant aspect ratio).
+  //   any_within_limit:   min is 2x2 (a different aspect ratio), frames follow the source's shape.
+  function captureLimits(video) {
+    const w = video.width - (video.width % 2), h = video.height - (video.height % 2);
+    const base = { maxWidth: w, maxHeight: h, maxFrameRate: video.frameRate };
+    const ratio = (a, b) => Math.floor((100 * a) / b);
+    if (video.resolutionChangePolicy === "fixed_aspect_ratio" && h > 180) {
+      for (let minH = 180; minH <= h; minH += 2) {
+        const minW = Math.round((minH * w) / h / 2) * 2;
+        if (minW > 0 && minW <= w && ratio(minW, minH) === ratio(w, h)) return { ...base, minWidth: minW, minHeight: minH };
+      }
+      return { ...base, minWidth: w, minHeight: h };
+    }
+    if (video.resolutionChangePolicy === "any_within_limit") {
+      return { ...base, minWidth: 2, minHeight: ratio(2, 2) === ratio(w, h) ? 4 : 2 };
+    }
+    return { ...base, minWidth: w, minHeight: h };
+  }
+
+  // The same limits in the standard syntax getDisplayMedia takes.
+  function displayConstraints(limits) {
+    const video = { frameRate: { max: limits.maxFrameRate || 30 } };
+    if (limits.maxWidth) {
+      video.width = { min: limits.minWidth, max: limits.maxWidth };
+      video.height = { min: limits.minHeight, max: limits.maxHeight };
+    }
+    return video;
+  }
+
+  // The configuration of the encoder the offer chose. A hardware offer needs a hardware encoder (the Cast offer lists
+  // H.264 only when one exists, and a software one would be a different quality and CPU cost than the receiver was
+  // told): prefer-hardware makes Chromium's VideoEncoder refuse to configure without one.
+  //
+  // The rest follows Chrome's MediaVideoEncoderWrapper constructor. A constant bitrate (Bitrate::ConstantBitrate): a
+  // variable one is unconstrained in blink (peak = 10x target, VideoEncoder::ParseConfigStatic), so the target the
+  // bandwidth logic picks would not hold. The frame rate only for a hardware encoder, which needs it for level selection
+  // and rate control; software encoders go by the per-frame durations of variable-rate capture. The screen content hint
+  // (WebCodecs contentHint "text", which blink maps to ContentHint::Screen) except for software VP9
+  // (TODO crbug.com/572902679).
+  function encoderConfig(width, height) {
+    const config = {
+      codec: videoCodec.string,
+      width, height,
+      bitrate: videoBitrate,
+      latencyMode: "realtime",
+      bitrateMode: "constant",
+      hardwareAcceleration: videoCodec.hardware ? "prefer-hardware" : "prefer-software",
+    };
+    if (videoCodec.hardware) config.framerate = videoInfo ? videoInfo.frameRate : 30;
+    if (videoCodec.codec !== "vp9" || videoCodec.hardware) config.contentHint = "text";
+    // Cast Streaming carries Annex B, with the parameter sets in the key frames.
+    if (videoCodec.codec === "h264") config.avc = { format: "annexb" };
+    if (videoCodec.codec === "hevc") config.hevc = { format: "annexb" };
+    return config;
   }
 
   function refreshFrame() {
@@ -140,7 +212,7 @@ export const AGENT_SOURCE = String.raw`
     const tab = source.kind === "tab";
     const sourceKind = tab ? "tab" : "desktop";
     const idConstraint = tab ? { chromeMediaSourceId: source.mediaSourceId } : { chromeMediaSourceId: source.sourceId };
-    const limits = video ? { maxWidth: video.width, maxHeight: video.height, maxFrameRate: video.frameRate } : {};
+    const limits = video ? captureLimits(video) : {};
     const videoWanted = !!video || !tab;
     const acquire = (withAudio, withVideo) => navigator.mediaDevices.getUserMedia({
       audio: withAudio ? { mandatory: tab ? { chromeMediaSource: "tab", ...idConstraint } : { chromeMediaSource: "desktop" } } : false,
@@ -149,7 +221,7 @@ export const AGENT_SOURCE = String.raw`
     try {
       return !tab && audio && source.audio === "loopbackWithMute"
         // The host's handler on this window's own session answers with the app's source and 'loopbackWithMute'.
-        ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: { frameRate: { max: limits.maxFrameRate || 30 } } })
+        ? await navigator.mediaDevices.getDisplayMedia({ audio: true, video: displayConstraints(limits) })
         : await acquire(!!audio, videoWanted);
     } catch (err) {
       // One call serves both tracks, so say which one the browser refused: try the video alone.
@@ -268,25 +340,9 @@ export const AGENT_SOURCE = String.raw`
         chunk.copyTo(data);
         send({ t: "video-chunk", rtp: info.rtp, key: chunk.type === "key", data, encodeMs: performance.now() - info.startedAt });
       },
-      error: (err) => { abandonInFlight(); send({ t: "encoder-status", kind: "video", status: "codec_runtime_error" }); fail("encoder", err); },
+      error: (err) => { abandonInFlight(); send({ t: "encoder-status", kind: "video", status: "codec_runtime_error", message: describe(err) }); },
     });
-    // Chrome's MediaVideoEncoderWrapper asks for a constant bitrate (Bitrate::ConstantBitrate in the constructor and
-    // SetBitRate): a variable one is unconstrained in blink (peak = 10x target, VideoEncoder::ParseConfigStatic), so the
-    // target the bandwidth logic picks would not hold. It also tunes for screen content except for software VP9
-    // (its TODO crbug.com/572902679), which WebCodecs expresses as contentHint "text" (blink maps it to ContentHint::Screen).
-    // The framerate is left unset for VP8, which is always software, as Chrome does for software encoders so that the
-    // per-frame durations of variable-rate capture drive the rate control.
-    const isVp9 = videoCodec.string.indexOf("vp09") === 0 || videoCodec.string === "vp9";
-    videoConfig = {
-      codec: videoCodec.string,
-      width, height,
-      bitrate: videoBitrate,
-      latencyMode: "realtime",
-      bitrateMode: "constant",
-      hardwareAcceleration: "no-preference",
-    };
-    if (!isVp9) videoConfig.contentHint = "text";
-    if (videoCodec.string !== "vp8") videoConfig.framerate = videoInfo ? videoInfo.frameRate : 30;
+    videoConfig = encoderConfig(width, height);
     videoEncoder.configure(videoConfig);
     keyNext = true;
   }
@@ -298,8 +354,8 @@ export const AGENT_SOURCE = String.raw`
     try {
       const w = frame.displayWidth, h = frame.displayHeight;
       if (!videoEncoder || videoEncoder.state === "closed" || !encoderSize || encoderSize.width !== w || encoderSize.height !== h) {
-        const support = await VideoEncoder.isConfigSupported({ codec: videoCodec.string, width: w, height: h, bitrate: videoBitrate, latencyMode: "realtime" });
-        if (!support.supported) { dropVideo(rtp); send({ t: "encoder-status", kind: "video", status: "unsupported_codec" }); return; }
+        const support = await VideoEncoder.isConfigSupported(encoderConfig(w, h));
+        if (!support.supported) { dropVideo(rtp); send({ t: "encoder-status", kind: "video", status: "unsupported_codec", message: videoCodec.string + (videoCodec.hardware ? " (hardware)" : "") + " at " + w + "x" + h }); return; }
         configureVideo(w, h);
       }
       // A queue that grows means the encoder cannot keep up: skip, the engine sees the missing chunk as a drop.
@@ -310,8 +366,7 @@ export const AGENT_SOURCE = String.raw`
       videoEncoder.encode(frame, { keyFrame: key });
     } catch (err) {
       dropVideo(rtp);
-      send({ t: "encoder-status", kind: "video", status: "codec_init_failed" });
-      fail("encoder", err);
+      send({ t: "encoder-status", kind: "video", status: "codec_init_failed", message: describe(err) });
     } finally {
       frame.close();
     }

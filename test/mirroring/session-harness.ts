@@ -3,6 +3,7 @@ import { createEncodingSupport } from "../../src/mirroring/encoding-support.ts";
 import { OpenscreenSessionHost, type MirroringError, type SessionType } from "../../src/mirroring/session-host.ts";
 import { SenderPacketRouter } from "../../src/mirroring/sender/packet-router.ts";
 import { UdpEnvironment } from "../../src/mirroring/transport/udp-environment.ts";
+import type { VideoCodec } from "../../src/mirroring/protocol/constants.ts";
 import { FakeBackend } from "./fake-backend.ts";
 import { FakeReceiver, type FakeReceiverOptions } from "./fake-receiver.ts";
 import { VirtualClock, VirtualEnvironment } from "./virtual-time.ts";
@@ -20,7 +21,21 @@ export interface Harness {
   close(): void;
 }
 
-export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType; env?: Record<string, string | undefined>; enableRtcpReporting?: boolean } = {}): Promise<Harness> {
+export async function startHarness(
+  opts: {
+    receiver?: FakeReceiverOptions;
+    type?: SessionType;
+    env?: Record<string, string | undefined>;
+    /** Codecs the capture side found a hardware encoder for (`isConfigSupported` with `prefer-hardware`). */
+    hardware?: VideoCodec[];
+    software?: VideoCodec[];
+    denyListed?: Set<VideoCodec>;
+    onDenyListed?: (codec: VideoCodec) => void;
+    platform?: string;
+    forceLetterboxing?: boolean;
+    enableRtcpReporting?: boolean;
+  } = {},
+): Promise<Harness> {
   const receiver = await FakeReceiver.create(opts.receiver);
   const env = new UdpEnvironment("127.0.0.1");
   await env.bind();
@@ -30,12 +45,16 @@ export async function startHarness(opts: { receiver?: FakeReceiverOptions; type?
   const log: string[] = [];
   let stopped = false;
   const host = new OpenscreenSessionHost(
-    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0", ...(opts.enableRtcpReporting === true ? { enableRtcpReporting: true } : {}) },
+    { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0", forceLetterboxing: opts.forceLetterboxing, ...(opts.enableRtcpReporting === true ? { enableRtcpReporting: true } : {}) },
     {
       environment: env,
       router,
       backend,
-      encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(["vp8"]) }),
+      encodingSupport: createEncodingSupport(
+        { hardware: new Set(opts.hardware ?? []), software: new Set(opts.software ?? ["vp8"]) },
+        { denyListed: opts.denyListed, onDenyListed: opts.onDenyListed },
+      ),
+      platform: opts.platform,
       env: opts.env ?? {},
       messagePort: { postMessage: (_dest, ns, message) => setImmediate(() => receiver.onControlMessage(ns, message)) },
       observer: {

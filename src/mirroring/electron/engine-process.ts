@@ -17,7 +17,19 @@ import { PortBackend } from "./port-backend.ts";
 
 /** Main to engine. */
 export type ToEngine =
-  | { type: "start"; params: SessionParameters; source: CaptureSource; softwareCodecs: VideoCodec[]; env?: Record<string, string | undefined> }
+  | {
+      type: "start";
+      params: SessionParameters;
+      source: CaptureSource;
+      /** What `VideoEncoder.isConfigSupported` found: `prefer-hardware` and `prefer-software` respectively. */
+      hardwareCodecs: VideoCodec[];
+      softwareCodecs: VideoCodec[];
+      /** Codecs whose hardware encoder failed earlier in the app's run (`GetHardwareCodecDenyList`). */
+      hardwareDenyList: VideoCodec[];
+      /** Chrome's codec switches and features as the app's command line sets them. */
+      encodingPolicy: { hardwareFeatures: VideoCodec[]; softwareFeatures: VideoCodec[]; forceEnable: VideoCodec[]; forceDisable: VideoCodec[] };
+      env?: Record<string, string | undefined>;
+    }
   | { type: "message"; namespace: string; json: string }
   /** `SwitchMirroringSourceTab`: `source` is the new tab's capture id. */
   | { type: "switch-source"; webContentsId: number; source: CaptureSource }
@@ -34,7 +46,9 @@ export type FromEngine =
   | { type: "did-stop" }
   | { type: "error"; error: string; message: string }
   | { type: "log"; message: string }
-  | { type: "stats"; id: number; stats: MirroringStats | undefined };
+  | { type: "stats"; id: number; stats: MirroringStats | undefined }
+  /** A hardware encoder failed and the codec is no longer offered in hardware: the main process keeps the list. */
+  | { type: "deny-hardware-codec"; codec: VideoCodec };
 
 /** The slice of `process.parentPort` and of a `MessagePortMain` this file uses. */
 export interface ParentPortLike {
@@ -69,7 +83,17 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
       const source = data.source;
       const factory = createMirroringServiceFactory({
         createBackend: () => (backend = new PortBackend(agentPortFrom(agent), source)),
-        encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(data.softwareCodecs) }),
+        encodingSupport: createEncodingSupport(
+          { hardware: new Set(data.hardwareCodecs), software: new Set(data.softwareCodecs) },
+          {
+            denyListed: new Set(data.hardwareDenyList),
+            onDenyListed: (codec) => parentPort.postMessage({ type: "deny-hardware-codec", codec }),
+            policy: {
+              hardwareFeatures: new Set(data.encodingPolicy.hardwareFeatures), softwareFeatures: new Set(data.encodingPolicy.softwareFeatures),
+              forceEnable: new Set(data.encodingPolicy.forceEnable), forceDisable: new Set(data.encodingPolicy.forceDisable),
+            },
+          },
+        ),
         env: data.env,
       });
       service = factory(

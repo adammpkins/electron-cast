@@ -3,7 +3,9 @@
 //   npm run tab -- "Living Room"      mirrors an animated demo page ("Casting tab")
 //   npm run desktop -- "Living Room"  mirrors the primary screen, with system audio where the OS allows ("Casting screen")
 // A dialog asks before anything starts, and closing the window or pressing Ctrl+C ends the route (the TV returns to
-// its idle screen). Add --extra-codecs to let the sender offer VP9 as well as VP8.
+// its idle screen). Chrome's --cast-streaming-force-{enable,disable}-hardware-{h264,hevc,vp8,vp9,av1} switches and
+// --enable-features / --disable-features (CastStreamingVp9, ...) given here are honoured: the library reads them from
+// app.commandLine.
 // In tab mode a second, differently coloured window opens too. While casting, press in the terminal (or use the
 // "Cast" menu): s = switch the mirrored tab to the other window (and back), f = freeze the picture, u = unfreeze.
 //   npm run tab -- "Living Room" --stats   also prints the mirroring statistics (Chrome's media-router-internals "Mirroring
@@ -42,8 +44,7 @@ async function main() {
     presentation: false,
     selectDevice: async () => null,
     mirroring: {
-      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents },
-      extraVideoCodecs: flag("extra-codecs") ? ["vp9"] : [],
+      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents, app },
       log: (level, message) => console[level === "error" ? "error" : "log"](message),
     },
   });
