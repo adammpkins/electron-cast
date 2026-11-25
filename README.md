@@ -149,7 +149,8 @@ time stamped by `npm run build`. A device that sends no CRL of its own is then a
 (`deviceAuth.revocationChecked` is `false`) instead of refused. Everything else is still checked; update the package
 to get a fresh fallback CRL. Details: [docs/DESIGN.md](docs/DESIGN.md) and [SECURITY.md](SECURITY.md).
 
-It is not yet tested against real hardware. How it works and what it leaves out: [docs/DESIGN.md](docs/DESIGN.md).
+Tested on 8 real devices on a home network, which all passed (an audio-only Google Home Mini got the `audio_only`
+policy). How it works and what it leaves out: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Known issue: top-level `await app.whenReady()` in an ESM main process
 

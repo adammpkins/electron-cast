@@ -352,8 +352,8 @@ origin. `appId`, when given, must be the session's app. No origin is compared wi
 `joinSession`); `allowOrigin` still applies. Fails with `session_error` when no known device runs the session, the
 app differs, or the service was disposed; with `invalid_parameter` for a bad `sessionId`. The lookup runs when asked
 instead of tracking every device all the time (Chrome tracks). The presentation handler calls it for `reconnect`;
-`mode: "chromecast"` does not (its `requestSessionById` uses `joinSession`). `BridgeMethod` does not list it
-because it is not a method of the chromecast-mode bridge; `handle` takes any string.
+`mode: "chromecast"` does not (its `requestSessionById` uses `joinSession`). Only main calls it: it is not a
+`BridgeMethod`, and the IPC channel refuses it from a page as an unknown method (`invalid_parameter`).
 
 Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `receiver_unavailable`, `cancel`, `timeout`,
 `session_error`, `channel_error`.
@@ -483,7 +483,7 @@ Update the package to get a fresh fallback CRL.
 
 ##### `DeviceAuthResult`
 
-Returned by the `deviceAuth` getter. The type is not exported by name; use `CastClient["deviceAuth"]`.
+Returned by the `deviceAuth` getter. Exported as a type.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -495,7 +495,7 @@ Returned by the `deviceAuth` getter. The type is not exported by name; use `Cast
 
 ##### `DeviceAuthOptions`
 
-The `deviceAuth` client option (also not exported by name). All fields are optional.
+The `deviceAuth` client option, exported as the type `DeviceAuthOptions`. All fields are optional.
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -10,7 +10,7 @@
   on `CastClient`, for receivers that are not Google-certified. `CastClient` also gains `authTimeoutMs`, `deviceAuth`
   (trust roots and clock, for tests and private deployments) and a `deviceAuth` result (`policy`, `hashAlgorithm`,
   `nonceEchoed`, `usedFallbackCrl`, `revocationChecked`). The protocol layer gains `DeviceAuthMessage` encoding and
-  decoding. Not tested yet against real hardware.
+  decoding. Tested on 8 real devices, which all passed.
 - Device authentication does not start refusing devices that send no CRL once the built-in fallback CRL is past its 20
   weeks: with a lapsed fallback and no valid CRL from the device, the revocation check is skipped and
   `deviceAuth.revocationChecked` is `false` (Chromium fails closed; Chrome updates itself, an app may not). All other
@@ -52,6 +52,9 @@
   modes. `npm run smoke` runs it locally. A weekly canary (`npm run canary`) fetches Google's Cast sender SDK for the
   current Chrome majors and checks it still speaks the message envelope the translator expects; a failed run opens one
   issue.
+- The `DeviceAuthResult`, `DeviceAuthOptions`, `CastCertError` and `CastDeviceCertPolicy` types are exported.
+- The page's IPC channel accepts only the bridge's own methods. `joinRunningSession`, which only main calls, is refused
+  from a page as an unknown method.
 - Thanks to Michael Arthur (@mikey0000). Restart rejoin was proposed by him in
   [#1](https://github.com/adammpkins/electron-cast/pull/1) (an optional `sessionStore`); 0.4.0 does it the way Chrome
   does instead, as described above. His [#2](https://github.com/adammpkins/electron-cast/pull/2) arrived independently
