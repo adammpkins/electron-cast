@@ -5,6 +5,7 @@ import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
+import { withAddressPolicy } from "./address-filter.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -77,6 +78,12 @@ export interface CastManagerOptions {
    * `verifyDevice`). Default true; false allows uncertified receivers. Ignored when `createClient` is given.
    */
   verifyDevices?: boolean;
+  /**
+   * Connect to devices at any address. Chrome does not open a Cast channel to a publicly routable or loopback address
+   * unless the MediaRouterCastAllowAllIPs policy is set, and neither does this manager: such a device is not listed or
+   * offered. Default false (as Chrome). Applies to the discovery used, including one passed as `discovery`.
+   */
+  allowAllIPs?: boolean;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -116,7 +123,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
-  const discovery = options.discovery ?? new CastDiscovery();
+  const discovery = withAddressPolicy(options.discovery ?? new CastDiscovery(), options.allowAllIPs === true);
   const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port, verifyDevice: options.verifyDevices !== false }));
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
