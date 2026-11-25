@@ -10,6 +10,7 @@ import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utili
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
+import { release } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createCastManager } from "electron-cast/main";
 // test/mirroring/fake-receiver.ts, bundled by build-preloads.mjs (the Node of Electron 35 cannot load TypeScript).
@@ -24,6 +25,17 @@ const mirrorPage = (width, height) => `<!doctype html><meta charset=utf-8><body 
   ctx.resume().catch(() => {});
 </script>`;
 const MIRROR_PAGE = mirrorPage(640, 360);
+
+/**
+ * Since Electron 39, Chromium captures macOS system audio with the CoreAudio Tap API on macOS 14.2 (Darwin 23.2) and
+ * later, gated by the "System Audio Recording" privacy permission (Electron's desktopCapturer docs).
+ */
+function macSystemAudioNeedsPermission() {
+  if (process.platform !== "darwin") return false;
+  const [darwinMajor, darwinMinor] = release().split(".").map(Number);
+  const electronMajor = Number(process.versions.electron.split(".")[0]);
+  return electronMajor >= 39 && (darwinMajor > 23 || (darwinMajor === 23 && darwinMinor >= 2));
+}
 
 /** The audio output devices a page sees (`enumerateDevices`), which desktop loopback audio needs one of. */
 async function audioOutputCount() {
@@ -73,6 +85,10 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     if ((await audioOutputCount()) === 0) {
       withAudio = false;
       console.log(`smoke: NOTICE [${name}] this machine has no audio output device, so there is no system audio to loop back: desktop mirroring is tested without audio`);
+    } else if (macSystemAudioNeedsPermission() && process.env.CI) {
+      // Seen on the macOS runners with Electron 40 and later: getDisplayMedia with system audio never returns.
+      withAudio = false;
+      console.log(`smoke: NOTICE [${name}] on macOS 14.2+ Electron ${process.versions.electron} captures system audio through the CoreAudio tap, which needs the System Audio Recording permission, and nobody can grant it on a CI runner: desktop mirroring is tested without audio`);
     }
   }
   // A desktop capture is damage driven, so a still screen yields few frames; give it something that moves.
@@ -178,8 +194,11 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
   else assert.equal(s.audioFrames, 0, "audio reached the receiver from a session without audio");
   assert.equal(s.invalidFrames, 0);
   // A key frame is asked for once at the start; more would be bitrate spikes. (libvpx VP9 cuts a key frame by itself at a
-  // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.)
-  assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= 2, `${s.videoKeyFrames} key frames reached the receiver`);
+  // scene change, so the page changes colour slowly: it used to flip every frame and gave 5 key frames in 4 s.) A new
+  // capture size starts with a key frame too: on a slow machine the encoder is overloaded and the capture size steps
+  // down (VideoCaptureOracle). So: one key frame per picture size seen, and one spare. VP9 sizes are not read.
+  const keyFrameLimit = (codec === "vp9" ? 1 : Math.max(1, s.videoSizes.size)) + 1;
+  assert.ok(s.videoKeyFrames >= 1 && s.videoKeyFrames <= keyFrameLimit, `${s.videoKeyFrames} key frames reached the receiver (sizes ${[...s.videoSizes].join(" ")})`);
   pass(`fake receiver decrypted and validated ${label} (${expected === "h264" ? "hardware" : "software"} encoder)${audioWanted ? " and Opus" : ""} frames from the captured ${mode}, picture sizes ${[...s.videoSizes].join(" ")}`);
 
   let page2;
