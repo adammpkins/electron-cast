@@ -41,6 +41,8 @@ jobs:
       - run: npm ci
       # Its own folder: npm skips electron in the repo's node_modules because it is an optional peer dependency
       - run: npm i --prefix smoke/.out/electron --no-package-lock electron@${{ matrix.electron }}
+      # Electron 45+ has no postinstall and downloads its binary on first require; fetch it now so chrome-sandbox exists
+      - run: node smoke/.out/electron/node_modules/electron/install.js
       - name: Allow Electron's sandbox on Linux
         if: runner.os == 'Linux'
         run: |
