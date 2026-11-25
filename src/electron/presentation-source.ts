@@ -1,8 +1,9 @@
-// Which presentation URLs this library can serve, decided the way Chromium's Cast provider decides what a source is.
-// electron-cast launches receiver apps; it does not mirror a tab or remote a media element. Chrome routes sources that
-// name a Cast Streaming app, and `remote-playback:` sources, to code electron-cast does not have, so they must never be
-// launched as ordinary apps. Pure module: no Electron imports.
+// Which presentation URLs this library can serve, decided the way Chromium's Media Router decides what a source is.
+// electron-cast launches receiver apps over Cast and DIAL; it does not mirror a tab or remote a media element. Chrome
+// routes sources that name a Cast Streaming app, and `remote-playback:` sources, to code electron-cast does not have,
+// so they must never be launched as ordinary apps. Pure module: no Electron imports.
 import { parsePresentationUrl, type PresentationUrl } from "./presentation-envelope.ts";
+import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
 
 /**
  * The Cast Streaming receiver apps, `openscreen::cast::GetCastStreamingAppIds()` (cast/common/public/
@@ -18,7 +19,9 @@ export type PresentationSourceKind =
   | "mirroring"
   /** `remote-playback:`, made by `HTMLMediaElement.remote`: Chrome serves it by media remoting. */
   | "remote_playback"
-  /** Anything else (invalid, unknown scheme, a plain web page, DIAL). */
+  /** `cast-dial:` (`MediaSource::IsDialSource`): an app launched on a DIAL sink by the DIAL provider. */
+  | "dial"
+  /** Anything else (invalid, unknown scheme, a plain web page). */
   | "other";
 
 const LEGACY_PREFIX = "https://google.com/cast#";
@@ -88,6 +91,7 @@ export function classifyPresentationUrl(url: string): PresentationSourceKind {
   }
   // MediaSource::IsRemotePlaybackSource
   if (parsed.protocol === "remote-playback:") return "remote_playback";
+  if (isDialSource(url)) return "dial";
   if (castUrlAppIds(url) === null) return "other";
   return containsStreamingApp(url) ? "mirroring" : "cast_app";
 }
@@ -98,31 +102,54 @@ export interface LaunchableUrl {
   parsed: PresentationUrl;
 }
 
-/** The result of looking through a request's URLs for the one to serve. */
+/** A `cast-dial:` URL with the app it names (`MediaSource::AppNameFromDialSource`). */
+export interface DialSourceUrl {
+  url: string;
+  app: string;
+}
+
+/**
+ * The result of looking through a request's URLs for the ones to serve. A request can have a source for each kind of
+ * sink: `dial` is set when DIAL is on and the request has a `cast-dial:` URL, and the sink the user picks decides
+ * which of the two is used.
+ */
 export type SourceChoice =
-  | ({ kind: "launch" } & LaunchableUrl)
+  | ({ kind: "launch"; dial?: DialSourceUrl } & LaunchableUrl)
+  /** Only a DIAL source can be served. */
+  | { kind: "dial"; dial: DialSourceUrl }
   /** Every valid source needs mirroring or remoting: there is nothing to cast to, as for a source no sink serves. */
   | { kind: "no_sink" }
   /** No URL is one electron-cast understands. */
   | { kind: "unsupported" };
 
 /**
- * Picks the URL to launch. Chrome takes the sources of a request as a set and serves the first, in order, that the
+ * Picks the URLs to launch. Chrome takes the sources of a request as a set and serves the first, in order, that the
  * chosen sink supports (`QueryResultManager`, `MediaRouterUI`), and a page is told a screen is available when any
- * source has one. With no mirroring or remoting here, that is the first plain Cast app URL: a mirroring or
- * `remote-playback:` entry never blocks an ordinary one next to it.
+ * source has one. A Cast sink supports a Cast app source and a DIAL sink a `cast-dial:` one, so this is the first
+ * plain Cast app URL and, with `dial` on, the first `cast-dial:` URL naming a valid app; a mirroring or
+ * `remote-playback:` entry never blocks an ordinary one next to it. With DIAL off a `cast-dial:` URL is one nothing
+ * here understands.
  */
-export function chooseSource(urls: readonly string[]): SourceChoice {
+export function chooseSource(urls: readonly string[], options: { dial?: boolean } = {}): SourceChoice {
   let unservable = false;
+  let cast: LaunchableUrl | undefined;
+  let dial: DialSourceUrl | undefined;
   for (const url of urls) {
     const kind = classifyPresentationUrl(url);
     if (kind === "mirroring" || kind === "remote_playback") {
       unservable = true;
       continue;
     }
-    if (kind !== "cast_app") continue;
+    if (kind === "dial") {
+      const app = options.dial === true && dial === undefined ? appNameFromDialSource(url) : "";
+      if (app !== "") dial = { url, app };
+      continue;
+    }
+    if (kind !== "cast_app" || cast !== undefined) continue;
     const parsed = parsePresentationUrl(url);
-    if (parsed !== null) return { kind: "launch", url, parsed };
+    if (parsed !== null) cast = { url, parsed };
   }
+  if (cast !== undefined) return { kind: "launch", ...cast, ...(dial === undefined ? {} : { dial }) };
+  if (dial !== undefined) return { kind: "dial", dial };
   return unservable ? { kind: "no_sink" } : { kind: "unsupported" };
 }

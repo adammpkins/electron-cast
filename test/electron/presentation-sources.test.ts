@@ -78,6 +78,19 @@ test("chooseSource reports no sink when only mirroring or remoting sources are l
   assert.equal(chooseSource([]).kind, "unsupported");
 });
 
+test("cast-dial: is the DIAL kind; with DIAL on it is served next to a Cast URL or alone, with DIAL off it is not", () => {
+  const DIAL = "cast-dial:YouTube?clientId=c1";
+  assert.equal(classifyPresentationUrl(DIAL), "dial");
+  assert.deepEqual(chooseSource([DIAL, `cast:${YT}`], { dial: true }), {
+    kind: "launch", url: `cast:${YT}`, parsed: chooseSourceParsed(`cast:${YT}`), dial: { url: DIAL, app: "YouTube" },
+  });
+  assert.deepEqual(chooseSource([`cast:${AV}`, DIAL], { dial: true }), { kind: "dial", dial: { url: DIAL, app: "YouTube" } });
+  // the first cast-dial: URL naming a valid app is the one
+  assert.deepEqual(chooseSource(["cast-dial:", DIAL, "cast-dial:Netflix"], { dial: true }), { kind: "dial", dial: { url: DIAL, app: "YouTube" } });
+  assert.equal(chooseSource([DIAL]).kind, "unsupported");
+  assert.equal(chooseSource([DIAL, `cast:${AV}`]).kind, "no_sink");
+});
+
 // The handler, on the real session service with fakes.
 function setup(o: { pick?: (l: CastDevice[], r: CastRequestInfo) => DeviceChoice } = {}) {
   const devices = new FakeDevices();

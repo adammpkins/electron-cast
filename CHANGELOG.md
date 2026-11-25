@@ -3,8 +3,8 @@
 ## Unreleased
 
 This release brings electron-cast's main process in line with Chrome's Media Router: devices are tracked over kept-open
-channels, the sessions on them are followed whoever started them, and the app can cast and control media from its own
-UI. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
+channels, the sessions on them are followed whoever started them, the app can cast and control media from its own
+UI, and DIAL devices are found and cast to next to Cast devices. Each rule names the Chromium code it follows ([docs/CHROMIUM-MAP.md](docs/CHROMIUM-MAP.md)). `mode: "chromecast"`
 is frozen and behaves as before for pages; it shares the device list.
 
 ### Added
@@ -39,6 +39,32 @@ is frozen and behaves as before for pages; it shares the device list.
     `CastActivityManager` does. New types `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
   - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
     must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities.
+- **DIAL, as Chrome's Media Router does it (presentation mode).** electron-cast now discovers DIAL devices by SSDP and
+  serves the `cast-dial:` sources that Google's SDK adds to a request when the page passes a `dialRequest`
+  (`chrome.cast.DialRequest`, as YouTube's web app does for non-Cast TVs). Each rule follows a Chromium function,
+  cited in [docs/DESIGN.md](docs/DESIGN.md#dial-srcdial): an M-SEARCH on every IPv4 interface (four searches a second
+  apart, every 120 s), the UPnP device description and the `Application-URL` header (both only for private addresses
+  that equal the sender's), app info for the app a page asks about, and a sink per device. A page sees availability
+  per app (only to the origins Chrome allows for that app) through the same observation as its Cast URL, the picker
+  offers DIAL sinks that have the app next to the Cast devices that have theirs, and starting one runs the SDK's
+  `custom_dial_launch` round trip, an HTTP launch with the SDK's launch parameter, and a stop by `DELETE` of the run
+  URL. A device that is also a Cast sink (its UDN is the Cast id, and its channel is open) is shown as a Cast device
+  only, as in Chrome. On by default, as in Chrome; `dial: false` on `createCastManager` turns it off (SSDP and the
+  HTTP requests to devices stop entirely). A custom `discovery` turns it off unless `dial` is given.
+  - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009), a DIAL
+    sink hidden by a Cast sink comes back as soon as the Cast sink goes, requests have timeouts (Chrome sets none), and
+    a DIAL route has no volume or media control (`BindMediaController` is not implemented there either).
+  - DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
+    thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see,
+    the monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its
+    POST), and a `start()` without an earlier availability watch waits (up to 5 s) for the devices' app answers.
+  - API: `MediaSink` and `MediaRoute` gain `providerId` (`"cast"` or `"dial"`), `SinkIconType` gains `"generic"`, and
+    `CastDevice` gains an optional `dial` field that marks a DIAL sink. The sinks observer without a query also
+    reports DIAL sinks (they have no capabilities, so a `capabilities` query never does, and a `presentationUrls` query
+    matches Cast URLs only); `manager.devices()` still lists Cast devices only. `selectDevice` can be handed a DIAL
+    device when the request carries a `cast-dial:` URL: return it like any other and the manager does the rest (do not
+    connect to it yourself). `getMediaController` on a DIAL route throws `route_not_found`. The SDK canary no longer
+    lists the DIAL messages and `cast-dial:` as unhandled.
 - New options and methods for the device list: `sinks` (`openDelayMaxMs`, `reportDelayMs`, `retry`, `allowAllIps`,
   `dynamicTimeoutDeltaMs`) on `createCastManager` and `CastSessionService`, each a Chrome setting (there is no cap or
   off switch, because Chrome has none); `CastManager.discoverSinksNow()` and `CastManager.settled()` (with
@@ -95,7 +121,7 @@ is frozen and behaves as before for pages; it shares the device list.
 ### Documentation
 
 - A rewritten README with a Chrome parity table (including what is out of scope, such as Chrome's Global Media
-  Controls panel, and what is in progress: DIAL, mirroring, wired display and the Presentation Receiver API, and
+  Controls panel, and what is in progress: mirroring, wired display and the Presentation Receiver API, and
   access-code casting), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
   receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting
   and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING.

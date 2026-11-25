@@ -71,8 +71,11 @@ const stop = manager.registerMediaSinksObserver({
 // stop() unregisters
 ```
 
-A `MediaSink` is `{ id, name, description (the model), iconType: "cast" | "cast_audio" | "cast_audio_group", device }`
-where `device` is the discovered `CastDevice`.
+A `MediaSink` is `{ id, providerId: "cast" | "dial", name, description (the model), iconType: "cast" | "cast_audio" | "cast_audio_group" | "generic", device }`
+where `device` is the discovered `CastDevice`. A DIAL sink (`providerId: "dial"`, id `dial:<uuid>`, icon `generic`, as
+`DialMediaSinkServiceImpl` creates it) has `device.dial` set. A device that both mDNS and SSDP found is reported once,
+as the Cast sink (`CastMediaSinkServiceImpl::TryConnectDialDiscoveredSink`). DIAL sinks have no capabilities, so a
+`capabilities` query never lists them; `manager.devices()` stays the Cast devices.
 
 A device is a sink only once electron-cast has opened a channel to it and it has passed device authentication, as in
 Chrome. Channels open after discovery with a random delay of up to 5 s, so right after `start()` the list is empty for
@@ -106,6 +109,15 @@ has a route too, as in Chrome (`AddNonLocalActivity`): `isLocal` is `false`, `me
 `sinkName` names the device. It follows the device's receiver status, goes when the app stops, and can be
 terminated and have its volume set (while its channel is down, because the device is being reopened, terminating fails with `session_error` "StopSession response is not OK. Failed to terminate route." and the route stays, as in Chrome); `detachRoute` on it does nothing. A route a page held, once every page has let go
 of it without stopping the app, becomes a non-local route. `isLocal` is `true` for the routes of this app's pages.
+
+A DIAL route (`providerId: "dial"`) is the route of a `cast-dial:` presentation. Its `id` is Chrome's
+`urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source>`, `mediaSource` the `cast-dial:` source, `appId` is `""`
+and `description` and `displayName` the app name, and `isLocal` is `true`. It has no volume and no media control:
+`getRouteController(id).setVolume()` rejects and `getMediaController(id)` throws `MediaRouteError` `route_not_found`, as
+Chrome's DIAL provider does not implement `BindMediaController`. `terminateRoute` sends the `DELETE` that stops the app
+(and tells the page's connection it ended); `detachRoute` ends the page's connections and leaves the app running, which
+is also what a page closing its connection does (`DialMediaRouteProvider::DetachRoute` is not implemented in Chrome, so
+nothing stops the app).
 
 Control goes through the same `CastSessionService` code the page's calls use, so the page sees what it would see if
 the change came from the device:

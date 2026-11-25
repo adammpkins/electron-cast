@@ -3,15 +3,17 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
-  MediaRouteError, createManagerApi, createSinksObservers, presentationUrlForDevice,
+  MediaRouteError, combineSources, createManagerApi, createSinksObservers, presentationUrlForDevice,
   type CastManagerApi, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import { DefaultPresentationRequests, samePresentationRequest } from "./default-presentation.ts";
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
+import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
+import { processDeviceUuid } from "../dial/parse.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -26,6 +28,7 @@ export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
 export type { CastSinkOptions, ChannelParams, SinkRetryOptions } from "./sink-service.ts";
+export type { DialHttp, DialHttpOptions, DialRegistryOptions } from "../dial/index.ts";
 export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
@@ -93,6 +96,16 @@ export interface CastManagerOptions {
    * devices. The defaults are Chrome's, and there is no way to turn the tracking off: Chrome has none.
    */
   sinks?: CastSinkOptions;
+  /**
+   * DIAL (SSDP discovery, `cast-dial:` sources), which Chrome runs next to Cast discovery. Default true, except that a
+   * custom `discovery` turns it off unless this is given. `false` disables it; an object replaces its network layers
+   * (tests, mostly). `log` receives discovery problems (a socket that failed, ...), which are never thrown.
+   *
+   * DIAL sinks are listed next to the Cast sinks, except a device that is a Cast sink too (its UDN is the Cast id), which
+   * is listed as Cast only, as in Chrome. In `mode: "chromecast"` the sinks observers of the manager API still list
+   * DIAL sinks (they have port 0 and no Cast capabilities); only the Presentation API path can start a DIAL route.
+   */
+  dial?: boolean | { registry?: DialRegistryOptions; http?: DialHttp; httpOptions?: DialHttpOptions; settleMs?: number; log?: (message: string) => void };
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -150,6 +163,30 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       connectTimeoutMs: params.connectTimeoutMs,
       heartbeatTimeoutMs: params.livenessTimeoutMs,
     }));
+  // The receiver labels of Cast and DIAL routes are hashed with one per-process token, as in Chrome.
+  const hashToken = randomBytes(16).toString("hex");
+  const dialOption = options.dial ?? (options.discovery === undefined);
+  // A DIAL sink whose processed UDN is a Cast sink's id is hidden: CastMediaSinkServiceImpl removes it from the DIAL
+  // sink service when the Cast channel opens (OnChannelOpenSucceeded) and when the DIAL sink comes after the Cast one
+  // (TryConnectDialDiscoveredSink). A Cast sink is a device with an open, authenticated channel, not one mDNS merely
+  // heard, so this asks the session service; `service` exists before DIAL is started.
+  let castSinks: () => CastDevice[] = () => [];
+  const dial = dialOption === false ? undefined : new DialService({
+    hashToken,
+    isCastDevice: (uuid) => castSinks().some((d) => processDeviceUuid(d.id) === uuid),
+    ...(typeof dialOption === "object" ? dialOption : {}),
+  });
+  const routeListeners = new Set<() => void>();
+  const notifyRoutes = (): void => {
+    for (const l of [...routeListeners]) l();
+  };
+  dial?.provider.on("routes", notifyRoutes);
+  /** The DIAL sinks as a device source: their one change event stands for a changed device. */
+  const dialSource: DeviceSource | undefined = dial === undefined ? undefined : {
+    devices: () => dial.devices(),
+    on: (event, listener) => (event === "deviceChanged" ? dial.on("change", listener as () => void) : undefined),
+    off: (event, listener) => (event === "deviceChanged" ? dial.off("change", listener as () => void) : undefined),
+  };
   /**
    * A sender is one frame. A main frame's sender id is its webContents id; a subframe gets an id of its own, kept for
    * the frame's lifetime (across its navigations, so a reloaded iframe can rejoin its session). The frame is looked up
@@ -250,6 +287,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
     sinks: options.sinks,
+    ...(dial !== undefined && dialSource !== undefined ? {
+      dial: {
+        source: dialSource,
+        available: (app: string, origin: string) => dial.availableFor(app, origin),
+        monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
+      },
+    } : {}),
     emit(senderId, event) {
       try {
         handler?.onServiceEvent(senderId, event);
@@ -314,7 +358,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     const ipc = options.ipcMain;
     const on = ipc.on!.bind(ipc);
     const off = ipc.removeListener!.bind(ipc);
-    const h = new CastPresentationHandler({ service });
+    const h = new CastPresentationHandler({ service, token: hashToken, ...(dial !== undefined ? { dial } : {}), dialRoutesChanged: notifyRoutes });
     handler = h;
     const connections = new Map<string, { conn: PresentationConnectionHandle | null; sid: number }>();
     const watches = new Map<string, { ac: AbortController; sid: number }>();
@@ -561,18 +605,63 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The service knows frames by sender id (an iframe has a synthetic one); the API speaks of windows, so a route's
   // pages are reported as `webContents.id`s, once each however many of its frames hold the route.
   const windowIds = (ids: number[]): number[] => [...new Set(ids.map((id) => senders.get(id)?.wc.id ?? id))];
-  const routes = (): MediaRoute[] =>
-    service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) }));
-  const api = createManagerApi(createSinksObservers(service.deviceSource(), {
+  const dialRoutes = (): MediaRoute[] =>
+    (dial?.provider.routes() ?? []).map((r) => {
+      const members = windowIds(handler?.dialMembers(r.id) ?? []);
+      return {
+        id: r.id,
+        providerId: "dial" as const,
+        mediaSource: r.mediaSource,
+        sinkId: r.sinkId,
+        sinkName: dial?.devices().find((d) => d.id === r.sinkId)?.name ?? "",
+        isLocal: true,
+        description: r.appName,
+        appId: "",
+        displayName: r.appName,
+        origin: r.origin,
+        volume: { level: null, muted: null },
+        members,
+        parkedSenders: [],
+        parked: members.length === 0,
+      };
+    });
+  const routes = (): MediaRoute[] => [
+    ...service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
+    ...dialRoutes(),
+  ];
+  const isDialRoute = (id: string): boolean => dial?.provider.routes().some((r) => r.id === id) ?? false;
+  const notDial = { ok: false as const, code: "invalid_parameter", description: "A DIAL route has no volume or media control" };
+  const castDevices = service.deviceSource();
+  const api = createManagerApi(createSinksObservers(dialSource === undefined ? castDevices : combineSources(castDevices, dialSource), {
     cached: (d, appId) => service.cachedAppAvailability(d, appId),
     check: (d, appId) => service.checkAppAvailability(d, appId),
   }), {
     mediaRoutes: routes,
-    observeSessions: (l) => service.observeSessions(l),
-    terminateSession: (id) => service.terminateSession(id),
-    setSessionVolume: (id, v) => service.setSessionVolume(id, v),
-    detachSession: (id) => service.detachSession(id),
-    sendSessionMessage: (id, ns, m) => service.sendSessionMessage(id, ns, m),
+    observeSessions: (l) => {
+      const off = service.observeSessions(l);
+      routeListeners.add(l);
+      return () => {
+        off();
+        routeListeners.delete(l);
+      };
+    },
+    async terminateSession(id) {
+      if (!isDialRoute(id)) return service.terminateSession(id);
+      try {
+        await dial!.provider.terminateRoute(id);
+        return { ok: true, value: undefined };
+      } catch (err) {
+        const e = err as { code?: unknown; message?: unknown };
+        return { ok: false, code: typeof e.code === "string" ? e.code : "session_error", description: String(e.message ?? err) };
+      }
+    },
+    setSessionVolume: async (id, v) => (isDialRoute(id) ? notDial : service.setSessionVolume(id, v)),
+    detachSession(id) {
+      if (!isDialRoute(id)) return service.detachSession(id);
+      handler?.detachDialRoute(id);
+      return { ok: true, value: undefined };
+    },
+    sendSessionMessage: (id, ns, m) => (isDialRoute(id) ? notDial : service.sendSessionMessage(id, ns, m)),
     observeSessionStatus: (l) => service.observeSessionStatus(l),
     observeMediaStatus: (l) => service.observeMediaStatus(l),
     sessionVolume: (id) => service.sessionVolume(id),
@@ -583,10 +672,17 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       return presentation.startDefaultPresentation(webContentsId, sinkId);
     },
   });
+  // Cast sinks coming and going decide which DIAL sinks are shown; the DIAL sinks are looked up again.
+  castSinks = () => service.devices();
+  const castChanged = (): void => dial?.castDevicesChanged();
+  if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.on(e, castChanged);
   let disposed = false;
   return {
     ...api,
-    start: () => discovery.start(),
+    async start() {
+      await discovery.start();
+      dial?.start();
+    },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
     settled: (options) => service.settled(options),
@@ -597,6 +693,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       defaults.dispose();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
+      if (dial !== undefined) for (const e of ["deviceUp", "deviceDown", "deviceChanged"] as const) castDevices.off(e, castChanged);
+      dial?.stop();
       discovery.stop();
       await service.dispose();
       senders.clear();

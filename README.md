@@ -97,6 +97,8 @@ hidden.
   interface, IPv4 and IPv6, then a kept-open channel to each device found. A device is listed once that channel is open
   and authenticated, so the list fills in a few seconds after `start()`; it stays through mDNS silence and recovers
   after sleep.
+- **DIAL next to Cast**, as Chrome runs both: SSDP discovery, availability, the picker and launch over HTTP for the
+  `cast-dial:` sources Google's SDK adds for a `dialRequest`. On by default; `dial: false` turns it off.
 - **Device authentication** as Chrome does it: a device is listed only after it proves it is a Google-certified Cast
   device, with Google's Cast roots built in ([details](docs/guides/device-authentication.md)).
 - **Sessions the Chrome way:** auto-join after a reload, rejoin after an app restart by session id, several windows,
@@ -136,7 +138,7 @@ electron-cast does what Chrome does on the Presentation API path. Where it does 
 | Sessions started by other senders listed as routes (non-local routes), tracked live | Yes | Yes | From each device's receiver status (`CastSessionTracker`) |
 | App-initiated casting through the page's default presentation request (`connectionavailable`) | Yes | Yes (`startCasting`) | The app's menu or tray plays Chrome's Cast dialog ([MAIN-API](docs/MAIN-API.md#casting-from-the-apps-own-ui)) |
 | Global Media Controls (the toolbar's media and Cast panel) | Browser UI | Out of scope: the app builds its own | Chrome's panel lists the routes and controls them ([`cast_media_notification_producer.cc`](https://github.com/chromium/chromium/blob/main/chrome/browser/ui/global_media_controls/cast_media_notification_producer.cc), [`cast_media_notification_item.cc`](https://github.com/chromium/chromium/blob/main/chrome/browser/ui/global_media_controls/cast_media_notification_item.cc)); the same calls are here: `registerMediaRoutesObserver` or `getRoutes`, `getMediaController`, `terminateRoute` |
-| DIAL discovery and launch | Yes | In progress | |
+| DIAL discovery and launch (`cast-dial:` sources from the SDK's `dialRequest`) | Yes | Yes | SSDP, availability, the picker, launch and stop over HTTP ([DESIGN](docs/DESIGN.md#dial-srcdial)). A device that is also a Cast sink is listed as Cast only, as in Chrome; a DIAL-only device is not promoted to a Cast channel. `dial: false` turns it off. Unit tests only so far |
 | Tab, desktop and file mirroring | Yes | In progress | Mirroring sources are reported unavailable until then |
 | Remote Playback API (`video.remote`) | Yes | Not done: needs Electron | Blink's `RemotePlayback` needs support in Electron; electron-cast reports `remote-playback:` sources unavailable |
 | Wired display (presenting to a second monitor) and the Presentation Receiver API | Yes | In progress (`feat/wired-display`) | |

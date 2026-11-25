@@ -27,9 +27,9 @@ const DEFAULT_BASELINE = fileURLToPath(new URL("./sdk-canary-baseline.json", imp
  */
 const DEPENDS = {
   // Types the SDK sends and electron-cast acts on (client_connect is accepted and ignored).
-  sentHandled: ["client_connect", "app_message", "v2_message", "leave_session"],
+  sentHandled: ["client_connect", "app_message", "v2_message", "leave_session", "custom_dial_launch", "dial_app_info"],
   // Types electron-cast sends and the SDK must handle (error carries no underscore, so it is checked as a literal).
-  receivedHandled: ["new_session", "update_session", "receiver_action", "app_message", "v2_message"],
+  receivedHandled: ["new_session", "update_session", "receiver_action", "app_message", "v2_message", "custom_dial_launch"],
   // Types electron-cast sends that the SDK is not expected to read; informational only.
   receivedOptional: ["remove_session", "disconnect_session"],
   // Envelope and message field names. Presence of the identifier in the SDK is all that can be checked from text.
@@ -39,6 +39,8 @@ const DEPENDS = {
     "receiver", "action", "label", "friendlyName", "capabilities", "volume", "isActiveInput", "displayStatus", "receiverType",
     "appId", "displayName", "appImages", "transportId", "namespaces", "statusText", "senderApps",
     "status", "supportedMediaCommands", "level", "muted",
+    // DIAL: the custom_dial_launch / dial_app_info bodies (src/dial/route-provider.ts).
+    "appState", "extraData", "doLaunch", "launchParameter",
   ],
   // v2_message subtypes: handled locally, forwarded as media requests, and the reply the SDK reads.
   v2Local: ["SET_VOLUME", "STOP"],
@@ -50,7 +52,9 @@ const DEPENDS = {
   mediaCommandsOptional: ["queue_next", "queue_prev"],
   // Presentation URL: the `cast:<appId>?...` form and the parameters electron-cast reads from it.
   urlForm: "cast:",
-  urlParams: ["capabilities", "clientId", "autoJoinPolicy", "defaultActionPolicy", "launchTimeout"],
+  urlParams: ["capabilities", "clientId", "autoJoinPolicy", "defaultActionPolicy", "launchTimeout", "dialPostData"],
+  // The DIAL source the SDK adds next to the Cast one when the page passes a dialRequest.
+  dialUrlForm: "cast-dial:",
   // Presentation ids and members the SDK uses against the stand-in Presentation API.
   presentationIds: ["cast-session_", "auto-join"],
   presentationMembers: ["PresentationRequest", "defaultRequest", "reconnect", "onconnect", "onclose", "onterminate", "onmessage"],
@@ -108,6 +112,7 @@ export function check(src, baseline) {
   miss("presentation id prefix(es)", DEPENDS.presentationIds, has.literal);
   miss("Presentation API member(s)", DEPENDS.presentationMembers, has.word);
   if (!has.literal(src, DEPENDS.urlForm)) failures.push(`the SDK no longer builds "${DEPENDS.urlForm}<appId>" presentation URLs`);
+  if (!has.literal(src, DEPENDS.dialUrlForm)) failures.push(`the SDK no longer builds "${DEPENDS.dialUrlForm}<app>" DIAL presentation URLs`);
   for (const p of DEPENDS.urlParams) {
     if (!found.urlParams.includes(p)) failures.push(`the SDK no longer sets the "${p}" presentation URL parameter`);
   }
@@ -126,7 +131,7 @@ export function check(src, baseline) {
   const freshParams = found.urlParams.filter((p) => !baseParams.has(p) && !DEPENDS.urlParams.includes(p));
   if (freshParams.length > 0) warnings.push(`new .set("...") parameter name(s): ${freshParams.join(", ")} (may be new presentation URL parameters)`);
   const baseForms = new Set([...(baseline.urlForms ?? []), ...(baseline.knownUnhandled?.urlForms ?? [])]);
-  const freshForms = found.urlForms.filter((f) => !baseForms.has(f) && f !== DEPENDS.urlForm);
+  const freshForms = found.urlForms.filter((f) => !baseForms.has(f) && f !== DEPENDS.urlForm && f !== DEPENDS.dialUrlForm);
   if (freshForms.length > 0) warnings.push(`new presentation URL form(s) electron-cast does not parse: ${freshForms.join(", ")}`);
 
   const baseAll = new Set([...(baseline.sent ?? []), ...(baseline.received ?? []), ...Object.values(baseline.knownUnhandled ?? {}).flat()]);

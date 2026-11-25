@@ -256,6 +256,34 @@ Nothing is sent and no socket is opened until you call `manager.start()`. To tur
 
 With `presentation: false` only `mode: "chromecast"` pages are served.
 
+## SSDP and DIAL HTTP exposure
+
+DIAL is on by default, as in Chrome. `dial: false` removes everything in this section.
+
+- **SSDP.** `manager.start()` also sends `M-SEARCH` requests to `239.255.255.250:1900`, four times a second apart, on
+  every external IPv4 interface (as for mDNS, VPN and virtual adapters included), every 120 s. Each search uses a UDP
+  socket on an ephemeral port that is open only while a cycle runs (about 5 s) and takes unicast answers. The search
+  tells the networks that this machine looks for DIAL devices, and its `USER-AGENT` carries the Chromium version and the
+  OS. Nothing is advertised.
+- **Answers are untrusted.** An answer counts only if its `LOCATION` is an http(s) URL whose host is an IP literal in
+  private, loopback or link-local space and equals the address the answer came from, so a host cannot point electron-cast
+  at a third party. The `Application-URL` header of the description is held to the same rule, and so is the `Location`
+  of a launch (otherwise the stop falls back to `<app url>/run`). Descriptions and app info are read with a reader that
+  refuses entity declarations (so no entity expansion), caps nesting at 64 and stops at 256 KiB. At most 256 devices are
+  kept. Show a DIAL sink's name as plain text: it is whatever the device's description says.
+- **HTTP to devices.** Without any page involved, each device found is sent one `GET` of its description (again every
+  12 hours or when its `CONFIGID` changes). A page that watches the availability of a `cast-dial:` source makes
+  electron-cast `GET` that app's info from each device. Launching sends a `POST` and stopping a `DELETE`, after the user
+  chose the device in `selectDevice`. These requests are plain HTTP, as the DIAL specification has it; they carry
+  `Origin: package:Google-Chrome.<major>.<OS>`, follow no redirect, send no cookies and use no proxy.
+- **What a page can do.** It can ask for the availability of any app name (letters, digits and `-._~`) and so learn
+  whether any of the user's DIAL devices has that app (at most 32 apps are asked about at once), unless the app is one Chrome limits to certain origins and the
+  page's origin is not one of them. It can launch only on a device the user picked, with any `dialPostData` and launch
+  parameter it likes, which the device's app receives. It can send `STOP`, which stops its own route's app. As in Chrome,
+  closing a page does not stop a launched app.
+- **DIAL has no authentication.** Unlike Cast it has no device authentication and no TLS: anyone on the network can
+  answer a search with a name of their choosing, and the user then sees it in the picker. This matches Chrome.
+
 ## Dependencies and supply chain
 
 electron-cast has no runtime dependencies. It uses Node's `tls`, `dgram` and `crypto`; device authentication,

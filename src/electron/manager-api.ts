@@ -11,17 +11,19 @@ import type { DefaultPresentationRequests, PresentationObserver, PresentationReq
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
 
-/** Chrome's `SinkIconType` values that apply to Cast devices. */
-export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group";
+/** Chrome's `SinkIconType` values that apply to Cast and DIAL devices (a DIAL sink is `generic`). */
+export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group" | "generic";
 
 /** A device a route can be created on (Chrome: `media_router::MediaSink`). */
 export interface MediaSink {
   id: string;
+  /** Chrome: `MediaSink::provider_id`. A DIAL sink's id is `dial:<uuid>`. */
+  providerId: "cast" | "dial";
   name: string;
   /** The device model. electron-cast's own: Chrome's MediaSink has none (the model is `CastSinkExtraData::model_name`). */
   description: string;
   iconType: SinkIconType;
-  /** The discovered device behind the sink. */
+  /** The discovered device behind the sink; a DIAL sink's has `dial` set. */
   device: CastDevice;
 }
 
@@ -47,9 +49,11 @@ export interface MediaSinksObserver {
 
 /** A live session on a sink (Chrome: `media_router::MediaRoute`; a session is what Chrome's Cast provider routes to). */
 export interface MediaRoute {
-  /** The session id (Chrome: `media_route_id`). */
+  /** The session id (Chrome: `media_route_id`); a DIAL route's is Chrome's `urn:x-org.chromium:media:route:...`. */
   id: string;
-  /** `cast:<appId>`, the Cast source URN's scheme and app id (Chrome: `media_source`). */
+  /** Which provider routes it. Chrome: `MediaRoute::provider_id`. */
+  providerId: "cast" | "dial";
+  /** `cast:<appId>`, the Cast source URN's scheme and app id; `cast-dial:<app>?...` for DIAL (Chrome: `media_source`). */
   mediaSource: string;
   sinkId: string;
   /** The device's name (Chrome: `media_sink_name`, set with `set_media_sink_name`). */
@@ -198,6 +202,8 @@ export function presentationUrlForDevice(
   /** When given, the app must also be known to be available on the device (`GET_APP_AVAILABILITY`). */
   appAvailable?: (device: CastDevice, appId: string) => boolean | undefined,
 ): string | null {
+  // A DIAL sink runs no Cast app URL; the cast-dial: sources it does run are the DIAL provider's (not queried here yet)
+  if (device.dial !== undefined) return null;
   for (const url of urls) {
     const parsed = parsePresentationUrl(url);
     if (parsed !== null && capsMatch(device, parsed.capabilities)
@@ -214,9 +220,28 @@ export interface AppAvailability {
 
 /** The sink for a discovered device. */
 export function toMediaSink(device: CastDevice): MediaSink {
+  // A DIAL sink is `SinkIconType::GENERIC` (dial_media_sink_service_impl.cc).
+  if (device.dial !== undefined) {
+    return { id: device.id, providerId: "dial", name: device.name, description: device.model, iconType: "generic", device: { ...device } };
+  }
   // GetCastSinkIconType (media_sink_util.cc): video_out first, then a multizone group, else audio.
   const iconType: SinkIconType = (device.capabilities & 1) !== 0 ? "cast" : (device.capabilities & 32) !== 0 ? "cast_audio_group" : "cast_audio";
-  return { id: device.id, name: device.name, description: device.model, iconType, device: { ...device } };
+  return { id: device.id, providerId: "cast", name: device.name, description: device.model, iconType, device: { ...device } };
+}
+
+/** Two device sources as one: the devices of both, and the events of both. */
+export function combineSources(a: DeviceSource, b: DeviceSource): DeviceSource {
+  return {
+    devices: () => [...a.devices(), ...b.devices()],
+    on(event, listener) {
+      a.on(event, listener);
+      b.on(event, listener);
+    },
+    off(event, listener) {
+      a.off(event, listener);
+      b.off(event, listener);
+    },
+  };
 }
 
 /**
@@ -285,7 +310,7 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
         if (urls === undefined || availability === undefined) return;
         const now = Date.now();
         for (const d of source.devices()) {
-          if ((eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
+          if (d.dial !== undefined || (eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
           for (const url of urls) {
             const parsed = parsePresentationUrl(url);
             if (parsed === null || !capsMatch(d, parsed.capabilities) || availability.cached(d, parsed.appId) !== undefined) continue;
@@ -372,7 +397,8 @@ export function createManagerApi(
   const unobserve = host.observeSessions(() => routeObservers.notify());
 
   const controllers = createMediaControllers(
-    { ...host, hasRoute: (id) => host.mediaRoutes().some((r) => r.id === id) },
+    // DialMediaRouteProvider::BindMediaController is NOTIMPLEMENTED and answers false: a DIAL route has no controller
+    { ...host, hasRoute: (id) => host.mediaRoutes().some((r) => r.id === id && r.providerId !== "dial") },
     (code, message) => new MediaRouteError(code, message),
   );
   const need = (routeId: string): void => {
