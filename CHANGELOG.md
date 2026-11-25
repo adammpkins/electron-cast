@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Casting from the app's own UI, on the page's default request.** In Chrome a page sets
+  `navigator.presentation.defaultRequest = new PresentationRequest(urls)`; the Cast dialog, opened from the browser's
+  menu or toolbar, offers it as a source, and when the user picks a device Chrome starts the presentation and fires
+  `connectionavailable` on the default request, which Google's Cast SDK adopts. electron-cast now does the same:
+  - The page-side stand-in reports `navigator.presentation.defaultRequest` (set, replaced, cleared) to the main
+    process, and only the window's main frame counts. A navigation or a destroyed window clears it.
+  - New `CastManager` methods, named after Chrome's `WebContentsPresentationManager` and `MediaRouterUI`:
+    `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`,
+    `addPresentationObserver(webContentsId, observer)` and `startCasting(sinkId, { webContentsId })`, which starts the
+    default request on a sink with no picker and no user gesture. The page gets `connectionavailable` with a working
+    connection and the route appears in routes observers. It rejects with `MediaRouteError` carrying Chrome's
+    `RouteRequestResultCode` (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`,
+    `unknown_error`) or `unable_to_cast`.
+  - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL. New types
+    `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
+  - `navigator.presentation.defaultRequest` is now a nullable attribute as in Blink: it takes a `PresentationRequest`
+    or `null` and throws `TypeError` for anything else. `connectionavailable` fires after the current task, as Blink
+    enqueues it.
+  - `mode: "chromecast"` is unchanged.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge

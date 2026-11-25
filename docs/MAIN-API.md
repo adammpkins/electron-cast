@@ -22,6 +22,8 @@ Checked against Chromium `main` (November 2026). Paths are relative to the Chrom
 | `terminateRoute(id)` | `MediaRouter::TerminateRoute`, called by the Cast dialog's stop (`MediaRouterUI::StopCasting`) and by the global media controls' `CastMediaNotificationItem::StopCasting`; `CastActivityManager::TerminateSession` stops the receiver app | `media_router.h`, `chrome/browser/ui/media_router/media_router_ui.cc`, `chrome/browser/ui/global_media_controls/cast_media_notification_item.cc`, `chrome/browser/media/router/providers/cast/cast_activity_manager.cc` |
 | `detachRoute(id)` | `MediaRouter::DetachRoute` exists, but the Cast provider does not implement it (`CastMediaRouteProvider::DetachRoute` is `NOTIMPLEMENTED`): a page lets go through its Presentation connection closing (`CastSessionClientImpl::DidClose`). No counterpart for "every page lets go" | `media_router.h`, `chrome/browser/media/router/providers/cast/cast_media_route_provider.cc`, `cast_session_client_impl.cc` |
 | `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController` binds a `mojom::MediaController` (`SetVolume`, `SetMute`); on a Cast route `CastMediaController` sends a receiver `SET_VOLUME` request. Used by the global media controls (`CastMediaNotificationItem::SetVolume / SetMute`, controller bound in `cast_media_notification_producer.cc`), not by the Cast dialog. There is no class named `MediaRouteController` in current Chromium | `components/media_router/common/mojom/media_controller.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `chrome/browser/ui/global_media_controls/` |
+| `hasDefaultPresentationRequest(webContentsId)`, `getDefaultPresentationRequest(webContentsId)`, `addPresentationObserver(webContentsId, observer)` | `WebContentsPresentationManager` (`HasDefaultPresentationRequest`, `GetDefaultPresentationRequest`, `AddObserver`; implemented by `ControllerPresentationServiceDelegateImpl`, one per `WebContents`), `content::PresentationObserver::OnDefaultPresentationChanged`, `content::PresentationRequest` (`render_frame_host_id`, `presentation_urls`, `frame_origin`) | `components/media_router/browser/presentation/web_contents_presentation_manager.h`, `controller_presentation_service_delegate_impl.cc`, `content/public/browser/presentation_request.h` |
+| `startCasting(sinkId, { webContentsId, castMode: "presentation" })` | `MediaRouterUI::StartCasting(sink_id, MediaCastMode::PRESENTATION)`, then `MediaRouteStarter::CreateRouteParameters` (the source for the sink comes from the default request's URLs; none gives an "unable to cast" issue), `StartRoute` (`MediaRouter::CreateRoute`, with `WebContentsPresentationManager::OnPresentationResponse` as the response callback) and `OnPresentationResponse`, which adds the presentation and runs the default-presentation callback; `RouteRequestResultCode` is the error set | `chrome/browser/ui/media_router/media_router_ui.cc`, `media_route_starter.cc`, `components/media_router/common/mojom/route_request_result_code.mojom` |
 | `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
 | the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
@@ -117,8 +119,92 @@ The observer is called at once with the current list, and is dropped when `picke
 with two parameters keep working; they just ignore the third. If no device matches when the page asks, the request
 still fails with `receiver_unavailable` before the picker opens.
 
-## Starting a cast from main
+## Casting from the app's own UI
 
-Not supported: a cast needs the page's own SDK state and a user gesture, as in Chrome. To start one from the app's
-menu or tray, tell the page to press its own Cast button (for example `webContents.executeJavaScript` clicking the
-site's cast button, or a message the page listens for). The route then appears in the observers above.
+In Chrome a page that wants to be castable from the browser's Cast dialog sets
+`navigator.presentation.defaultRequest = new PresentationRequest(urls)`, and Google's Cast SDK listens for
+`connectionavailable` on it. The dialog (opened from the toolbar or menu, not from the page) lists that request as its presentation
+source, and when the user picks a device Chrome starts the presentation and fires `connectionavailable` on the default
+request with the new connection; the SDK adopts the session. The app's own cast UI does the same here:
+
+```ts
+const id = win.webContents.id;
+
+// is the page castable from my UI? (has it set defaultRequest?)
+manager.hasDefaultPresentationRequest(id);
+manager.getDefaultPresentationRequest(id);   // { webContentsId, presentationUrls, frameOrigin } or null
+const off = manager.addPresentationObserver(id, {
+  onDefaultPresentationChanged(request) { menu.setCastEnabled(request !== null); },
+});
+
+// the devices that can run it, kept current (the dialog's sinks observers for its presentation source)
+manager.registerMediaSinksObserver(
+  { onSinksUpdated: (sinks) => menu.setDevices(sinks) },
+  { presentationUrls: manager.getDefaultPresentationRequest(id)?.presentationUrls ?? [] },
+);
+
+// the user picked a device in my menu
+try {
+  const route = await manager.startCasting(sink.id, { webContentsId: id });   // the page's connectionavailable fires
+} catch (err) {
+  if (err instanceof MediaRouteError) showCastError(err.code, err.message);
+}
+```
+
+What happens, with Chrome's counterparts:
+
+1. **The page sets `defaultRequest`.** Blink's `Presentation::setDefaultRequest` sends the request's URLs (none for
+   `null`) to the browser on every set, and the stand-in does the same. `PresentationServiceImpl::SetDefaultPresentationUrls`
+   ignores a frame that is not the outermost document and a list equal to the current one, then hands the request to
+   `ControllerPresentationServiceDelegateImpl::SetDefaultPresentationUrls`, which keeps one default request per
+   `WebContents` and tells its observers. electron-cast keeps one per window, from its main frame only (an iframe's
+   `defaultRequest` is not reported to the app, as in Chrome), keyed by `webContents.id`.
+2. **It is cleared** when the page sets `null` (or a request with no URLs), navigates to another document
+   (`PresentationServiceImpl::DidFinishNavigation` → `Reset` → `ClearDefaultPresentationRequest`; a same-document
+   navigation keeps it) or goes away. Observers then get `null`.
+3. **`startCasting(sinkId, { webContentsId })`** is `MediaRouterUI::StartCasting(sink_id, PRESENTATION)`.
+   `MediaRouteStarter::CreateRouteParameters` needs a presentation source for the sink: the first of the request's URLs
+   the sink can run (`QueryResultManager::GetSourceForCastModeAndSink`). With no default request, an unknown sink, or no
+   URL the sink suits (a Cast URL that is not one, or capabilities the sink lacks), Chrome shows an "unable to cast"
+   issue and starts nothing; here the promise rejects with `unable_to_cast`. Otherwise `MediaRouter::CreateRoute` runs,
+   here a launch on the sink with no picker. The session is a route like any other: routes observers see it, and it is
+   owned by the window's main frame.
+4. **`WebContentsPresentationManager::OnPresentationResponse`** adds the presentation, and only when the default
+   request is still the one that was started (`ArePresentationRequestsEqual`) does it run the default-presentation
+   callback: `PresentationServiceImpl::OnDefaultPresentationStarted` →
+   `PresentationController::OnDefaultPresentationStarted` → `ControllerPresentationConnection::Create`, which
+   enqueues `connectionavailable` on the page's current `defaultRequest` (and does nothing if it is null). The stand-in
+   does the same: the event fires after the current task with a `connected` connection whose first messages are
+   `receiver_action` and `new_session`, which Google's SDK turns into its session. If the page replaced the request during the
+   launch, the session stays up as a route but the page is not handed a connection (Chrome likewise records the
+   presentation and tells nobody).
+
+There is **no user gesture** on this path. The gesture check (`HasTransientUserActivation`) is in
+`PresentationServiceImpl::StartPresentation`, which serves the page's own `PresentationRequest.start()`; the dialog's
+route creation does not call it, because the browser UI is the user's action. The app is trusted the same way: only
+code in the main process can call `startCasting`, never a page.
+
+Errors are `MediaRouteError`s whose `code` is Chrome's `RouteRequestResultCode` in lower case, from the cause the
+launch reports: `timed_out` (`TIMED_OUT`, the app did not launch in time), `sink_not_found` (`SINK_NOT_FOUND`, the device
+cannot be reached), `invalid_origin` (`INVALID_ORIGIN`, `allowOrigin` refuses the page), `cancelled` (`CANCELLED`, the page
+navigated or went away during the launch), `redundant_request` (`REDUNDANT_REQUEST`, the window already has a start in
+progress, for the page's own or the app's) and `unknown_error` (`UNKNOWN_ERROR`). `unable_to_cast` is the dialog's own
+check, above. `TypeError` and `RangeError` are thrown, as elsewhere here, for arguments of the wrong type or a cast mode
+other than `"presentation"`, the only one electron-cast has (no tab or desktop mirroring).
+
+Differences from Chrome:
+
+- `getDefaultPresentationRequest` returns `null` without a request, where Chrome calls it an error. Observers are not
+  called on registration, like Chrome's, so read the current request first. They are called with `null` when the window is
+  destroyed, which Chrome does not announce.
+- A `PresentationRequest` has `webContentsId` where Chrome has `render_frame_host_id`: only the outermost frame can own
+  one, so the window identifies it.
+- The sinks for a presentation source are asked for with `MediaSinksQuery.presentationUrls`; Chrome builds a
+  `MediaSource` per URL. A sink matches when the URL is a Cast URL (`https://google.com/cast#__castAppId__=...` or
+  `cast:<appId>`) and the sink has the capabilities its app id names. Only the capabilities are checked, as for
+  `getAvailability()`.
+- Casting to a sink where the window's page already has a session for the app returns that session and hands the page a
+  new connection to it, as the page's own picker path does here. Chrome's handling of a second route on one sink was
+  not checked.
+- `startCasting` uses the launch timeout in the request's URL (`__castLaunchTimeout__`), else 60 s, as the page's own
+  `start()` does; Chrome passes `GetRouteRequestTimeout(cast_mode)` to `CreateRoute`.

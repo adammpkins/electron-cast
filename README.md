@@ -179,7 +179,8 @@ there describes the top-level await form of the same hang).
   sessions open on the device and rejoins them (auto-join, `origin_scoped` or `tab_and_origin_scoped`). A page that
   closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
 - A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
-  its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
+  its volume, keep a picker up to date while it is open, and cast from the app's own menu or tray on the page's
+  `navigator.presentation.defaultRequest`, as Chrome's Cast dialog does ([docs/MAIN-API.md](docs/MAIN-API.md)).
 
 **Default mode (Google's SDK):**
 
@@ -222,7 +223,7 @@ The package root exports every layer, if you want to use them without Electron:
 
 See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
 
-To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
+To observe and control casting from the main process (devices, sessions, volume, a live picker, casting from the app's own UI), see [docs/MAIN-API.md](docs/MAIN-API.md).
 More docs: [API reference](docs/API.md), [security notes](SECURITY.md), [changelog](CHANGELOG.md) and a
 [runnable example app](examples/electron-app).
 
