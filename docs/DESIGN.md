@@ -226,7 +226,7 @@ the frame is destroyed or commits a non-same-document navigation (`DidFinishNavi
 (`components/media_router/browser/presentation/controller_presentation_service_delegate_impl.cc`) keeps one
 `PresentationFrame` per `GlobalRenderFrameHostId`, and `PresentationFrame::Reset` detaches its routes rather than
 terminating them, which is the "park" here. Only `SetDefaultPresentationUrls` is limited to the outermost document
-(`is_outermost_document_`); electron-cast has no `defaultRequest` support, so that rule has no counterpart.
+(`is_outermost_document_`); electron-cast keeps the same rule for the default request (see [Default presentation request](#default-presentation-request)).
 
 electron-cast does the same:
 
@@ -255,6 +255,58 @@ electron-cast does the same:
 Not done: Chrome also cancels a pending start whose frame navigated to another origin while the picker was open
 (`HandleStartPresentationResponse` in the controller delegate); here a pending start is cancelled when the frame is
 removed or navigates, not on an origin change alone.
+
+### Default presentation request
+
+Setting `navigator.presentation.defaultRequest` makes a page castable from the browser's own Cast dialog. Chromium
+(checked against `main`, November 2026):
+
+- `third_party/blink/renderer/modules/presentation/presentation.cc`, `Presentation::setDefaultRequest`: stores the
+  request and always calls `PresentationService::SetDefaultPresentationUrls` with its URLs, or an empty list for
+  `null`. The IDL (`presentation.idl`) types it `PresentationRequest?`, so another value is a `TypeError`.
+- `content/browser/presentation/presentation_service_impl.cc`, `SetDefaultPresentationUrls`: ignored unless the frame is
+  the outermost document; ignored when the list equals the one already set; otherwise builds a
+  `content::PresentationRequest` (frame id, URLs, last committed origin) and passes it, with
+  `OnDefaultPresentationStarted` as the callback, to `ControllerPresentationServiceDelegate::SetDefaultPresentationUrls`.
+  `Reset` (a cross-document commit in the same frame, the frame going away) clears it.
+- `components/media_router/browser/presentation/controller_presentation_service_delegate_impl.cc`: one delegate per
+  `WebContents`, holding a single `default_presentation_request_`. `SetDefaultPresentationUrls` with no URLs clears it,
+  otherwise stores it and calls `NotifyDefaultPresentationChanged`; `Reset` clears it only if the resetting frame owns it.
+  `HasDefaultPresentationRequest` / `GetDefaultPresentationRequest` read it (`WebContentsPresentationManager`).
+- `chrome/browser/ui/media_router/media_route_starter.cc`: `InitPresentationSources` and `OnDefaultPresentationChanged` turn
+  the request's URLs into the `PRESENTATION` cast mode's sources; `CreateRouteParameters` finds the source for a sink
+  (null, hence the "unable to cast" issue in `MediaRouterUI::CreateRoute`, when there is none); `StartRoute` calls
+  `MediaRouter::CreateRoute` with `WebContentsPresentationManager::OnPresentationResponse` as the callback. Nothing on
+  this path checks a user gesture.
+- `OnPresentationResponse` (the delegate): ignores a result without a route or whose URL is not among the request's;
+  records the presentation; and, if the default request equals the one started (`ArePresentationRequestsEqual`), runs
+  the callback with a `PresentationConnectionResult`. `PresentationServiceImpl::OnDefaultPresentationStarted` forwards
+  it, and `PresentationController::OnDefaultPresentationStarted` (Blink) returns if `defaultRequest` is null, else
+  `ControllerPresentationConnection::Create`, which enqueues `connectionavailable` on the request as a task.
+
+electron-cast:
+
+- The stand-in's `navigator.presentation.defaultRequest` is an accessor with the same semantics, and sends
+  `setDefaultRequest { urls }` over the bridge on every set. A `connectionavailable` event from main fires on the current
+  default request after the current task; with no default request the connection is dropped (and closed in main), as Blink drops it.
+- `main.ts` keeps a `DefaultPresentationRequests` (`default-presentation.ts`) keyed by `webContents.id`; a call from a
+  subframe is ignored, an equal URL list is a no-op, an empty one clears. A main frame navigation or a destroyed window
+  clears it (through the same `senderGone` that ends the page's connections).
+- Chrome's launch details (`chrome/browser/media/router/providers/cast/cast_activity_manager.cc`,
+  `cast_media_route_provider.cc`, `cast_app_availability_tracker.cc`, `cast_app_discovery_service.cc`,
+  `components/media_router/common/providers/cast/cast_media_source.cc`, `chrome/browser/ui/media_router/media_router_ui_helper.cc`):
+  `LaunchSession` launches even on a sink with a route and `DoLaunchSession` stops the frame's earlier route
+  (`routes_by_frame_`); the launch timeout is the source's `__castLaunchTimeout__` or 60 s, not the dialog's 20 s
+  (`GetRouteRequestTimeout`), which the provider ignores; a sink is offered for a source only when the device answered
+  `GET_APP_AVAILABILITY` with the app and has the capabilities (`GetAvailableSinks`). `CastSessionService.checkAppAvailability`
+  asks and caches per device and app: an available answer is kept, an unavailable one is asked again after 60 s
+  (`kRefreshThreshold`, `ShouldRefreshAppAvailability`), an error is not cached (`kUnknown`), and an answer that was in flight
+  when the device went away and came back is dropped (a generation counter per device).
+- `startCasting` follows `CreateRouteParameters` (a source for the sink, else `unable_to_cast`), launches through the
+  session service's `requestSessionOnDevice` (the same code as `requestSession` with the picker's answer already
+  known, reachable from main only), registers the connection like a page's `start()`, and announces it with a
+  `connectionavailable` bridge event sent before the first message. As in `OnPresentationResponse`, it is announced only while the
+  default request is still the one started. The route is a normal session, so routes observers need nothing more.
 
 ## Electron layer (`src/electron/`)
 

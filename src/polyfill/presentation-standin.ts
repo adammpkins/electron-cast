@@ -27,6 +27,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
   const connections = new Map<string, any>();
   const watches = new Map<string, any>();
   let pendingStart = false;
+  let defaultRequest: any = null;
 
   // A queued message may be delivered only once the connection is "connected" AND a message handler
   // exists (an onmessage value or an addEventListener("message") listener).
@@ -241,21 +242,41 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       return;
     }
     if (e.type === "connectionavailable") {
+      // PresentationController::OnDefaultPresentationStarted: with no default request the connection is dropped
+      const req = defaultRequest;
+      if (!req) {
+        bridge.call("close", { connectionId: e.connectionId });
+        return;
+      }
       const conn = new PresentationConnection(e.connectionId, "connected");
       conn.id = e.id ?? "";
       conn.url = e.url ?? "";
       connections.set(e.connectionId, conn);
-      const pres = g.navigator ? g.navigator.presentation : null;
-      const req = pres ? pres.defaultRequest : null;
-      if (req instanceof PresentationRequest) {
+      // ControllerPresentationConnection::Create enqueues the event, so it fires after the current task
+      ST(() => {
         const ev = new EV("connectionavailable");
         ev.connection = conn;
         req.dispatchEvent(ev);
-      }
+      }, 0);
     }
   });
 
-  const pres: any = { defaultRequest: null, receiver: null };
+  // Presentation::setDefaultRequest: the request is kept (nullable attribute, so undefined is null) and its URLs, or
+  // none for null, go to the browser on every set; the browser ignores an unchanged list and a frame that is not outermost.
+  const pres: any = { receiver: null };
+  Object.defineProperty(pres, "defaultRequest", {
+    configurable: true,
+    enumerable: true,
+    get() { return defaultRequest; },
+    set(value: any) {
+      const next = value === undefined ? null : value;
+      if (next !== null && !(next instanceof PresentationRequest)) {
+        throw new TypeError("Failed to set the 'defaultRequest' property on 'Presentation': The provided value is not of type 'PresentationRequest'.");
+      }
+      defaultRequest = next;
+      Promise.resolve(bridge.call("setDefaultRequest", { urls: next === null ? [] : [...next.urls] })).catch(() => {});
+    },
+  });
   if (g.navigator) {
     Object.defineProperty(g.navigator, "presentation", {
       configurable: true,

@@ -38,9 +38,12 @@ export interface PresentationConnectionHandle {
 
 /** An error thrown by the handler; `name` is a DOMException name the page can map onto. */
 export class PresentationError extends Error {
-  constructor(name: string, message: string) {
+  /** The bridge code behind it (`timeout`, `cancel`, ...), for callers that are not a page. */
+  readonly bridgeCode: string | undefined;
+  constructor(name: string, message: string, bridgeCode?: string) {
     super(message);
     this.name = name;
+    this.bridgeCode = bridgeCode;
   }
 }
 
@@ -183,19 +186,21 @@ export class CastPresentationHandler {
   }
 
   /** Launches the app and resolves with a connection carrying receiver_action then new_session. */
-  async startPresentation(req: PresentationRequestInfo): Promise<PresentationConnectionHandle> {
+  async startPresentation(req: PresentationRequestInfo & { deviceId?: string }): Promise<PresentationConnectionHandle> {
     const parsed = parsePresentationUrl((req.urls[0] ?? ""));
     if (parsed === null) throw new PresentationError("NotSupportedError", `Unsupported presentation URL: ${(req.urls[0] ?? "")}`);
     const sender = this.senderOf(req.senderId, req.origin);
-    const res = await this.service.handle(sender, "requestSession", {
+    // With a deviceId the app's own UI already chose the sink (Chrome's dialog), so there is no picker
+    const res = await this.service.handle(sender, req.deviceId === undefined ? "requestSession" : "requestSessionOnDevice", {
       appId: parsed.appId,
       capabilities: [],
       timeoutMs: parsed.launchTimeout ?? 60000,
+      ...(req.deviceId === undefined ? {} : { deviceId: req.deviceId }),
     });
     if (!res.ok) {
-      if (res.code === "cancel") throw new PresentationError("AbortError", res.description ?? "The user cancelled the request");
-      if (res.code === "receiver_unavailable") throw new PresentationError("NotFoundError", res.description ?? "No receivers are available");
-      throw new PresentationError("OperationError", res.description ?? res.code);
+      if (res.code === "cancel") throw new PresentationError("AbortError", res.description ?? "The user cancelled the request", res.code);
+      if (res.code === "receiver_unavailable") throw new PresentationError("NotFoundError", res.description ?? "No receivers are available", res.code);
+      throw new PresentationError("OperationError", res.description ?? res.code, res.code);
     }
     const s = res.value as SessionSnapshot;
     const clientId = parsed.clientId ?? randomBytes(16).toString("hex");

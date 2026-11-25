@@ -93,6 +93,41 @@ const NO_GESTURE_PAGE = `
   return out;
 `;
 
+// What Google's Cast SDK does: set the page's default request and listen for the connection the browser starts on it
+const DEFAULT_REQUEST_PAGE = `
+  window.__def = { connections: [], messages: [] };
+  const request = new PresentationRequest([${JSON.stringify(CAST_URL)}]);
+  request.addEventListener("connectionavailable", (e) => {
+    const connection = e.connection;
+    window.__def.connections.push(connection);
+    connection.addEventListener("message", (m) => window.__def.messages.push(JSON.parse(m.data)));
+  });
+  navigator.presentation.defaultRequest = request;
+  return { set: navigator.presentation.defaultRequest === request };
+`;
+const DEFAULT_REQUEST_RESULT = `
+  const waitFor = async (what, check) => {
+    for (let i = 0; i < 200; i++) {
+      if (check()) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("page: timed out waiting for " + what);
+  };
+  await waitFor("connectionavailable", () => window.__def.connections.length > 0);
+  await waitFor("new_session", () => window.__def.messages.some((m) => m.type === "new_session"));
+  const connection = window.__def.connections[0];
+  const out = {
+    count: window.__def.connections.length,
+    isConnection: connection instanceof PresentationConnection,
+    state: connection.state,
+    id: connection.id,
+    messageTypes: window.__def.messages.map((m) => m.type),
+    appId: window.__def.messages.find((m) => m.type === "new_session").message.appId,
+  };
+  navigator.presentation.defaultRequest = null;
+  return out;
+`;
+
 const CHROMECAST_PAGE = `
   const cast = chrome.cast;
   const out = { hasChromeCast: typeof cast === "object" && cast !== null, hasPresentationBridge: "__electronCastPresentationBridge" in window };
@@ -208,6 +243,54 @@ async function main() {
     assert.equal(clients.length, 1, "the device's one channel is kept open and reused, as Chrome does");
     assert.equal(clients[0].calls.filter((c) => c === `launch ${APP_ID}`).length, 2, "requestSession() did not launch on the open channel");
     pass("requestSession() with a user gesture resolved a session from the fake client");
+    win.destroy();
+  }
+
+  // 3. casting started from the app's own UI on the page's default presentation request
+  {
+    const win = await openPage("presentation");
+    const id = win.webContents.id;
+    assert.equal(cast.hasDefaultPresentationRequest(id), false);
+    const changes = [];
+    cast.addPresentationObserver(id, { onDefaultPresentationChanged: (r) => changes.push(r) });
+    const before = clients.length;
+    const set = await runInPage(win, DEFAULT_REQUEST_PAGE, false);
+    assert.equal(set.set, true);
+    for (let i = 0; i < 200 && !cast.hasDefaultPresentationRequest(id); i++) await new Promise((r) => setTimeout(r, 25));
+    const request = cast.getDefaultPresentationRequest(id);
+    assert.deepEqual(request, { webContentsId: id, presentationUrls: [CAST_URL], frameOrigin: PAGE_ORIGIN });
+    assert.deepEqual(changes, [request]);
+    pass("the page's default request reached main");
+    let sinks = [];
+    const stop = cast.registerMediaSinksObserver({ onSinksUpdated: (s) => { sinks = s; } }, { presentationUrls: request.presentationUrls });
+    for (let i = 0; i < 200 && sinks.length === 0; i++) await new Promise((r) => setTimeout(r, 25));  // the device is asked about the app
+    stop();
+    assert.deepEqual(sinks.map((s) => s.id), [TV.id]);
+    const routeLists = [];
+    cast.registerMediaRoutesObserver({ onRoutesUpdated: (r) => routeLists.push(r) });
+    const requestsBefore = requests.length;
+    const route = await cast.startCasting(TV.id, { webContentsId: id });
+    assert.equal(requests.length, requestsBefore, "the app's own start must not open the page's picker");
+    // one client only asked the device whether it has the app (Chrome's GET_APP_AVAILABILITY), the next launched it
+    const launcher = clients.slice(before).find((c) => c.calls.includes(`launch ${APP_ID}`));
+    assert.ok(launcher, "no client launched the app");
+    assert.ok(clients.slice(before).some((c) => c.calls.includes(`availability ${APP_ID}`)), "the app's availability was not asked");
+    assert.equal(route.appId, APP_ID);
+    assert.deepEqual(route.members, [id]);
+    assert.ok(routeLists.at(-1).some((r) => r.id === route.id), "the route is in the routes observers");
+    const out = await runInPage(win, DEFAULT_REQUEST_RESULT, false);
+    assert.equal(out.count, 1);
+    assert.equal(out.isConnection, true);
+    assert.equal(out.state, "connected");
+    assert.equal(out.id, `cast-session_${route.id}`);
+    assert.equal(out.appId, APP_ID);
+    assert.deepEqual(out.messageTypes.slice(0, 2), ["receiver_action", "new_session"]);
+    pass("startCasting() gave the page's connectionavailable listener a working connection");
+    for (let i = 0; i < 200 && cast.hasDefaultPresentationRequest(id); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(cast.hasDefaultPresentationRequest(id), false);
+    assert.equal(changes.at(-1), null);
+    pass("clearing defaultRequest reached main");
+    await cast.terminateRoute(route.id);
     win.destroy();
   }
 

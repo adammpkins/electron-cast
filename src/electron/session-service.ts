@@ -19,6 +19,9 @@ export function capabilityNames(bits: number): string[] {
   return names;
 }
 
+/** CastAppDiscoveryServiceImpl kRefreshThreshold: how long an "unavailable" answer stands. */
+export const APP_AVAILABILITY_REFRESH_MS = 60_000;
+
 /** A source of known Cast devices and their change events. */
 export interface DeviceSource {
   devices(): CastDevice[];
@@ -36,6 +39,8 @@ export interface CastClientLike {
   stop(sessionId: string): Promise<ReceiverStatus>;
   setVolume(volume: { level: number } | { muted: boolean }): Promise<ReceiverStatus>;
   getStatus(): Promise<ReceiverStatus>;
+  /** `GET_APP_AVAILABILITY`; a client without it is taken to have every app. */
+  getAppAvailability?(appIds: string[]): Promise<Record<string, boolean>>;
   connectTransport(transportId: string): void;
   closeTransport(transportId: string): void;
   on(event: "message", listener: (msg: ClientMessage) => void): unknown;
@@ -256,6 +261,11 @@ export class CastSessionService {
   private readonly launching = new Map<string, number>();
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
+  /** device id -> app id -> the answer and when it came (Chrome's CastAppAvailabilityTracker keeps the time too) */
+  private readonly appAvailability = new Map<string, Map<string, { available: boolean; at: number }>>();
+  /** Bumped when a device goes or comes back, so an answer that was in flight across it is dropped. */
+  private readonly appAvailabilityGeneration = new Map<string, number>();
+  private readonly appAvailabilityPending = new Map<string, Promise<boolean>>();
   private disposed = false;
 
   constructor(options: CastSessionServiceOptions) {
@@ -275,7 +285,11 @@ export class CastSessionService {
       this.tracker.attach(device.id, client);
       this.bindClient(client, device);
     });
-    this.sinkService.on("sinkRemoved", (device) => this.tracker.removeSink(device.id));
+    this.sinkService.on("channelOpened", ({ device }) => this.onSinkAddedOrUpdated(device));
+    this.sinkService.on("sinkRemoved", (device) => {
+      this.tracker.removeSink(device.id);
+      this.onSinkRemoved(device);
+    });
     this.tracker.on("sessionAddedOrUpdated", () => this.onTrackerChanged());
     this.tracker.on("sessionRemoved", () => this.onTrackerChanged());
   }
@@ -312,6 +326,9 @@ export class CastSessionService {
           return this.handleInitialize(sender, params);
         case "requestSession":
           return await this.handleRequestSession(sender, params);
+        case "requestSessionOnDevice":
+          // main only: the app's own UI chose the device (see the manager's startCasting)
+          return await this.handleRequestSession(sender, params, isRecord(params) && typeof params.deviceId === "string" ? params.deviceId : "");
         case "joinSession":
           return this.handleJoinSession(sender, params, true);
         case "joinRunningSession":
@@ -381,6 +398,69 @@ export class CastSessionService {
     this.pendingRequests.clear();
   }
 
+  /**
+   * `CastAppDiscoveryServiceImpl::OnSinkAddedOrUpdated`, which `MediaSinkServiceBase::AddOrUpdateSink` calls as soon as
+   * the channel opens (not after the 3 s report): answers in flight about an earlier channel are dropped.
+   */
+  private onSinkAddedOrUpdated(device: CastDevice): void {
+    this.appAvailabilityGeneration.set(device.id, (this.appAvailabilityGeneration.get(device.id) ?? 0) + 1);
+  }
+
+  /** `CastAppDiscoveryServiceImpl::OnSinkRemoved` -> `CastAppAvailabilityTracker::RemoveResultsForSink`. */
+  private onSinkRemoved(device: CastDevice): void {
+    this.appAvailability.delete(device.id);
+    this.appAvailabilityGeneration.set(device.id, (this.appAvailabilityGeneration.get(device.id) ?? 0) + 1);
+  }
+
+  /**
+   * What the device said about the app (`GET_APP_AVAILABILITY`), or undefined when it has to be asked: never asked, no
+   * answer last time, or "unavailable" longer than `APP_AVAILABILITY_REFRESH_MS` ago. This is
+   * CastAppDiscoveryServiceImpl::ShouldRefreshAppAvailability: kAvailable is kept, kUnavailable is asked again after
+   * kRefreshThreshold, kUnknown always.
+   */
+  cachedAppAvailability(device: CastDevice, appId: string): boolean | undefined {
+    const entry = this.appAvailability.get(device.id)?.get(appId);
+    if (entry === undefined) return undefined;
+    if (!entry.available && Date.now() - entry.at > APP_AVAILABILITY_REFRESH_MS) return undefined;
+    return entry.available;
+  }
+
+  /**
+   * Ask the device whether it has the app (`GET_APP_AVAILABILITY`) unless a still-valid answer is cached. An error or
+   * no answer is not cached (Chrome's kUnknown): this resolves false, and the next call asks again. Callers that ask on
+   * every change (sinks observers) must pace themselves; see createSinksObservers.
+   */
+  checkAppAvailability(device: CastDevice, appId: string): Promise<boolean> {
+    const known = this.cachedAppAvailability(device, appId);
+    if (known !== undefined) return Promise.resolve(known);
+    const generation = this.appAvailabilityGeneration.get(device.id) ?? 0;
+    const key = `${device.id}\n${generation}\n${appId}`;
+    const inFlight = this.appAvailabilityPending.get(key);
+    if (inFlight !== undefined) return inFlight;
+    const run = (async (): Promise<boolean> => {
+      // Asked over the device's kept-open channel (Chrome: the sink's CastSocket); no channel now is kUnknown
+      const client = this.sinkService.clientOf(device.id);
+      try {
+        if (client === undefined) return false;
+        const ask = client.getAppAvailability;
+        const available = ask === undefined ? true : (await ask.call(client, [appId]))[appId] === true;
+        // the device's channel was replaced or the sink went while it was being asked: this answer is about the old one
+        if ((this.appAvailabilityGeneration.get(device.id) ?? 0) === generation) {
+          let apps = this.appAvailability.get(device.id);
+          if (apps === undefined) this.appAvailability.set(device.id, (apps = new Map()));
+          apps.set(appId, { available, at: Date.now() });
+        }
+        return available;
+      } catch {
+        return false;
+      } finally {
+        this.appAvailabilityPending.delete(key);
+      }
+    })();
+    this.appAvailabilityPending.set(key, run);
+    return run;
+  }
+
   private handleInitialize(sender: SenderInfo, params: unknown): BridgeResult {
     const p = parseInitialize(params);
     if (p === null) return bad("invalid_parameter");
@@ -401,7 +481,8 @@ export class CastSessionService {
     return good({ available, sessions: joined });
   }
 
-  private async handleRequestSession(sender: SenderInfo, params: unknown): Promise<BridgeResult> {
+  /** With `presetDeviceId` the picker is skipped: that device is the choice (and must still be eligible). */
+  private async handleRequestSession(sender: SenderInfo, params: unknown, presetDeviceId?: string): Promise<BridgeResult> {
     const p = parseRequestSession(params);
     if (p === null) return bad("invalid_parameter");
     if (this.pendingRequests.has(sender.id)) return bad("invalid_parameter");
@@ -427,15 +508,20 @@ export class CastSessionService {
         request.session = { sessionId: current.app.sessionId, deviceId: current.device.id };
       }
       let choice: DeviceChoice;
-      // The picker gets live device updates until it answers; closing aborts its signal.
-      const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
-      pending.picker = pick;
-      try {
-        choice = await this.options.selectDevice(eligible, request, pick.context);
-      } catch (err) {
-        return bad("session_error", describe(err));
-      } finally {
-        pick.close();
+      if (presetDeviceId !== undefined) {
+        choice = eligible.find((d) => d.id === presetDeviceId) ?? null;
+        if (choice === null) return bad("receiver_unavailable");
+      } else {
+        // The picker gets live device updates until it answers; closing aborts its signal.
+        const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
+        pending.picker = pick;
+        try {
+          choice = await this.options.selectDevice(eligible, request, pick.context);
+        } catch (err) {
+          return bad("session_error", describe(err));
+        } finally {
+          pick.close();
+        }
       }
       if (choice === null) return bad("cancel");
       if (choice === "stop") {
@@ -446,7 +532,9 @@ export class CastSessionService {
         const stopped = await this.stopSessionRecord(rec, sender.id, true);
         return stopped.ok ? bad("cancel") : stopped;
       }
-      if (request.session !== undefined && choice.id === request.session.deviceId) {
+      // Chrome's CastActivityManager::LaunchSession launches anew even on a sink that has a route (the receiver's status
+      // update then removes the old one), so only the page's own picker reuses the sender's session
+      if (presetDeviceId === undefined && request.session !== undefined && choice.id === request.session.deviceId) {
         const rec = this.sessions.get(request.session.sessionId);
         if (rec !== undefined) return good(this.snapshotOf(rec));
       }
