@@ -5,6 +5,8 @@
 import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import type { DeviceSource } from "./session-service.ts";
+import type { MirroringCastMode, StartMirroringOptions } from "../mirroring/mirroring-manager.ts";
+import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource } from "../mirroring/routing.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast devices. */
 export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group";
@@ -24,6 +26,13 @@ export interface MediaSink {
 export interface MediaSinksQuery {
   /** Only sinks with all of these capabilities (`video_out`, `audio_out`, ...), like `requestSession`'s. */
   capabilities?: string[];
+  /**
+   * Only sinks that can receive this kind of mirroring, as Chrome lists them for TAB_MIRROR and DESKTOP_MIRROR: a sink
+   * is listed when it can run one of the streaming apps the source names (audio and video, or audio only).
+   */
+  castMode?: MirroringCastMode;
+  /** With `castMode: "desktop_mirror"`: whether the capture includes audio (a screen without audio needs video_out). */
+  withAudio?: boolean;
 }
 
 /** Chrome: `MediaSinksObserver`. */
@@ -93,6 +102,12 @@ export interface CastManagerApi {
   detachRoute(routeId: string): void;
   /** `MediaRouter::GetMediaController` / `mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
   getRouteController(routeId: string): MediaRouteController;
+  /**
+   * `MediaRouterUI::StartCasting` for `TAB_MIRROR` and `DESKTOP_MIRROR`: mirror a window's page (`webContentsId`) or a
+   * `desktopCapturer` source (`desktopSourceId`) to the sink. Resolves with the route once the receiver's streaming app
+   * runs; end it with `terminateRoute`. Needs the `mirroring` option of `createCastManager`.
+   */
+  startCasting(sinkId: string, options: StartMirroringOptions): Promise<MediaRoute>;
 }
 
 /**
@@ -116,6 +131,8 @@ export interface SessionHost {
   terminateSession(sessionId: string): Promise<BridgeResult>;
   setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult>;
   detachSession(sessionId: string): BridgeResult;
+  /** Mirroring routes; present when the manager was given the `mirroring` option. */
+  startCasting?(sinkId: string, options: StartMirroringOptions): Promise<MediaRoute>;
 }
 
 /** A Map that reports new and removed keys, so the service needs no per-site notification. */
@@ -199,7 +216,12 @@ export function createSinksObservers(source: DeviceSource): {
   return {
     register(observer, query, signal, eligible) {
       const caps = query?.capabilities;
-      const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps));
+      const mirrorSource =
+        query?.castMode === undefined
+          ? undefined
+          : mirroringSourceFor(query.castMode === "tab_mirror" ? tabMediaSource(-1) : desktopMediaSource("any", query.withAudio === true));
+      const matches = (d: CastDevice): boolean =>
+        (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps)) && (mirrorSource === undefined || sinkSupportsSource(mirrorSource, d.capabilities));
       const current = (): MediaSink[] => source.devices().filter(matches).map(toMediaSink);
       let last = "";
       const check = (): void => {
@@ -285,6 +307,10 @@ export function createManagerApi(
     detachRoute(routeId) {
       need(routeId);
       must(host.detachSession(routeId));
+    },
+    async startCasting(sinkId, options) {
+      if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
+      return host.startCasting(sinkId, options);
     },
     getRouteController(routeId) {
       need(routeId);

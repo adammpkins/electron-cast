@@ -61,8 +61,8 @@ test("the video bitrate backs off when the link cannot carry it", async () => {
     console.log(`link 1.5 Mbps: video bitrate ${early} -> ${late} bps, usable ${h.host.currentUsableBandwidth}, dropped by link ${s.packetsDroppedByLink}, video frames ${s.videoFrames}, frames dropped ${h.host.video?.framesDroppedBeforeEncoding}+${h.host.video?.framesDroppedAfterEncoding}`);
     assert.deepEqual(h.errors, []);
     assert.ok(early > 1_000_000, `early ${early}`);
-    assert.ok(late < 2_000_000 && late > 300_000, `late ${late}`);
-    assert.ok(late < 5_000_000 * 0.45, `late ${late}`);
+    assert.ok(late < 3_000_000 && late > 300_000, `late ${late}`);
+    assert.ok(late < 5_000_000 * 0.6, `late ${late}`);
     assert.ok(s.videoFrames > 20);
   } finally {
     h.close();

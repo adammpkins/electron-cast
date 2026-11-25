@@ -3,7 +3,10 @@ import type { CastDevice } from "../discovery/index.ts";
 import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
-import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
+import { createManagerApi, createSinksObservers, MediaRouteError, type CastManagerApi, type DevicePickerContext, type MediaRoute } from "./manager-api.ts";
+import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
+import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
+import type { MirroringServiceFactory } from "../mirroring/mirroring-activity.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 
 /**
@@ -18,6 +21,8 @@ const PAGE_METHODS: ReadonlySet<string> = new Set<BridgeMethod>([
 export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
 export { MediaRouteError } from "./manager-api.ts";
+export type { MirroringCastMode, MirroringRoute, StartMirroringOptions } from "../mirroring/mirroring-manager.ts";
+export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
 export type {
   CastManagerApi, DevicePickerContext, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink, MediaSinksObserver,
   MediaSinksQuery, SinkIconType,
@@ -77,6 +82,12 @@ export interface CastManagerOptions {
    * `verifyDevice`). Default true; false allows uncertified receivers. Ignored when `createClient` is given.
    */
   verifyDevices?: boolean;
+  /**
+   * Enables tab and desktop mirroring (`startCasting` with `castMode: "tab_mirror"` or `"desktop_mirror"`). Pass the
+   * Electron classes it needs (`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`,
+   * `webContents`); off by default. `createService` replaces the Electron engine (tests, or a different one).
+   */
+  mirroring?: ElectronMirroringOptions | { createService: MirroringServiceFactory };
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -425,11 +436,66 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The service knows frames by sender id (an iframe has a synthetic one); the API speaks of windows, so a route's
   // pages are reported as `webContents.id`s, once each however many of its frames hold the route.
   const windowIds = (ids: number[]): number[] => [...new Set(ids.map((id) => senders.get(id)?.wc.id ?? id))];
+  let mirroring: MirroringManager | undefined;
+  let disposeMirroring: (() => void) | undefined;
+  if (options.mirroring !== undefined) {
+    const m = options.mirroring;
+    let createService: MirroringServiceFactory;
+    if ("createService" in m) {
+      createService = m.createService;
+    } else {
+      const electron = createElectronMirroringServiceFactory(m);
+      createService = electron.factory;
+      disposeMirroring = () => electron.dispose();
+    }
+    mirroring = new MirroringManager({
+      findDevice: (id) => discovery.devices().find((d) => d.id === id),
+      createClient: (d) => createClient(d),
+      createService,
+      log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
+    });
+  }
+  const asMediaRoute = (r: MirroringRoute): MediaRoute => ({
+    id: r.id,
+    mediaSource: r.mediaSource,
+    sinkId: r.sinkId,
+    description: r.description,
+    appId: r.appId,
+    displayName: r.displayName,
+    origin: "",
+    volume: { level: null, muted: null },
+    members: r.webContentsId === undefined ? [] : [r.webContentsId],
+    parkedSenders: [],
+    parked: false,
+  });
   const api = createManagerApi(createSinksObservers(discovery), {
-    mediaRoutes: () =>
-      service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
-    observeSessions: (l) => service.observeSessions(l),
-    terminateSession: (id) => service.terminateSession(id),
+    mediaRoutes: () => [
+      ...service.mediaRoutes().map((r) => ({ ...r, members: windowIds(r.members), parkedSenders: windowIds(r.parkedSenders) })),
+      ...(mirroring?.routes().map(asMediaRoute) ?? []),
+    ],
+    observeSessions: (l) => {
+      const off = service.observeSessions(l);
+      const offMirroring = mirroring?.observe(l);
+      return () => {
+        off();
+        offMirroring?.();
+      };
+    },
+    terminateSession: async (id) => {
+      if (mirroring?.terminate(id) === true) return { ok: true, value: null };
+      return service.terminateSession(id);
+    },
+    startCasting:
+      mirroring === undefined
+        ? undefined
+        : async (sinkId, o) => {
+            try {
+              return asMediaRoute(await mirroring.startMirroring(sinkId, o));
+            } catch (err) {
+              if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+              throw err;
+            }
+          },
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
   });
@@ -442,6 +508,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (disposed) return;
       disposed = true;
       api.dispose();
+      mirroring?.dispose();
+      disposeMirroring?.();
       options.ipcMain.removeHandler(`${channel}:call`);
       presentation?.dispose();
       discovery.stop();

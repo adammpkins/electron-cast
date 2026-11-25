@@ -54,6 +54,7 @@ export type MirroringServiceFactory = (
   params: SessionParameters,
   observer: MirroringSessionObserver,
   channel: CastMessageChannel,
+  source: MirroringSource,
 ) => MirroringService;
 
 export interface MirroringActivityOptions {
@@ -158,7 +159,7 @@ export class MirroringActivity {
       destinationId,
       targetPlayoutDelayMs: this.source.targetPlayoutDelayMs,
     };
-    this.service = this.createService(params, observer, channel);
+    this.service = this.createService(params, observer, channel, this.source);
   }
 
   /** `HandleParseJsonResult`: a message from the service goes to the receiver, in the namespace its type implies. */

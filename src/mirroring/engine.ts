@@ -5,9 +5,9 @@
  */
 import type { MirroringBackend } from "./backend.ts";
 import type { EncodingSupport } from "./encoding-support.ts";
-import type { MirroringServiceFactory } from "./mirroring-activity.ts";
+import type { CastMessageChannel, MirroringService, MirroringSessionObserver } from "./mirroring-activity.ts";
 import { SenderPacketRouter } from "./sender/packet-router.ts";
-import { OpenscreenSessionHost } from "./session-host.ts";
+import { OpenscreenSessionHost, type SessionParameters } from "./session-host.ts";
 import { UdpEnvironment } from "./transport/udp-environment.ts";
 
 export interface EngineOptions {
@@ -17,7 +17,7 @@ export interface EngineOptions {
   env?: Record<string, string | undefined>;
 }
 
-export function createMirroringServiceFactory(options: EngineOptions): MirroringServiceFactory {
+export function createMirroringServiceFactory(options: EngineOptions): (params: SessionParameters, observer: MirroringSessionObserver, channel: CastMessageChannel) => MirroringService {
   return (params, observer, channel) => {
     const environment = new UdpEnvironment(params.receiverAddress);
     const router = new SenderPacketRouter(environment);
