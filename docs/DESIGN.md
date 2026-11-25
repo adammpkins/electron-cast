@@ -323,7 +323,7 @@ and `LocalPresentationManager`, with the receiver side of Blink's `PresentationR
 - **Termination**: `terminate()` (either side), a closed window, a removed display and navigation of the receiver all end
   through the window closing, and every controller sees `terminated`. A controller going away only unregisters its
   connection.
-- **Receiver window** (`electron-windows.ts`): fullscreen, shown inactive, on the display\x27s bounds, own non-persistent
+- **Receiver window** (`electron-windows.ts`): fullscreen, shown inactive, on the display's bounds, own non-persistent
   session per presentation, popups, dialogs and downloads refused, only fullscreen permitted, and the first main-frame
   navigation is the only one allowed (`PresentationNavigationPolicy`). F11 toggles fullscreen (Control+Command+F on macOS).
 - **Receiver page API** (`presentation-receiver.ts`): `navigator.presentation.receiver.connectionList`,
@@ -335,5 +335,5 @@ in; Electron has no per-window "display observer", so the app supplies `displayO
 the controller stand-in).
 
 Notes for docs/CHROMIUM-MAP.md (absent on this branch), one row per rule: sink ids/names and ordering, mirrored displays,
-source rule, CreateRoute terminating the display\x27s presentation, route description, receiver window lockdown and navigation
-policy, local presentation manager, receiver connection list semantics, picker hides the controller\x27s display.
+source rule, CreateRoute terminating the display's presentation, route description, receiver window lockdown and navigation
+policy, local presentation manager, receiver connection list semantics, picker hides the controller's display.
