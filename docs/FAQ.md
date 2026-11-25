@@ -17,8 +17,8 @@ Google's SDK; it only provides what the SDK expects to find. That also means the
 
 ## Does it only work for YouTube Music?
 
-No, and nothing YouTube-specific is in the library. YouTube Music Desktop is the first app to use it, and the one casting was
-tested end to end in; the example app casts to the Default Media Receiver from its own page. Any page that uses Google's Cast
+No, and nothing YouTube-specific is in the library. Casting was tested end to end in an Electron 45 app that loads
+YouTube Music; the example app casts to the Default Media Receiver from its own page. Any page that uses Google's Cast
 SDK should work ([custom receivers](guides/custom-receivers.md)); what has been tested is stated in the [README](../README.md#platforms-and-what-was-tested).
 
 ## Which Electron, Node and operating systems?
@@ -73,7 +73,7 @@ random delay of up to 5 s, and the list is reported once it has been quiet for 3
 
 Like Chrome, auto-join only joins sessions this run started. The session is listed as a non-local route as soon as its device's
 channel is open, but the page has to ask for it: after a restart the app gives the page the old session id and the page calls
-`chrome.cast.requestSessionById`. [Recipe](guides/restart-rejoin.md), with YouTube Music Desktop as the worked example.
+`chrome.cast.requestSessionById`. [Recipe](guides/restart-rejoin.md), with a worked example.
 
 ## What is `mode: "chromecast"`?
 

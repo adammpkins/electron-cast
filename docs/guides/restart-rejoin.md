@@ -138,14 +138,14 @@ Why these choices:
   The timeout turns "nothing arrived" into "forget it", so the next start does not retry a dead id forever.
 - **The device has to be listed first.** electron-cast answers from what each listed device's channel reports, so a join
   attempted before the device's channel is open (a few seconds after `start()`) fails. Start the manager early (before
-  the page loads, as YouTube Music Desktop does) and use a join timeout of several seconds. If your page loads very fast,
+  the page loads, as the worked example below does) and use a join timeout of several seconds. If your page loads very fast,
   retry `requestSessionById` after receiver availability turns true instead of only once.
 - **Do not save on every update.** Report on adoption and on stop; the session id does not change while it lives.
 
-## A worked example: YouTube Music Desktop
+## A worked example: an app that does not control its page
 
-YouTube Music Desktop loads `music.youtube.com`, whose own script drives
-Google's SDK through `chrome.cast`. It did not control the page, so it wraps the SDK's
+This app loads `music.youtube.com`, whose own script drives
+Google's SDK through `chrome.cast`. It does not control the page, so it wraps the SDK's
 `chrome.cast.Session.prototype.addUpdateListener`: every session the page adopts, whether from the user's pick or from a
 rejoin delivered to the page's session listener, gets an update listener, and that is the point where the app learns the
 session id. It then:
@@ -158,9 +158,7 @@ session id. It then:
 
 This was tested on Windows and on Linux (Ubuntu under WSL2), in dev and packaged builds: the app was force-killed
 mid-song, restarted, and rejoined the same session on the same device with no picker; Stop casting cleared it. It has
-not been tried on macOS. The
-implementation is in the YouTube Music Desktop fork's `src/main/services/castmanager/index.ts` and
-`src/renderer/ytmview/scripts/setup/cast.ts`.
+not been tried on macOS.
 
 ## What happens in electron-cast
 

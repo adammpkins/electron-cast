@@ -151,11 +151,11 @@ Say what was run, not what should work.
 
 | | Discovery and device authentication | Casting end to end | Notes |
 |---|---|---|---|
-| Windows 11 | 8 real devices, all passed | Session, playback, restart rejoin and stop, on real devices, in YouTube Music Desktop (dev and packaged builds, Electron 45) | The devices: Chromecast, Chromecast Ultra, Google Home Mini (audio-only), Nest Hub, Nest Hub Max and two Cast groups |
-| Linux | All 8 devices passed on 2026-11-25 (Ubuntu under WSL2 with mirrored networking) | Session, playback, rejoin after a force-kill and stop, on real devices, in YouTube Music Desktop (Ubuntu under WSL2, dev and packaged builds) | |
+| Windows 11 | 8 real devices, all passed | Session, playback, restart rejoin and stop, on real devices, in an Electron 45 app (dev and packaged builds) | The devices: Chromecast, Chromecast Ultra, Google Home Mini (audio-only), Nest Hub, Nest Hub Max and two Cast groups |
+| Linux | All 8 devices passed on 2026-11-25 (Ubuntu under WSL2 with mirrored networking) | Session, playback, rejoin after a force-kill and stop, on real devices, in an Electron 45 app (Ubuntu under WSL2, dev and packaged builds) | |
 | macOS | Not tested | Not tested | CI loads the package in a real Electron on macOS with a fake device and no real network |
 
-The end-to-end runs were YouTube Music (YouTube Music Desktop) casting to speaker groups, a Nest Hub and several
+The end-to-end runs were an Electron 45 app loading YouTube Music, casting to speaker groups, a Nest Hub and several
 Chromecasts, and `cast.framework` on a Nest Hub: session start, volume, HLS load, play, pause, seek, resume and stop.
 
 Electron: the CI smoke test loads the built package in a real Electron 35, 40 and the latest stable on Linux, Windows

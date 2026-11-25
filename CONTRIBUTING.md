@@ -85,8 +85,8 @@ symbol, in the comment next to the code.
 
 ### Nothing app-specific in `src/`
 
-The library does not know which app uses it. A YouTube Music Desktop fix goes in YouTube Music Desktop. Docs may mention an app as
-an example; `src/` may not.
+The library does not know which app uses it. A fix that only one app needs goes in that app, and the docs do not name the
+apps that use the library. Docs may name a web page as an example (YouTube Music, say); `src/` may not.
 
 ### `mode: "chromecast"` is frozen
 

@@ -125,8 +125,8 @@ is frozen and behaves as before for pages; it shares the device list.
   access-code casting), a getting-started page, guides (device picker, restart rejoin, windows and iframes, custom
   receivers, audio-only devices and groups, device authentication, the low-level client, testing), troubleshooting
   and a FAQ, architecture diagrams and a glossary, a map of the Chromium code each module follows, and CONTRIBUTING.
-- Tested-on facts: YouTube Music Desktop casting, rejoin after a force-kill, and stop verified on Linux (Ubuntu under
-  WSL2, dev and packaged builds) as well as Windows; IPv6 discovery and the Cast channel with TLS and device
+- Tested-on facts: casting, rejoin after a force-kill, and stop verified end to end in an Electron 45 app on Linux
+  (Ubuntu under WSL2, dev and packaged builds) as well as Windows; IPv6 discovery and the Cast channel with TLS and device
   authentication over unique-local and link-local addresses verified on real devices.
 - `npm run check` now also checks the docs: every public export is mentioned, the TypeScript examples typecheck
   against the sources, and relative links and anchors resolve; `npm run docs:check:chromium` (network) rechecks the
