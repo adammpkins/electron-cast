@@ -573,7 +573,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
     sendSessionMessage: (id, ns, m) => service.sendSessionMessage(id, ns, m),
-    observeSessionMessages: (l) => service.observeSessionMessages(l),
+    observeSessionStatus: (l) => service.observeSessionStatus(l),
+    observeMediaStatus: (l) => service.observeMediaStatus(l),
     sessionVolume: (id) => service.sessionVolume(id),
   }, {
     requests: defaults,

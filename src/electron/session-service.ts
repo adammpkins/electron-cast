@@ -252,7 +252,6 @@ export class CastSessionService {
   private readonly senders = new Map<number, SenderRecord>();
   private readonly sessions = new ObservedMap<string, SessionRecord>((kind, rec) => this.notifySession(kind, rec));
   private readonly sessionListeners = new Set<() => void>();
-  private readonly messageListeners = new Set<(sessionId: string, namespace: string, data: string) => void>();
   private readonly sinks;
   /** The devices with an open channel; the only devices the service offers or casts to. */
   private readonly sinkService: CastSinkService;
@@ -815,7 +814,6 @@ export class CastSessionService {
     if (typeof msg.data !== "string") return;
     for (const rec of this.sessions.values()) {
       if (rec.client !== client || rec.app.transportId !== msg.sourceId) continue;
-      for (const l of [...this.messageListeners]) l(rec.app.sessionId, msg.namespace, msg.data);
       for (const member of rec.members) {
         this.emitTo(member, {
           type: "message",
@@ -943,27 +941,55 @@ export class CastSessionService {
     return good(undefined);
   }
 
-  /** Receivers send a session's messages to main as well as to its pages; for the media controller (see media-controller.ts). */
-  observeSessionMessages(listener: (sessionId: string, namespace: string, data: string) => void): () => void {
-    this.messageListeners.add(listener);
-    return () => void this.messageListeners.delete(listener);
+  /**
+   * Every receiver status that describes a session, changed or not, with its volume (the tracker's
+   * `OnSessionAddedOrUpdated`); for the media controller. Returns the unsubscribe function.
+   */
+  observeSessionStatus(listener: (sessionId: string, volume: ReceiverVolume) => void): () => void {
+    const on = (s: TrackedSession): void => listener(s.sessionId, s.volume);
+    this.tracker.on("sessionStatus", on);
+    return () => void this.tracker.off("sessionStatus", on);
   }
 
-  /** Send a message to a session's receiver app from main, with no page involved. */
+  /**
+   * Every MEDIA_STATUS on a device's channel, credited to the session the device runs and merged with the media saved
+   * before (`CastSessionTracker::HandleMediaStatusMessage`); for the media controller. Returns the unsubscribe function.
+   */
+  observeMediaStatus(listener: (sessionId: string, message: Record<string, unknown>) => void): () => void {
+    const on = (s: TrackedSession, message: Record<string, unknown>): void => listener(s.sessionId, message);
+    this.tracker.on("mediaStatus", on);
+    return () => void this.tracker.off("mediaStatus", on);
+  }
+
+  /**
+   * Send a message to a session's receiver app from main, with no page involved, over the device's channel. A session
+   * this service does not hold is reached too, as Chrome's `CastMessageHandler::SendMediaRequest` reaches a non-local
+   * activity's session: a virtual connection to its transport is opened first (`EnsureConnection`).
+   */
   sendSessionMessage(sessionId: string, namespace: string, message: string): BridgeResult {
     const rec = this.sessions.get(sessionId);
-    if (rec === undefined) return bad("session_error", "unknown session");
+    let client = rec?.client;
+    let transportId = rec?.app.transportId;
+    if (rec === undefined) {
+      const tracked = this.nonLocalSessions().find((s) => s.sessionId === sessionId);
+      if (tracked === undefined) return bad("session_error", "unknown session");
+      client = this.sinkService.clientOf(tracked.sinkId);
+      transportId = tracked.transportId;
+      if (client === undefined) return bad("channel_error", "no open channel to the device");
+    }
+    if (client === undefined || transportId === undefined) return bad("session_error", "unknown session");
     try {
-      rec.client.send(namespace, rec.app.transportId, message);
+      if (rec === undefined) client.connectTransport(transportId);
+      client.send(namespace, transportId, message);
     } catch (err) {
       return bad("channel_error", describe(err));
     }
     return good(undefined);
   }
 
-  /** The volume the receiver last reported for a session (Chrome: `receiver.volume` of the CastSession). */
+  /** The volume the receiver last reported for a session, local or not (Chrome: `receiver.volume` of the CastSession). */
   sessionVolume(sessionId: string): ReceiverVolume | undefined {
-    return this.sessions.get(sessionId)?.lastVolume;
+    return this.sessions.get(sessionId)?.lastVolume ?? this.tracker.sessionById(sessionId)?.volume;
   }
 
   /**

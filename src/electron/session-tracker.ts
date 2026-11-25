@@ -30,6 +30,16 @@ interface TrackerEvents {
   sessionAddedOrUpdated: [session: TrackedSession];
   /** A device no longer runs a session. */
   sessionRemoved: [sinkId: string, session: TrackedSession];
+  /**
+   * Every RECEIVER_STATUS on a device's channel that describes a session, changed or not: Chrome's tracker calls
+   * `OnSessionAddedOrUpdated` for each one, and the media controller takes the volume from it (`SetSession`).
+   */
+  sessionStatus: [session: TrackedSession];
+  /**
+   * Every MEDIA_STATUS for a device's session, after `HandleMediaStatusMessage` has merged and backfilled it: the
+   * message with `sessionId` set and its `status` list as saved in `session.media` (`OnMediaStatusUpdated`).
+   */
+  mediaStatus: [session: TrackedSession, message: Record<string, unknown>];
 }
 
 const BACKDROP_APP_ID = "E8C28D3C";
@@ -100,6 +110,21 @@ export function sessionFromStatus(sinkId: string, status: ReceiverStatus): Track
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 /**
+ * `SupportedMediaCommandsToListValue` (cast_internal_message_util.cc): the receiver's bit mask of `MediaCommand`s as
+ * the list of names the Cast SDK expects.
+ */
+export function supportedMediaCommandsToList(mask: number): string[] {
+  const names: string[] = [];
+  if (mask & 1) names.push("pause");
+  if (mask & 2) names.push("seek");
+  if (mask & 4) names.push("stream_volume");
+  if (mask & 8) names.push("stream_mute");
+  if (mask & 64) names.push("queue_next");
+  if (mask & 128) names.push("queue_prev");
+  return names;
+}
+
+/**
  * One session per device, from RECEIVER_STATUS (asked for when a channel opens, and then pushed by the receiver) and
  * MEDIA_STATUS on the device's channel. Chrome's tracker does not look at which sender started a session; neither does this.
  */
@@ -111,7 +136,13 @@ export class CastSessionTracker extends EventEmitter<TrackerEvents> {
   /** Follow a device's channel and ask it for its status (Chrome: `OnSinkAddedOrUpdated` -> `RequestReceiverStatus`). */
   attach(sinkId: string, client: CastClientLike): void {
     this.clients.set(sinkId, client);
-    client.on("receiverStatus", (status) => this.applyStatus(sinkId, client, status));
+    client.on("receiverStatus", (status) => {
+      this.applyStatus(sinkId, client, status);
+      // Only the channel's own status messages count here, not the replies fed in by applyStatus callers, which the
+      // channel has already reported as status messages: Chrome sees each RECEIVER_STATUS once.
+      const session = this.clients.get(sinkId) === client ? this.bySink.get(sinkId) : undefined;
+      if (session !== undefined) this.emit("sessionStatus", session);
+    });
     client.on("message", (msg) => {
       if (msg.namespace !== MEDIA_NAMESPACE || typeof msg.data !== "string") return;
       this.applyMedia(sinkId, client, msg.data);
@@ -170,7 +201,8 @@ export class CastSessionTracker extends EventEmitter<TrackerEvents> {
   /**
    * `HandleMediaStatusMessage`: a media status is taken to belong to the session the device is known to run, as Chrome
    * has no way to tell (its comment in the source). Entries are matched to the saved ones by `mediaSessionId`, and
-   * fields the new entry lacks are filled from the saved one (`CopySavedMediaFieldsToMediaList`).
+   * fields the new entry lacks are filled from the saved one (`CopySavedMediaFieldsToMediaList`), after the bit mask of
+   * `supportedMediaCommands` became a list of names, as the Cast SDK expects.
    */
   private applyMedia(sinkId: string, client: CastClientLike, data: string): void {
     if (this.clients.get(sinkId) !== client) return;
@@ -187,12 +219,18 @@ export class CastSessionTracker extends EventEmitter<TrackerEvents> {
       const saved = typeof entry.mediaSessionId === "number"
         ? session.media.find((m) => m.mediaSessionId === entry.mediaSessionId)
         : undefined;
-      return { ...saved, ...entry, sessionId: session.sessionId };
+      const commands = entry.supportedMediaCommands;
+      const backfilled = typeof commands === "number" ? { supportedMediaCommands: supportedMediaCommandsToList(commands) } : {};
+      return { ...saved, ...entry, ...backfilled, sessionId: session.sessionId };
     });
-    if (sameJson(media, session.media)) return;
-    const next = { ...session, media };
-    this.bySink.set(sinkId, next);
-    this.emit("sessionAddedOrUpdated", next);
+    let current = session;
+    if (!sameJson(media, session.media)) {
+      current = { ...session, media };
+      this.bySink.set(sinkId, current);
+      this.emit("sessionAddedOrUpdated", current);
+    }
+    // The observers hear of every media status, changed or not (`CastSessionTracker::HandleMediaStatusMessage`)
+    this.emit("mediaStatus", current, { ...parsed, sessionId: session.sessionId, status: structuredClone(media) });
   }
 
   private drop(sinkId: string): void {

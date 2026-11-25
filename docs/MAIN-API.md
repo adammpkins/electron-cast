@@ -137,20 +137,26 @@ await controller.setVolume(0.4);    // the receiver's volume, as getRouteControl
 controller.close();                 // stop the reports
 ```
 
-It is what Chrome offers for a Cast route (`CastMediaController`), sent over the route's own connection, so it is
-available on every route electron-cast has (all are app routes; Chrome's mirroring routes have a controller of their own,
-and there is no mirroring here). Messages go out as Chrome writes them (`CreateMediaRequest`): `PLAY`, `PAUSE`,
+It is what Chrome offers for a Cast route (`CastMediaController`), sent over the device's open channel, so it is
+available on every route electron-cast has, non-local ones included: Chrome binds a controller to any activity
+(`CastActivityManager::BindMediaController`), and a session started elsewhere is an `AppActivity` too
+(`AddNonLocalActivity`); for one, a virtual connection to its transport is opened first, as Chrome's message handler
+does. (All routes here are app routes; Chrome's mirroring routes have a controller of their own, and there is no
+mirroring here.) The status comes from the session tracker on that channel: the volume of every receiver status
+(`SetSession`) and every MEDIA_STATUS the device sends, whoever started the media, merged with the fields saved from
+earlier ones (`CastSessionTracker::HandleMediaStatusMessage`). Messages go out as Chrome writes them (`CreateMediaRequest`): `PLAY`, `PAUSE`,
 `SEEK` with `currentTime`, `QUEUE_UPDATE` with `jump` 1 or -1, each with the `mediaSessionId` last seen in a
 MEDIA_STATUS (-1 before any, which the receiver refuses, as for Chrome) and the `sessionId`. Binding asks the receiver
 for its media status (`GET_STATUS`).
+
+Observers are called as Chrome calls them: on every receiver status that has a volume and every MEDIA_STATUS, repeated
+or not, and on binding (any controller's binding tells every observer of the route, as `SetSession` does).
 
 Where it differs from Chrome:
 
 - Commands return promises, resolved when the message is written, not when the receiver has acted. They reject with
   `MediaRouteError` `route_not_found` once the route is gone. `seek` rejects with `RangeError` for a time that is not a
   number of seconds from 0 up. `getMediaController` throws `MediaRouteError` for an unknown route.
-- An observer is not called again with a status identical to the last one it got (Chrome calls it on every receiver
-  status). It is called at once when the receiver volume is known, as Chrome does on binding.
 - Times are seconds, not `TimeDelta`. `MediaStatus.images` keeps only `https` URLs, as Chrome does.
 - electron-cast has one Cast sender id per device connection where Chrome gives the controller its own, so the
   receiver's replies to a command also reach the route's pages. Request ids start at 2^30 so they cannot be mistaken

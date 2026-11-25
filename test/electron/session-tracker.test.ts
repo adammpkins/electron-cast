@@ -121,3 +121,38 @@ test("a device whose status request fails is not an error for the tracker", asyn
   await tick(1);
   assert.deepEqual(tracker.sessions(), []);
 });
+
+test("every status and media status is reported to the observers, changed or not, backfilled as HandleMediaStatusMessage does", async () => {
+  const tracker = new CastSessionTracker();
+  const client = new FakeClient(TV);
+  client.apps = [app()];
+  tracker.attach(TV.id, client);
+  await tick(1);
+  const statuses: string[] = [];
+  const medias: Record<string, unknown>[] = [];
+  tracker.on("sessionStatus", (s) => statuses.push(s.sessionId));
+  tracker.on("mediaStatus", (_s, m) => medias.push(m));
+  client.pushStatus();
+  client.pushStatus();
+  assert.deepEqual(statuses, ["s1", "s1"], "OnSessionAddedOrUpdated for each RECEIVER_STATUS");
+  // a status reply fed in by a caller is not counted again (the channel already reported it as a status message)
+  tracker.applyStatus(TV.id, client, await client.getStatus());
+  assert.deepEqual(statuses, ["s1", "s1"]);
+  const send = (entries: unknown[]) => client.pushMessage("t1", MEDIA, JSON.stringify({ type: "MEDIA_STATUS", requestId: 5, status: entries }));
+  send([{ mediaSessionId: 1, supportedMediaCommands: 1 | 2 | 4 | 8 | 64 | 128, media: { contentId: "a" } }, 7]);
+  send([{ mediaSessionId: 1, playerState: "PAUSED" }]);
+  send([{ mediaSessionId: 1, playerState: "PAUSED" }]);
+  assert.equal(medias.length, 3, "OnMediaStatusUpdated for each MEDIA_STATUS");
+  assert.deepEqual(medias[0], {
+    type: "MEDIA_STATUS", requestId: 5, sessionId: "s1",
+    status: [{ mediaSessionId: 1, supportedMediaCommands: ["pause", "seek", "stream_volume", "stream_mute", "queue_next", "queue_prev"], media: { contentId: "a" }, sessionId: "s1" }],
+  });
+  assert.deepEqual((medias[2]!.status as unknown[])[0], {
+    mediaSessionId: 1, playerState: "PAUSED", sessionId: "s1",
+    supportedMediaCommands: ["pause", "seek", "stream_volume", "stream_mute", "queue_next", "queue_prev"], media: { contentId: "a" },
+  });
+  client.apps = [];
+  client.pushStatus();
+  send([{ mediaSessionId: 1 }]);
+  assert.deepEqual([statuses.length, medias.length], [2, 3], "nothing once the device runs no session");
+});

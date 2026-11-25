@@ -153,16 +153,87 @@ test("volume and mute are the receiver's SET_VOLUME and update the status", asyn
   await assert.rejects(c.seek(-1), RangeError);
 });
 
-test("an unchanged status is not reported twice; close() stops the reports", async () => {
+// Chrome's CastMediaController::SetSession and SetMediaStatus call OnMediaStatusUpdated on every observer each time
+// (cast_media_controller.cc), so a repeated status is reported again; the de-duplication electron-cast had is gone.
+test("every receiver status and every MEDIA_STATUS is reported, repeated or not; close() stops the reports", async () => {
   const t = await setup();
   const seen: MediaStatus[] = [];
   const c = t.manager.getMediaController(t.sessionId, { onMediaStatusUpdated: (s) => seen.push(s) });
   const n = seen.length;
   t.client.pushStatus();
-  assert.equal(seen.length, n);
-  c.close();
+  t.client.pushStatus();
+  assert.equal(seen.length, n + 2, "SetSession on each RECEIVER_STATUS");
   t.status({ status: [{ mediaSessionId: 1, playerState: "PAUSED" }] });
-  assert.equal(seen.length, n);
+  t.status({ status: [{ mediaSessionId: 1, playerState: "PAUSED" }] });
+  assert.equal(seen.length, n + 4, "SetMediaStatus on each MEDIA_STATUS");
+  assert.deepEqual(seen.at(-1), seen.at(-2));
+  c.close();
+  t.status({ status: [{ mediaSessionId: 1, playerState: "PLAYING" }] });
+  t.client.pushStatus();
+  assert.equal(seen.length, n + 4);
+});
+
+test("binding another controller tells every observer of the route, as SetSession does", async () => {
+  const t = await setup();
+  const a: MediaStatus[] = [];
+  t.manager.getMediaController(t.sessionId, { onMediaStatusUpdated: (s) => a.push(s) });
+  const before = a.length;
+  t.manager.getMediaController(t.sessionId, { onMediaStatusUpdated: () => {} });
+  assert.equal(a.length, before + 1);
+});
+
+test("the media status is the session tracker's: any MEDIA_STATUS on the device's channel counts, with saved fields filled in", async () => {
+  const t = await setup();
+  const seen: MediaStatus[] = [];
+  t.manager.getMediaController(t.sessionId, { onMediaStatusUpdated: (s) => seen.push(s) });
+  // CastSessionTracker::HandleMediaStatusMessage credits a media status to the session the device runs, whoever sent it
+  t.client.pushMessage("receiver-0", MEDIA, JSON.stringify({
+    type: "MEDIA_STATUS", status: [{ mediaSessionId: 4, playerState: "PLAYING", supportedMediaCommands: 1, media: { metadata: { title: "Elsewhere" } } }],
+  }));
+  t.client.pushMessage("receiver-0", MEDIA, JSON.stringify({ type: "MEDIA_STATUS", status: [{ mediaSessionId: 4, playerState: "PAUSED" }] }));
+  const s = seen.at(-1)!;
+  assert.deepEqual([s.title, s.playState, s.canPlayPause], ["Elsewhere", "paused", true]);
+});
+
+test("a non-local route has a media controller over the device's channel (AddNonLocalActivity makes an AppActivity)", async () => {
+  const clients: FakeClient[] = [];
+  const manager = createCastManager({
+    sinks: FAST_SINKS,
+    ipcMain: new FakeIpc(),
+    discovery: new Discovery(),
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      c.echoReplies = true;
+      if (d.id === TV.id) {
+        // a session another sender started
+        c.apps = [{ appId: "CC1AD845", sessionId: "other-s", transportId: "other-t", displayName: "Default Media Receiver", statusText: "", namespaces: [{ name: MEDIA }] }];
+      }
+      clients.push(c);
+      return c;
+    },
+    selectDevice: async () => null,
+  });
+  await manager.settled();
+  await tick();
+  const route = manager.getRoutes().find((r) => r.id === "other-s");
+  assert.equal(route?.isLocal, false);
+  const tv = clients.find((c) => c.device.id === TV.id)!;
+  const seen: MediaStatus[] = [];
+  const c = manager.getMediaController("other-s", { onMediaStatusUpdated: (s) => seen.push(s) });
+  assert.equal(seen.length, 1, "the tracked session's volume is reported at once");
+  assert.equal(seen[0]!.volume, 0.5);
+  assert.ok(tv.calls.includes("connectTransport other-t"), "a virtual connection to the session's transport, as EnsureConnection opens");
+  const media = () => tv.sent.filter((m) => m.namespace === MEDIA).map((m) => ({ to: m.destinationId, ...JSON.parse(m.payload as string) }));
+  assert.equal(media()[0].type, "GET_STATUS");
+  assert.equal(media()[0].to, "other-t");
+  tv.pushMessage("other-t", MEDIA, JSON.stringify({ type: "MEDIA_STATUS", status: [{ mediaSessionId: 2, playerState: "PLAYING", media: { metadata: { title: "Remote" } } }] }));
+  assert.equal(seen.at(-1)!.title, "Remote");
+  await c.pause();
+  assert.deepEqual({ ...media().at(-1), requestId: 0 }, { to: "other-t", mediaSessionId: 2, sessionId: "other-s", type: "PAUSE", requestId: 0 });
+  await c.setVolume(0.3);
+  assert.ok(tv.calls.includes('volume {"level":0.3}'));
+  assert.equal(seen.at(-1)!.volume, 0.3);
+  await manager.dispose();
 });
 
 test("two controllers on a route share the status and each observer hears it", async () => {

@@ -2,9 +2,11 @@
 // `MediaRouter::GetMediaController`, which on a Cast route is `CastMediaController`
 // (chrome/browser/media/router/providers/cast/cast_media_controller.cc), with the status it reports to a
 // `mojom::MediaStatusObserver` (components/media_router/common/mojom/media_status.mojom). The status is built the way
-// Chrome builds it: from the receiver's volume (`CastMediaController::SetSession`) and from MEDIA_STATUS messages after
-// `CastSessionTracker::HandleMediaStatusMessage` has merged them with the media it saved. The device is reached only
-// through {@link MediaControllerHost}, so it can be backed by whatever channel the session service has.
+// Chrome builds it: from the receiver's volume on every receiver status (`CastMediaController::SetSession`) and from
+// every MEDIA_STATUS after `CastSessionTracker::HandleMediaStatusMessage` has merged it with the media it saved, both
+// taken from the session tracker on the device's kept-open channel. As in Chrome (`CastActivityManager::
+// BindMediaController` finds any activity, and `AddNonLocalActivity` makes an `AppActivity` for a session started
+// elsewhere), a non-local route has a controller too. The device is reached only through {@link MediaControllerHost}.
 import type { ReceiverVolume } from "../client/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import { MEDIA_NAMESPACE } from "./presentation-envelope.ts";
@@ -67,21 +69,19 @@ export interface MediaController {
 export interface MediaControllerHost {
   /** Is there a route with this id? */
   hasRoute(routeId: string): boolean;
+  /** Send to the session's receiver app over the device's channel, local route or not. */
   sendSessionMessage(sessionId: string, namespace: string, message: string): BridgeResult;
-  /** Messages from a session's receiver app, every namespace. Returns the unsubscribe function. */
-  observeSessionMessages(listener: (sessionId: string, namespace: string, data: string) => void): () => void;
   /** The volume the receiver last reported, if the session is known. */
   sessionVolume(sessionId: string): ReceiverVolume | undefined;
   setSessionVolume(sessionId: string, volume: { level: number } | { muted: boolean }): Promise<BridgeResult>;
   /** Told when a session starts, changes or ends. */
   observeSessions(listener: () => void): () => void;
+  /** Every receiver status that describes the session, with its volume (`OnSessionAddedOrUpdated`). */
+  observeSessionStatus(listener: (sessionId: string, volume: ReceiverVolume) => void): () => void;
+  /** Every MEDIA_STATUS of a session, merged and backfilled by the session tracker (`OnMediaStatusUpdated`). */
+  observeMediaStatus(listener: (sessionId: string, message: Record<string, unknown>) => void): () => void;
 }
 
-/** Bits of `supportedMediaCommands` (`MediaCommand` in cast_internal_message_util.h). */
-const COMMAND_PAUSE = 1;
-const COMMAND_SEEK = 2;
-const COMMAND_QUEUE_NEXT = 64;
-const COMMAND_QUEUE_PREV = 128;
 /** `kQueueNextJumpValue` and `kQueuePrevJumpValue`. */
 const QUEUE_NEXT_JUMP = 1;
 const QUEUE_PREV_JUMP = -1;
@@ -113,17 +113,12 @@ function validSize(image: Json): { width: number; height: number } | null {
     : null;
 }
 
-/**
- * The state `CastMediaController` and `CastSessionTracker` keep for one route: the status, the media session id and
- * the media saved from earlier MEDIA_STATUS messages (receivers often send only what changed).
- */
+/** The state `CastMediaController` keeps for one route: the status and the media session id. */
 class RouteMedia {
   status: MediaStatus = defaultStatus();
   /** `media_session_id_`: -1 until a MEDIA_STATUS names one. */
   mediaSessionId = -1;
-  private saved: Json[] = [];
   readonly observers = new Set<MediaStatusObserver>();
-  private lastDelivered = "";
 
   /** `CastMediaController::SetSession`: take the receiver volume. False when there is none to take. */
   setVolume(volume: ReceiverVolume | undefined): boolean {
@@ -138,25 +133,15 @@ class RouteMedia {
     return true;
   }
 
-  /** `CastSessionTracker::HandleMediaStatusMessage` then `CastMediaController::UpdateMediaStatus`. */
+  /**
+   * `CastMediaController::UpdateMediaStatus`, on a message the tracker has already merged with the saved media and
+   * backfilled (`supportedMediaCommands` as names): the first entry of `status` is the one that counts.
+   */
   setMediaStatus(message: Json): void {
     const list = message.status;
-    if (!Array.isArray(list)) return;
-    const media = list.filter(isRecord).map((m) => ({ ...m }));
-    for (const m of media) {
-      // Backfill for the Cast SDK: the receiver's bit mask of commands becomes a list of names
-      if (typeof m.supportedMediaCommands === "number") m.supportedMediaCommands = commandNames(m.supportedMediaCommands);
-      // CopySavedMediaFieldsToMediaList: fields the receiver left out come from the media saved under the same id
-      const id = typeof m.mediaSessionId === "number" && Number.isInteger(m.mediaSessionId) ? m.mediaSessionId : undefined;
-      const before = id === undefined ? undefined : this.saved.find((s) => s.mediaSessionId === id);
-      if (before !== undefined) for (const [k, v] of Object.entries(before)) if (!(k in m)) m[k] = structuredClone(v);
-    }
-    this.saved = media;
-    this.update(media[0]);
-  }
-
-  private update(first: Json | undefined): void {
-    if (first === undefined) return;
+    if (!Array.isArray(list) || list.length === 0) return;
+    const first: unknown = list[0];
+    if (!isRecord(first)) return;
     const s = this.status;
     const id = first.mediaSessionId;
     if (typeof id === "number" && Number.isInteger(id) && id >= 0) this.mediaSessionId = id;
@@ -194,15 +179,9 @@ class RouteMedia {
     else if (first.playerState === "BUFFERING") s.playState = "buffering";
   }
 
-  /** Tell the observers unless they were already told this exact status. */
-  notify(only?: MediaStatusObserver): void {
-    const key = JSON.stringify(this.status);
-    const targets = only === undefined ? [...this.observers] : [only];
-    if (only === undefined) {
-      if (key === this.lastDelivered) return;
-      this.lastDelivered = key;
-    }
-    for (const o of targets) {
+  /** Tell every observer, each time, as `SetSession` and `SetMediaStatus` do: Chrome does not skip a repeated status. */
+  notify(): void {
+    for (const o of [...this.observers]) {
       try {
         o.onMediaStatusUpdated(structuredClone(this.status));
       } catch (err) {
@@ -210,17 +189,6 @@ class RouteMedia {
       }
     }
   }
-}
-
-function commandNames(mask: number): string[] {
-  const names: string[] = [];
-  if (mask & COMMAND_PAUSE) names.push("pause");
-  if (mask & COMMAND_SEEK) names.push("seek");
-  if (mask & 4) names.push("stream_volume");
-  if (mask & 8) names.push("stream_mute");
-  if (mask & COMMAND_QUEUE_NEXT) names.push("queue_next");
-  if (mask & COMMAND_QUEUE_PREV) names.push("queue_prev");
-  return names;
 }
 
 /** Builds the controllers; `fail` makes the caller's error type from a bridge failure or a missing route. */
@@ -231,37 +199,32 @@ export function createMediaControllers(
   const routes = new Map<string, { media: RouteMedia; handles: number }>();
   let unsubscribe: (() => void) | undefined;
 
-  const onMessage = (sessionId: string, namespace: string, data: string): void => {
+  // AppActivity::SendMediaStatusToClients -> CastMediaController::SetMediaStatus: every MEDIA_STATUS is reported
+  const onMediaStatus = (sessionId: string, message: Json): void => {
     const entry = routes.get(sessionId);
-    if (entry === undefined || namespace !== MEDIA_NAMESPACE) return;
-    let message: unknown;
-    try {
-      message = JSON.parse(data);
-    } catch {
-      return;
-    }
-    if (!isRecord(message) || message.type !== "MEDIA_STATUS") return;
+    if (entry === undefined || !host.hasRoute(sessionId)) return;
     entry.media.setMediaStatus(message);
     entry.media.notify();
   };
+  // AppActivity::OnSessionUpdated -> CastMediaController::SetSession: every receiver status, when it has a volume
+  const onSessionStatus = (sessionId: string, volume: ReceiverVolume): void => {
+    const entry = routes.get(sessionId);
+    if (entry === undefined || !host.hasRoute(sessionId)) return;
+    if (entry.media.setVolume(volume)) entry.media.notify();
+  };
   const onSessions = (): void => {
-    for (const [id, entry] of [...routes]) {
-      if (!host.hasRoute(id)) {
-        routes.delete(id);
-        continue;
-      }
-      // AppActivity::OnSessionUpdated: every receiver status updates the controller's volume
-      if (entry.media.setVolume(host.sessionVolume(id))) entry.media.notify();
-    }
+    for (const id of [...routes.keys()]) if (!host.hasRoute(id)) routes.delete(id);
     if (routes.size === 0) stopListening();
   };
   const listen = (): void => {
     if (unsubscribe !== undefined) return;
-    const offMessages = host.observeSessionMessages(onMessage);
-    const offSessions = host.observeSessions(onSessions);
+    const offs = [
+      host.observeMediaStatus(onMediaStatus),
+      host.observeSessionStatus(onSessionStatus),
+      host.observeSessions(onSessions),
+    ];
     unsubscribe = () => {
-      offMessages();
-      offSessions();
+      for (const off of offs) off();
     };
   };
   function stopListening(): void {
@@ -285,12 +248,10 @@ export function createMediaControllers(
       const { media } = entry;
       const route = entry;
       route.handles++;
-      // AppActivity::BindMediaController: take the session's volume, then ask the receiver for the media status
-      const hadVolume = media.setVolume(host.sessionVolume(routeId));
-      if (observer !== undefined) {
-        media.observers.add(observer);
-        if (hadVolume) media.notify(observer);
-      }
+      // AppActivity::BindMediaController: add the observer, SetSession (which tells every observer when there is a
+      // volume), then ask the receiver for the media status
+      if (observer !== undefined) media.observers.add(observer);
+      if (media.setVolume(host.sessionVolume(routeId))) media.notify();
       host.sendSessionMessage(routeId, MEDIA_NAMESPACE, JSON.stringify({ type: "GET_STATUS", requestId: nextRequestId++ }));
 
       const need = (): void => {
