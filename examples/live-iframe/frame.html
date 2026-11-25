@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>live iframe</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 8px; background: #fafafa; }
+  h2 { font-size: 14px; margin: 0 0 6px; }
+  button { margin: 0 4px 4px 0; padding: 4px 8px; }
+  dl { display: grid; grid-template-columns: 8em 1fr; gap: 2px 8px; margin: 6px 0; }
+  dt { color: #555; }
+  dd { margin: 0; word-break: break-all; font-family: ui-monospace, monospace; }
+  #events { height: 150px; overflow: auto; background: #fff; border: 1px solid #ccc; padding: 4px; font: 11px ui-monospace, monospace; white-space: pre-wrap; }
+</style>
+<h2 id="title"></h2>
+<div>
+  <button id="cast">Cast</button>
+  <button id="load">Load test stream</button>
+  <button id="playpause">Play / pause</button>
+  <button id="leave">Leave (keep playing)</button>
+  <button id="stop">Stop casting</button>
+</div>
+<dl>
+  <dt>origin</dt><dd id="origin"></dd>
+  <dt>frame instance</dt><dd id="instance"></dd>
+  <dt>presentation</dt><dd id="presentation"></dd>
+  <dt>cast state</dt><dd id="castState"></dd>
+  <dt>session state</dt><dd id="sessionState"></dd>
+  <dt>session id</dt><dd id="sessionId"></dd>
+  <dt>device</dt><dd id="device"></dd>
+  <dt>player</dt><dd id="player"></dd>
+  <dt>events received</dt><dd id="count">0</dd>
+</dl>
+<div id="events"></div>
+<script src="frame.js"></script>

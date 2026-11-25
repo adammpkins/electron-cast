@@ -95,7 +95,9 @@
     "trace:capture": "node tools/capture-trace.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run docs:check",
     "prepack": "npm run build",
-    "smoke": "npm run build && node smoke/run.mjs"
+    "smoke": "npm run build && node smoke/run.mjs",
+    "live:iframe": "node examples/live-iframe/run.mjs",
+    "probe:discovery": "node tools/probe-discovery.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
