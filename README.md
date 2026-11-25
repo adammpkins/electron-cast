@@ -66,8 +66,15 @@ stand-in Presentation API backed by the main process, and **Google's own `cast_s
 and run unmodified**, as they do in Chrome. electron-cast never replaces Google's SDK.
 
 A cast has to start from a user gesture (a click on the page's cast button), as in Chrome. As in Chrome, a session
-belongs to the app rather than the page, so a page that reloads gets its session back through auto-join. Current
-limit: Google's SDK running inside an iframe gets no events, because messages go to the main frame.
+belongs to the app rather than the page, so a page that reloads gets its session back through auto-join.
+
+After the Electron app itself restarts, a session may still be playing on the device. As in Chrome, nothing is saved
+for that and auto-join does not find it (Chrome's auto-join only joins sessions started by that browser run).
+A page rejoins it only when it knows the session id, which Google's SDK exposes as `session.sessionId`: the page keeps
+the id (in `localStorage`, say) and calls `chrome.cast.requestSessionById(id)` (or `cast.framework`'s equivalent) at
+startup. electron-cast then asks the known devices which one runs that session and joins it if the app matches, with
+no origin check, exactly as Chrome does. If the device no longer runs the session, the call fails like in Chrome.
+`mode: "chromecast"` is unchanged and does not do this. Current limit: Google's SDK running inside an iframe gets no events, because messages go to the main frame.
 
 **Fallback: `mode: "chromecast"`.** This installs electron-cast's own implementation of `chrome.cast` and
 `chrome.cast.media` and blocks Google's loader scripts. Use it for pages that call `chrome.cast` without loading

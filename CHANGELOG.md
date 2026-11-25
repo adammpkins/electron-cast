@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Presentation mode: a page can rejoin a session that kept playing on the device after the app restarted, the way it
+  can in Chrome: `reconnect("cast-session_<id>")` (Google's SDK `requestSessionById`) now finds sessions this run did
+  not start, by asking the known devices what they run. Auto-join still does not join them, as in Chrome, and nothing
+  is persisted. The service gains a `joinRunningSession` call for this; `mode: "chromecast"` is unchanged.
+
 ## 0.3.1
 
 - A page that reloads while casting now gets its session back. A navigation used to leave the page's sessions, which

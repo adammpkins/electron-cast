@@ -143,6 +143,15 @@ open on the device, get no events, and the sender's next page rejoins them throu
 Chrome's Media Router. A parked session ends when the receiver app stops or the device drops, and is left for good when
 the webContents is destroyed.
 
+After an app restart nothing is persisted, as in Chrome. Chrome's `CastSessionTracker` learns the sessions running on
+every sink from receiver status, and `CastActivityManager::AddNonLocalActivity` turns each into a non-local activity.
+`FindActivityForAutoJoin` skips non-local activities (`route().is_local()`), so `reconnect("auto-join")` finds nothing;
+`FindActivityForSessionJoin` accepts any activity by `cast-session_<id>`, and `CastActivity::CanJoinSession` checks only
+the app, with no origin check. The handler's `reconnect("cast-session_<id>")` calls the service's `joinRunningSession`,
+which joins a session it holds (same origin rule as `joinSession`) or else asks each known device for its receiver
+status and registers the session it finds. The one difference from Chrome: the lookup runs on request instead of
+tracking every device continuously. The page must supply the id (Google's SDK stores nothing itself).
+
 Known gap: events go to the main frame only, so Google's SDK inside an iframe gets nothing.
 
 ## Electron layer (`src/electron/`)
