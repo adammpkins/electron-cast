@@ -1,14 +1,20 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
-import { createCastManager } from "electron-cast/main";
+import { app, BrowserWindow, dialog, ipcMain, screen, session } from "electron";
+import { createCastManager, createReceiverWindows } from "electron-cast/main";
 
 const here = (name) => fileURLToPath(new URL(name, import.meta.url));
 
 // The page is served over http on loopback so it has a real origin that allowOrigin can name. (A file: page has an
 // opaque origin, and Google's Cast SDK is meant to run on http(s) pages.)
-const files = { "/": ["index.html", "text/html"], "/page.js": ["page.js", "text/javascript"] };
+const files = {
+  "/": ["index.html", "text/html"],
+  "/page.js": ["page.js", "text/javascript"],
+  "/receiver.html": ["receiver.html", "text/html"],
+  "/receiver.js": ["receiver.js", "text/javascript"],
+};
 const server = createServer(async (req, res) => {
   const entry = files[req.url ?? ""];
   if (entry === undefined) {
@@ -21,32 +27,58 @@ const server = createServer(async (req, res) => {
 let win;
 let pageOrigin;
 
-const cast = createCastManager({
-  ipcMain,
-  // Only our own page may cast.
-  allowOrigin: (origin) => origin === pageOrigin,
-  // Called when the page asks to start a session. Resolve a device, "stop" or null (cancel).
-  async selectDevice(devices, request) {
-    const buttons = devices.map((d) => `${d.name} (${d.model})`);
-    if (request.session) buttons.push("Stop casting");
-    buttons.push("Cancel");
-    const { response } = await dialog.showMessageBox(win, {
-      type: "question",
-      message: "Cast to",
-      buttons,
-      cancelId: buttons.length - 1,
-      noLink: true,
-    });
-    if (response < devices.length) return devices[response];
-    if (request.session && response === devices.length) return "stop";
-    return null;
-  },
-});
+let cast;
 
 // Not a top-level `await app.whenReady()`: in an ESM main that never lets Electron finish starting up.
 app.whenReady().then(async () => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   pageOrigin = `http://127.0.0.1:${server.address().port}`;
+
+  cast = createCastManager({
+    ipcMain,
+    // Only our own page may cast.
+    allowOrigin: (origin) => origin === pageOrigin,
+    // Called when the page asks to start a session. Resolve a device, "stop" or null (cancel).
+    async selectDevice(devices, request) {
+      const buttons = devices.map((d) => `${d.name} (${d.model})`);
+      if (request.session) buttons.push("Stop casting");
+      buttons.push("Cancel");
+      const { response } = await dialog.showMessageBox(win, {
+        type: "question",
+        message: "Cast to",
+        buttons,
+        cancelId: buttons.length - 1,
+        noLink: true,
+      });
+      if (response < devices.length) return devices[response];
+      if (request.session && response === devices.length) return "stop";
+      return null;
+    },
+    // Wired displays: a presentation page (receiver.html) is shown fullscreen on another screen, as Chrome does. The
+    // receiver preload is generated into a folder the app owns, because a sandboxed preload must be a real file.
+    wiredDisplay: {
+      screen,
+      createReceiverWindow: createReceiverWindows({
+        BrowserWindow,
+        session,
+        ipcMain,
+        preloadDir: join(app.getPath("userData"), "electron-cast-receiver"),
+      }).factory,
+      // The page window is never offered as a target, so with one screen this list is empty.
+      displayOf: (wc) => screen.getDisplayMatching(BrowserWindow.fromWebContents(wc).getBounds()).id,
+      async selectDisplay(sinks) {
+        if (sinks.length === 0) return null;
+        const { response } = await dialog.showMessageBox(win, {
+          type: "question",
+          message: "Present on",
+          buttons: [...sinks.map((s) => s.name), "Cancel"],
+          cancelId: sinks.length,
+          noLink: true,
+        });
+        return response < sinks.length ? sinks[response].id : null;
+      },
+    },
+  });
   await cast.start();
 
   win = new BrowserWindow({
@@ -65,5 +97,5 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => app.quit());
 app.on("will-quit", () => {
   server.close();
-  void cast.dispose();
+  void cast?.dispose();
 });

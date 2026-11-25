@@ -7,6 +7,9 @@ A small Electron app that shows the recommended setup:
 - `preload.js`: calls `installCastBridge`. The window uses `sandbox: true` and `contextIsolation: true`.
 - `index.html` and `page.js`: a page that loads Google's own Cast SDK (`cast_sender.js?loadCastFramework=1`), shows
   the launcher button, and loads a public HLS sample on the default media receiver (`CC1AD845`).
+- `receiver.html` and `receiver.js`: a presentation page. The "Present on a display" button shows it fullscreen on
+  another screen (a wired display, as Chrome does), and the two pages exchange messages. The button is enabled only
+  when a second display is connected. `main.js` wires this with the `wiredDisplay` option and `createReceiverWindows`.
 
 ## Run it
 

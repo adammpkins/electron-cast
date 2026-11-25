@@ -35,3 +35,27 @@ window.__onGCastApiAvailable = (available) => {
     status.textContent = error ? `Load failed: ${error}` : "Playing on the device.";
   });
 };
+
+// Wired displays: present receiver.html on another screen (needs a second display). start() needs the click.
+const presentButton = document.getElementById("present");
+const presentStatus = document.getElementById("present-status");
+const request = new PresentationRequest([`${location.origin}/receiver.html`]);
+let presented = null;
+
+request.getAvailability().then((availability) => {
+  const update = () => { presentButton.disabled = !availability.value; };
+  availability.addEventListener("change", update);
+  update();
+});
+
+presentButton.addEventListener("click", async () => {
+  try {
+    presented = await request.start();
+    presentStatus.textContent = `Presenting (${presented.state})`;
+    presented.addEventListener("connect", () => { presentStatus.textContent = "Receiver connected"; presented.send("hello"); });
+    presented.addEventListener("message", (event) => { presentStatus.textContent = `Receiver said: ${event.data}`; });
+    presented.addEventListener("terminate", () => { presentStatus.textContent = "Presentation ended"; });
+  } catch (error) {
+    presentStatus.textContent = `Not presented: ${error.name}`;
+  }
+});

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Wired displays.** New `wiredDisplay` option on `createCastManager` (presentation mode): other screens are
+  presentation sinks (`wired_display_<id>`, "Display N"), as Chrome's WiredDisplayMediaRouteProvider has them. A
+  `PresentationRequest` whose URL is https (not the legacy Cast URL) or http on localhost can start on a display: the
+  page opens fullscreen in a receiver window that has its own in-memory session, no popups, no dialogs, no permissions
+  except fullscreen, and ends the presentation if it navigates away. The receiver page gets
+  `navigator.presentation.receiver` (`connectionList`, `connectionavailable`, `send`, `close`, `terminate`), and the
+  controller can `reconnect(id)`. Closing the window, removing the display or `terminate()` ends the presentation for every
+  controller; a controller that goes away only leaves it. New exports: `createReceiverWindows` (the Electron
+  BrowserWindow part, taking `BrowserWindow`, `session`, `ipcMain` and a folder for the generated receiver preload), the
+  display rules, and `manager.wiredDisplay` (sinks and routes observers, `terminateRoute`). `mode: "chromecast"` is unchanged.
+
 ## 0.4.0
 
 - **Devices are now verified, as in Chrome.** `CastClient.connect()` runs the Cast device authentication challenge

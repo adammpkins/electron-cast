@@ -302,3 +302,38 @@ import { installCastBridge } from "electron-cast/preload"; // not the root: it l
 installCastBridge({ contextBridge, ipcRenderer });
 // the page now has chrome.cast; the bridge key defaults to "__electronCastBridge"
 ```
+
+## Wired displays
+
+Opt-in (`wiredDisplay` on `createCastManager`, presentation mode only). It follows Chromium's
+`WiredDisplayMediaRouteProvider` (chrome/browser/media/router/providers/wired_display/), `PresentationReceiverWindowController`
+and `LocalPresentationManager`, with the receiver side of Blink's `PresentationReceiver`. Code: `src/electron/wired-display/`,
+`src/polyfill/presentation-receiver.ts`.
+
+- **Sinks** (`displays.ts`): one per display, id `wired_display_<id>`, name "Display N" (N counts from 1 over the sorted
+  list: primary first, then by y, then x). Displays that mirror the primary are dropped, so a single or mirrored setup has
+  no sinks. The display the controller window is on is hidden only in the picker (`displayOf`), as Chrome's dialog does;
+  availability and `getSinks` still list it.
+- **Sources**: https that is not the legacy Cast URL, or http on localhost. Anything else is not served.
+- **Routes** (`provider.ts`): one per presentation, description `Presenting (<host>)`. Creating a route on a display first
+  terminates the presentation already there, as `CreateRoute` does.
+- **Local presentations** (`local-presentation.ts`): in-process connection pairs (`ControllerEnd`/`ReceiverEnd`), a
+  pending controller per frame until the receiver page registers, and an origin check on join. A connection is
+  `connecting` until the receiver page touches `navigator.presentation`, then `connected`.
+- **Termination**: `terminate()` (either side), a closed window, a removed display and navigation of the receiver all end
+  through the window closing, and every controller sees `terminated`. A controller going away only unregisters its
+  connection.
+- **Receiver window** (`electron-windows.ts`): fullscreen, shown inactive, on the display\x27s bounds, own non-persistent
+  session per presentation, popups, dialogs and downloads refused, only fullscreen permitted, and the first main-frame
+  navigation is the only one allowed (`PresentationNavigationPolicy`). F11 toggles fullscreen (Control+Command+F on macOS).
+- **Receiver page API** (`presentation-receiver.ts`): `navigator.presentation.receiver.connectionList`,
+  `connectionavailable`, strings over `send`, `close`, `terminate`; it registers lazily on first use.
+
+Forced by Electron: a sandboxed preload must be a real bundled file, so the receiver preload is generated into a folder the
+app gives (`preloadDir`); the package never imports Electron, so `screen`, `BrowserWindow`, `session` and `ipcMain` are passed
+in; Electron has no per-window "display observer", so the app supplies `displayOf`; binary messages are not supported (as in
+the controller stand-in).
+
+Notes for docs/CHROMIUM-MAP.md (absent on this branch), one row per rule: sink ids/names and ordering, mirrored displays,
+source rule, CreateRoute terminating the display\x27s presentation, route description, receiver window lockdown and navigation
+policy, local presentation manager, receiver connection list semantics, picker hides the controller\x27s display.

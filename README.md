@@ -180,6 +180,10 @@ there describes the top-level await form of the same hang).
   closes leaves its sessions without stopping playback. After an app restart a page rejoins a session by id (above).
 - A main-process API modelled on Chrome's Media Router: observe devices and sessions, stop or detach a session, set
   its volume, and keep a picker up to date while it is open ([docs/MAIN-API.md](docs/MAIN-API.md)).
+- Wired displays, as in Chrome: with the `wiredDisplay` option another screen is a presentation sink. A page's
+  `PresentationRequest` for an https URL (or http on localhost) opens that page fullscreen in a locked-down window on
+  the chosen display, and the two pages exchange messages, rejoin by id and end together (see
+  [docs/DESIGN.md](docs/DESIGN.md#wired-displays)). Needs a second display; unit-tested with fakes and tried live on one.
 
 **Default mode (Google's SDK):**
 
