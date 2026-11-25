@@ -1,6 +1,6 @@
 # Main-process API
 
-`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `settled()`, `dispose()` and the API below, which lets the
+`createCastManager` returns a `CastManager`: `start()`, `devices()`, `discoverSinksNow()`, `networkChanged()`, `settled()`, `dispose()` and the API below, which lets the
 app observe and control casting from the main process. It follows Chrome's Media Router, so the same concepts and
 method names apply: devices are **sinks**, running sessions are **routes**, and you watch both with **observers**.
 

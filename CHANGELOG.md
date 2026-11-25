@@ -51,9 +51,16 @@ is frozen and behaves as before for pages; it shares the device list.
   URL. A device that is also a Cast sink (its UDN is the Cast id, and its channel is open) is shown as a Cast device
   only, as in Chrome. On by default, as in Chrome; `dial: false` on `createCastManager` turns it off (SSDP and the
   HTTP requests to devices stop entirely). A custom `discovery` turns it off unless `dial` is given.
-  - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009), a DIAL
-    sink hidden by a Cast sink comes back as soon as the Cast sink goes, requests have timeouts (Chrome sets none), and
+  - Differences from Chrome: a DIAL sink hidden by a Cast sink comes back as soon as the Cast sink goes, requests have timeouts (Chrome sets none), and
     a DIAL route has no volume or media control (`BindMediaController` is not implemented there either).
+  - **A DIAL device is tried as a Cast device**, as Chrome's `CastMediaSinkServiceImpl` does
+    (`OnSinkAddedOrUpdated`, `TryConnectDialDiscoveredSink`, `CreateCastSinkFromDialSink`): when a DIAL sink is new or
+    changed, and on `discoverSinksNow()`, a Cast channel is opened to its address on port 8009. If it opens and the device
+    authenticates, the device is a Cast sink (id the sink's UUID, its friendly name and model, audio and video, or audio
+    only for an audio-only certificate) and the DIAL sink is hidden. It is skipped when a Cast sink has that id or that
+    address. Every failed attempt is counted per device; at ten (`kMaxDialSinkFailureCount`) the device is taken for a
+    non-Cast device and not tried again, until it is opened from mDNS or the app calls the new `manager.networkChanged()`
+    (Chrome resets on a network change by itself, through `DiscoveryNetworkMonitor`).
   - DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
     thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see,
     the monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its
