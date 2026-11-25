@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Device authentication no longer starts refusing devices that send no CRL once the built-in fallback CRL is past its 20
+  weeks: with a lapsed fallback and no valid CRL from the device, the revocation check is skipped and
+  `deviceAuth.revocationChecked` is `false` (Chromium fails closed; Chrome updates itself, an app may not). All other
+  checks, the device's own CRL, and revocation by a still-valid fallback CRL are unchanged. The fallback window now
+  starts at the package's build time, stamped by `npm run build`.
 - CI now runs a smoke test in a real Electron (35, 40 and the latest stable, on Linux, Windows and macOS): a sandboxed
   preload built from `electron-cast/preload`, `createCastManager` from `electron-cast/main` with a fake device, both
   modes. `npm run smoke` runs it locally.

@@ -144,7 +144,7 @@ test("embedded roots are the Cast, Eureka and CRL roots from Chromium", () => {
 test("a good chain and signature authenticate, on the fallback CRL when the device sends none", () => {
   const tls = tlsCert();
   const result = authenticateChallengeReply(reply(tls), tls, nonce, goodOptions());
-  assert.deepEqual(result, { policy: "unrestricted", hashAlgorithm: "sha256", nonceEchoed: true, usedFallbackCrl: true });
+  assert.deepEqual(result, { policy: "unrestricted", hashAlgorithm: "sha256", nonceEchoed: true, usedFallbackCrl: true, revocationChecked: true });
 });
 
 test("a SHA-1 signature is accepted, as Chromium does", () => {
@@ -157,6 +157,7 @@ test("a device-supplied CRL that verifies is used instead of the fallback", () =
   const tls = tlsCert();
   const result = authenticateChallengeReply(reply(tls, { crl: crlBundle() }), tls, nonce, goodOptions());
   assert.equal(result.usedFallbackCrl, false);
+  assert.equal(result.revocationChecked, true);
 });
 
 test("a nonce that is not echoed is tolerated and reported", () => {
@@ -327,11 +328,55 @@ test("revocation by the fallback CRL is rejected", () => {
 test("without a valid CRL from the device or a valid fallback CRL the device is refused", () => {
   const tls = tlsCert();
   assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, goodOptions({ fallbackCrl: null }))).reason, "crl_invalid");
-  // The fallback CRL is valid for 20 weeks from its build time.
+  // The fallback CRL is valid for 20 weeks from its build time; past that the check is skipped (tests below), not failed.
   const stale = goodOptions({ fallbackCrlBuildTime: NOW - 21 * 7 * DAY });
-  assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, stale)).reason, "crl_invalid");
   // A device-supplied CRL still carries a device whose fallback CRL is gone.
   authenticateChallengeReply(reply(tls, { crl: crlBundle() }), tls, nonce, stale);
+});
+
+const staleOptions = (over: DeviceAuthOptions = {}) => goodOptions({ fallbackCrlBuildTime: NOW - 21 * 7 * DAY, ...over });
+
+test("a stale fallback CRL and no CRL from the device: accepted, with the revocation check reported as skipped", () => {
+  const tls = tlsCert();
+  const result = authenticateChallengeReply(reply(tls), tls, nonce, staleOptions());
+  assert.deepEqual(result, { policy: "unrestricted", hashAlgorithm: "sha256", nonceEchoed: true, usedFallbackCrl: false, revocationChecked: false });
+});
+
+test("a stale fallback CRL does not weaken the other checks", () => {
+  const tls = tlsCert();
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls, { signKey: tlsKey }), tls, nonce, staleOptions())).reason, "bad_signature");
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, staleOptions({ roots: [rootCert(otherRootKey, "Other Root")] }))).reason, "untrusted_chain");
+});
+
+test("a stale fallback CRL and a valid CRL from the device: checked normally", () => {
+  const tls = tlsCert();
+  const result = authenticateChallengeReply(reply(tls, { crl: crlBundle() }), tls, nonce, staleOptions());
+  assert.equal(result.revocationChecked, true);
+  assert.equal(result.usedFallbackCrl, false);
+});
+
+test("a stale fallback CRL and a device CRL that revokes the device: refused", () => {
+  const tls = tlsCert();
+  const revoking = crlBundle({ revokedPublicKeyHashes: [sha256(spkiOf(interKey.publicKey))] });
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls, { crl: revoking }), tls, nonce, staleOptions())).reason, "revoked");
+});
+
+test("a fresh fallback CRL that revokes the device refuses it, with no CRL from the device", () => {
+  const tls = tlsCert();
+  const fallbackCrl = crlBundle({ revokedPublicKeyHashes: [sha256(spkiOf(interKey.publicKey))] });
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, goodOptions({ fallbackCrl }))).reason, "revoked");
+});
+
+test("a fallback CRL that is broken, not just old, still refuses a device without a CRL", () => {
+  const tls = tlsCert();
+  const broken = staleOptions({ crlRoots: [rootCert(otherRootKey, "Other CRL Root")] });
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, broken)).reason, "crl_invalid");
+});
+
+test("a fallback CRL whose build time is still ahead is not stale", () => {
+  const tls = tlsCert();
+  const future = goodOptions({ fallbackCrlBuildTime: NOW + DAY });
+  assert.equal(rejection(() => authenticateChallengeReply(reply(tls), tls, nonce, future)).reason, "crl_invalid");
 });
 
 test("a CRL signed by an untrusted signer is not used", () => {

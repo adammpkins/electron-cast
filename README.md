@@ -129,6 +129,11 @@ Receivers that are not Google-certified (open-source ones, for example) need it 
 createCastManager({ ipcMain, selectDevice, verifyDevices: false });   // CastClient: { verifyDevice: false }
 ```
 
+Like Chrome's own built-in security data, the built-in fallback CRL goes stale: it counts for 20 weeks from the build
+time stamped by `npm run build`. A device that sends no CRL of its own is then accepted without a revocation check
+(`deviceAuth.revocationChecked` is `false`) instead of refused. Everything else is still checked; update the package
+to get a fresh fallback CRL. Details: [docs/DESIGN.md](docs/DESIGN.md) and [SECURITY.md](SECURITY.md).
+
 It is not yet tested against real hardware. How it works and what it leaves out: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## What works

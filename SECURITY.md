@@ -149,7 +149,7 @@ that certificate and instead authenticates the device with a separate challenge 
 `urn:x-cast:com.google.cast.tp.deviceauth` namespace, which checks the device's certificate chain against Google's
 Cast root certificates.
 
-In v0.3.1 electron-cast does not do that challenge. The connection is encrypted but the device is not
+In v0.3.1 electron-cast does not do that challenge. (Later releases do; see below.) The connection is encrypted but the device is not
 authenticated. Anyone on the local network who can answer mDNS queries, or who can intercept traffic between your
 computer and the device, can pose as a Cast device. If the user picks that device, the attacker receives whatever the
 page sends it, such as media URLs and app-specific messages and tokens (YouTube's lounge tokens, for example). It
@@ -158,8 +158,17 @@ does not get cookies or anything else from the page.
 `CastClientOptions.tls` is spread after the defaults, so an app that wants to pin a certificate can pass its own
 `tls` options through a custom `createClient`.
 
-**Upcoming (not in v0.3.1, being added on a separate branch).** The client will verify the device's Cast certificate
-chain, and this will be on by default. This section will be updated when it is released.
+**Upcoming (not in v0.3.1).** The client verifies the device's Cast certificate chain, on by default.
+
+**Old releases and devices that send no CRL.** Revocation uses the CRL the device sends, or else a fallback CRL built
+into the package that counts for 20 weeks from the package's build time. When a release is older than that and the
+device sent no valid CRL, the revocation check is skipped (`CastClient.deviceAuth.revocationChecked` is `false`),
+where Chromium would refuse the device; Chrome updates itself, an Electron app may not, and Chrome likewise stops
+enforcing Certificate Transparency when its built-in log list is over 70 days old
+(`ChromeCTPolicyEnforcer::IsLogDataTimely`). What still holds: the chain to a Cast root, the device certificate
+checks, the signature over this connection's TLS certificate, revocation by a CRL the device sends, and revocation by
+a fallback CRL that has not lapsed. What does not: a device Google has revoked can pass if it sends no CRL. Update
+electron-cast regularly, and treat `revocationChecked: false` as a prompt to do so.
 
 ## mDNS exposure
 

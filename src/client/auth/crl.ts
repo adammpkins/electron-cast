@@ -174,6 +174,17 @@ export function parseAndVerifyCrl(crlProto: Uint8Array, time: number, options: C
   return undefined;
 }
 
+/**
+ * True when the fallback CRL is intact (it parses and its signer is trusted) but its 20-week window, counted from
+ * `fallbackBuildTime`, has lapsed at `time`. This tells "the built-in data is old" from "the data is broken".
+ */
+export function isFallbackCrlStale(crlProto: Uint8Array, time: number, options: CrlVerificationOptions): boolean {
+  const build = options.fallbackBuildTime as number;
+  const notAfterMs = build + FALLBACK_CRL_VALIDITY_MS;
+  if (time <= notAfterMs) return false;
+  return parseAndVerifyCrl(crlProto, notAfterMs, { ...options, isFallback: true }) !== undefined;
+}
+
 /** VerifyCRL; returns the overall not-after (ms) or undefined on failure. */
 function verifyCrl(crl: CrlMessage, tbs: TbsCrl, notBeforeMs: number, notAfterMs: number, time: number, options: CrlVerificationOptions): number | undefined {
   if (crl.signature === undefined || crl.signerCert === undefined) return undefined;

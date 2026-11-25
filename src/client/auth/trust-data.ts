@@ -1,3 +1,5 @@
+import { BUILD_TIME } from "./build-time.ts";
+
 /**
  * Embedded Cast trust data, copied byte for byte from Chromium
  * (components/media_router/common/providers/cast/certificate/: cast_root_ca_cert_der-inc.h, eureka_root_ca_der-inc.h,
@@ -10,11 +12,14 @@
  *   Cast CRL Root CA    8b77c60291f9d62764613083f49750b1c5caac2d9efbe5a28edf301f9d84831d
  *   Fallback CRL bundle 2576ba74902221bd1a231a67cc4fc6862bd85d438edec26881fa1f5dfe5e25fc
  *
- * Chromium treats the fallback CRL as valid for 20 weeks from the build time of the binary. A library has no
- * per-build clock, so this constant stands in for it: refresh the fallback CRL and this date together on each release.
- * Once it lapses, devices that do not send their own valid CRL are refused (ERR_FALLBACK_CRL_INVALID in Chromium).
+ * Chromium treats the fallback CRL as valid for 20 weeks from the build time of the binary (base::GetBuildTime()).
+ * `npm run build` stamps the package's build time into dist (see build-time.ts); a source checkout and the tests use
+ * the date below instead: refresh the fallback CRL and this date together on each release. Once the window lapses, a
+ * device that sends no valid CRL of its own is accepted without a revocation check (Chromium refuses it with
+ * ERR_FALLBACK_CRL_INVALID; docs/DESIGN.md says why this differs).
  */
-export const FALLBACK_CRL_BUILD_TIME = Date.UTC(2026, 10, 24);
+export const FALLBACK_CRL_DEFAULT_BUILD_TIME = Date.UTC(2026, 10, 24);
+export const FALLBACK_CRL_BUILD_TIME = BUILD_TIME ?? FALLBACK_CRL_DEFAULT_BUILD_TIME;
 
 export const CAST_ROOT_CA_B64 = [
   "MIIDxTCCAq2gAwIBAgIBAjANBgkqhkiG9w0BAQUFADB1MQswCQYDVQQGEwJVUzETMBEGA1UECAwKQ2FsaWZvcm5pYTEWMBQGA1UE",

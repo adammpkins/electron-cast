@@ -82,7 +82,9 @@ and `.../cast/certificate/`, with BoringSSL's path validator under it):
    expired (Chromium's `GetValidationDate`).
 5. The device certificate must assert digitalSignature, have a common name and a usable key.
 6. Revocation uses the CRL the device sent (verified against the Cast CRL Root CA) or else the built-in fallback CRL,
-   which counts as valid for 20 weeks from `FALLBACK_CRL_BUILD_TIME`. With neither, the device is refused.
+   which counts as valid for 20 weeks from the package's build time (see below). If the device sent no valid CRL and the
+   fallback has lapsed, the revocation check is skipped and `deviceAuth.revocationChecked` is `false`; with a fallback
+   that is broken rather than old, or one that is not yet valid, the device is refused (`crl_invalid`).
 7. The signature (RSASSA-PKCS1-v1_5, SHA-1 or SHA-256 as the reply says) must verify under the device certificate's
    key over `sender_nonce || DER of the TLS certificate`, which ties the proof to this connection.
 
@@ -93,8 +95,26 @@ device that fails shows in the picker but cannot be cast to.
 Not checked, or different from Chromium:
 
 - Chromium's policy result `audio_only` is reported in `CastClient.deviceAuth.policy` but nothing acts on it.
-- The fallback CRL's window starts at a constant (`src/client/auth/trust-data.ts`) instead of the binary's build time,
-  so it has to be refreshed with each release.
+- A stale fallback CRL skips revocation instead of failing closed. Chromium's `CRL_REQUIRED_WITH_FALLBACK` policy
+  returns `ERR_FALLBACK_CRL_INVALID` (`VerifyDeviceCertUsingCustomTrustStore` in
+  `components/media_router/common/providers/cast/certificate/cast_cert_validator.cc`) once the fallback is older than 20
+  weeks, which is safe there because Chrome auto-updates. An Electron app that stops updating would start refusing every
+  device that sends no CRL, about 20 weeks after its electron-cast release. For stale built-in security data Chrome
+  degrades the same way: `ChromeCTPolicyEnforcer::IsLogDataTimely` in
+  `components/certificate_transparency/chrome_ct_policy_enforcer.cc` treats its built-in CT log list as timely for 70 days
+  (`(current_time - log_list_date_).InDays() < 70`), and an untimely build stops CT enforcement
+  (`CT_POLICY_BUILD_NOT_TIMELY`) rather than refusing the connection. electron-cast does the same for revocation, and only
+  when the fallback CRL is intact but past its window and the device sent no valid CRL. Still enforced: chain to a Cast
+  root, the device certificate checks, the signature over this connection's TLS certificate, the device's own CRL
+  (including revocation by it), and revocation by a fallback CRL that is still valid. `DeviceAuthResult.revocationChecked`
+  is `false` in the skipped case.
+- The fallback CRL's window starts at the package's build time, as Chromium's does at `base::GetBuildTime()`.
+  `npm run build` runs `scripts/stamp-build-time.mjs` after `tsc`, which rewrites the one `BUILD_TIME = undefined`
+  assignment in `dist/client/auth/build-time.js` and `dist/cjs/client/auth/build-time.js` (honouring
+  `SOURCE_DATE_EPOCH`). The source keeps `undefined`, so tests and source checkouts use `FALLBACK_CRL_DEFAULT_BUILD_TIME`
+  in `src/client/auth/trust-data.ts`, which still has to be refreshed with the fallback CRL on each release. Patching
+  the emit keeps the working tree clean and needs no new dependency, and a published package carries the date of its
+  own build, not of the last commit.
 - ML-DSA and other post-quantum keys, and Merkle tree certificates, are not understood (BoringSSL's newer paths).
 - As in Chromium, the reply's `signature_algorithm` field is ignored and a missing or different echoed nonce is
   tolerated (recorded in `deviceAuth.nonceEchoed`).
