@@ -552,10 +552,10 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
         };
         if (urls !== undefined) {
           for (const url of urls) {
-            const provider: StatusProviderId | undefined = isDialSource(url) ? "DIAL" : parsePresentationUrl(url) !== null ? "CAST" : undefined;
+            const provider: StatusProviderId | undefined = isDialSource(url) ? "DIAL" : castAppInfosOf(url, availability?.offscreenTab?.() === true) !== null ? "CAST" : undefined;
             if (provider === undefined) continue;
             report(provider, url, (d) => matchesBase(d)
-              && presentationUrlForDevice(d, [url], availability?.cached.bind(availability), dialAvailable) !== null);
+              && presentationUrlForDevice(d, [url], availability?.cached.bind(availability), dialAvailable, availability?.offscreenTab?.() === true) !== null);
           }
         } else if (mirrorSource !== undefined) {
           report("CAST", mirrorSource.id, matchesBase);
