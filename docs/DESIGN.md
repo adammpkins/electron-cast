@@ -506,9 +506,8 @@ in `routes_by_frame_`, so `DoLaunchSession` then finds that route there and call
 STOP, and sends the LAUNCH right after it without waiting. Deviation: electron-cast waits for the STOP to be answered
 before it sends the LAUNCH. Tried on a Nest Hub Max, Chrome's sequences all got `LAUNCH_ERROR` `CANCELLED` within 0.3 s:
 STOP then LAUNCH back to back, with and without the transport CLOSE sent first, and a LAUNCH alone with the mirroring app
-left to the receiver to replace (the `pending_activity_removal_` path of `LaunchSession`). Waiting for the STOP reply works
-(logs `live-parity/7-fling-order-stop-then-launch.log`, `chrome-sequence/fling-noclose.log` and `fling-launchonly.log` kept
-with the live-test run; passing run `7-fling.log`). A route the receiver ended
+left to the receiver to replace (the `pending_activity_removal_` path of `LaunchSession`). Waiting for the STOP reply
+worked in each run. Whether Chrome itself gets `CANCELLED` from that device is untested. A route the receiver ended
 itself (what a LAUNCH from another sender does) is dropped with no STOP or CLOSE, as `OnSessionRemoved` does
 (`MirroringActivity::onReceiverStatus`).
 
