@@ -115,6 +115,8 @@ is frozen and behaves as before for pages; it shares the device list.
   `castMode`; `MediaCastMode` gains the two mirroring modes). It is a TypeScript port of Chrome's Cast Streaming sender
   (openscreen's sender session, Chromium's frame sender policy and Mirroring Service host, and the MirroringActivity
   routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
+  The video encoder is set up as Chrome's `MediaVideoEncoderWrapper` sets it up (a constant bitrate, the screen content
+  hint), and frame drops are logged by reason.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
   runs on the device's one kept-open channel. A mirrored tab is muted locally while it is cast (Chrome's muter);
   desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,

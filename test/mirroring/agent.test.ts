@@ -284,3 +284,27 @@ test("port backend: a switch is one agent message for both streams with the new 
   backend.resumeVideoDevice();
   assert.deepEqual(port.out.slice(2), [{ t: "freeze" }, { t: "unfreeze" }]);
 });
+
+test("agent: the video encoder is configured like Chrome's MediaVideoEncoderWrapper (constant bitrate, screen content hint, no frame rate for VP8)", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0);
+  await a.command({ t: "encode", rtp: a.rtps()[0]! });
+  const cfg = a.encoders[0]!.configures[0]!;
+  assert.equal(cfg.bitrateMode, "constant");
+  assert.equal(cfg.contentHint, "text");
+  assert.equal("framerate" in cfg, false);
+  assert.equal(cfg.latencyMode, "realtime");
+});
+
+test("agent: a VP9 encoder keeps its frame rate and gets no screen content hint", async () => {
+  const a = startAgent();
+  await a.command({ t: "set-codec", codec: "vp9", codecString: "vp09.00.10.08" });
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  await a.capture(0);
+  await a.command({ t: "encode", rtp: a.rtps()[0]! });
+  const cfg = a.encoders[0]!.configures[0]!;
+  assert.equal(cfg.bitrateMode, "constant");
+  assert.equal("contentHint" in cfg, false);
+  assert.equal(cfg.framerate, 30);
+});

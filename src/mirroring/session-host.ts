@@ -551,7 +551,12 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     const p = BANDWIDTH_BACKOFF;
     // Never use all of the bandwidth, but never go below the absolute minimum requirement either.
     const usableBandwidth = Math.max(Math.trunc(p.goodNetworkCitizenFactor * bandwidthEstimate), MIN_REQUIRED_BITRATE);
+    const before = this.usableBandwidth;
     this.updateBandwidthGradualBackoff(isCongested, usableBandwidth);
+    // openscreen_session_host.cc logs this at VLOG(2) ("updated available bandwidth"); here it is only a change.
+    if (this.usableBandwidth !== before) {
+      this.deps.observer.logInfo?.(`bandwidth ${before} -> ${this.usableBandwidth} (estimate ${bandwidthEstimate}, ${isCongested ? "frames dropped" : "no drops"})`);
+    }
   }
 
   /** `UpdateBandwidthGradualBackoff`. */
@@ -585,6 +590,15 @@ export class OpenscreenSessionHost implements SenderSessionClient {
 
   /** `StopStreaming`. */
   private stopStreaming(): void {
+    const reasons = (m: ReadonlyMap<string, number> | undefined) => (m === undefined ? "" : [...m].map(([k, n]) => `${k}=${n}`).join(" ") || "none");
+    if (this.videoSender !== undefined) {
+      this.deps.observer.logInfo?.(
+        `video frames: inserted ${this.videoSender.framesInserted}, dropped ${this.videoSender.framesDroppedBeforeEncoding + this.videoSender.framesDroppedAfterEncoding} (${reasons(this.videoSender.dropReasons)}), by encoder ${this.videoSender.framesDroppedByEncoder}`,
+      );
+    }
+    if (this.audioSender !== undefined) {
+      this.deps.observer.logInfo?.(`audio frames: inserted ${this.audioSender.framesInserted}, dropped ${this.audioSender.framesDropped} (${reasons(this.audioSender.dropReasons)})`);
+    }
     this.deps.backend.stopAudioCapture();
     this.pauseCapturingVideo();
     this.audioFrameSender?.dispose();

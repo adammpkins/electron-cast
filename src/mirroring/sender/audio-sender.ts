@@ -3,7 +3,7 @@
  * the frame sender whether to drop before encoding, and `OnEncodedAudioFrame` enqueues the encoded frame.
  * The encoder (WebCodecs `AudioEncoder`) is outside this class; it reports `samplesPerFrame` and gets raw audio.
  */
-import { FrameSender, type FrameSenderClient, type SenderEncodedFrame } from "./frame-sender.ts";
+import { FrameSender, type FrameDropReason, type FrameSenderClient, type SenderEncodedFrame } from "./frame-sender.ts";
 
 export class AudioSender implements FrameSenderClient {
   private readonly frameSender: FrameSender;
@@ -12,6 +12,8 @@ export class AudioSender implements FrameSenderClient {
   private samplesInEncoder = 0;
   framesInserted = 0;
   framesDropped = 0;
+  /** Drops by reason, as for the video sender. */
+  readonly dropReasons = new Map<FrameDropReason, number>();
 
   constructor(frameSender: FrameSender, rtpTimebase: number, samplesPerFrame: number) {
     this.frameSender = frameSender;
@@ -37,6 +39,7 @@ export class AudioSender implements FrameSenderClient {
     const reason = this.frameSender.shouldDropNextFrame(nextFrameDuration, undefined);
     if (reason !== "kNotDropped") {
       this.framesDropped++;
+      this.dropReasons.set(reason, (this.dropReasons.get(reason) ?? 0) + 1);
       return false;
     }
     this.samplesInEncoder += frames;
@@ -47,6 +50,10 @@ export class AudioSender implements FrameSenderClient {
   onEncodedAudioFrame(encoded: SenderEncodedFrame, samplesSkipped: number): void {
     const samplesProcessed = this.samplesPerFrame + samplesSkipped;
     this.samplesInEncoder = Math.max(0, this.samplesInEncoder - samplesProcessed);
-    if (this.frameSender.enqueueFrame(encoded) !== "kNotDropped") this.framesDropped++;
+    const reason = this.frameSender.enqueueFrame(encoded);
+    if (reason !== "kNotDropped") {
+      this.framesDropped++;
+      this.dropReasons.set(reason, (this.dropReasons.get(reason) ?? 0) + 1);
+    }
   }
 }
