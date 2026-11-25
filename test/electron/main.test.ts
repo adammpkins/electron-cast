@@ -6,7 +6,7 @@ import type { CastClientLike } from "../../src/electron/session-service.ts";
 import { CastClient } from "../../src/client/index.ts";
 import { CastDiscovery } from "../../src/discovery/index.ts";
 import type { BridgeEvent } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, onlyChannels } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, tick, FAST_SINKS, onlyChannels, device } from "./fakes.ts";
 
 // Compile-time: the real classes fit the shapes the manager takes.
 const _client: CastClientLike = new CastClient({ host: "127.0.0.1" });
@@ -249,4 +249,43 @@ test('selectDevice may answer "stop", which cancels the request', async () => {
   const wc = new FakeWebContents(10);
   await call(wc, "initialize", INIT);
   assert.deepEqual(await call(wc, "requestSession", REQ), { ok: false, code: "cancel" });
+});
+
+test("the manager lists no device at a public or loopback address unless sinks.allowAllIps is set", async () => {
+  const PUBLIC = device({ id: "dev-public", name: "Public", host: "8.8.8.8", addresses: ["8.8.8.8"] });
+  const LOOPBACK = device({ id: "dev-loop", name: "Loop", host: "127.0.0.1", addresses: ["127.0.0.1"] });
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    const make = (allowAllIps?: boolean) => {
+      const clients: FakeClient[] = [];
+      const discovery = new FakeDiscovery([TV, PUBLIC, LOOPBACK]);
+      const manager = createCastManager({
+        ipcMain: new FakeIpcMain(),
+        sinks: { ...FAST_SINKS, ...(allowAllIps === undefined ? {} : { allowAllIps }) },
+        discovery,
+        createClient: (d) => {
+          const c = new FakeClient(d);
+          clients.push(c);
+          return c;
+        },
+        selectDevice: async () => null,
+      });
+      return { manager, clients };
+    };
+    const chrome = make();
+    await chrome.manager.settled();
+    assert.deepEqual(chrome.manager.devices().map((d) => d.id), ["dev-tv"]);
+    assert.deepEqual(chrome.clients.map((c) => c.device.id), ["dev-tv"], "nothing is connected to the refused addresses");
+    const seen: string[][] = [];
+    chrome.manager.registerMediaSinksObserver({ onSinksUpdated: (s) => seen.push(s.map((x) => x.id)) });
+    assert.deepEqual(seen, [["dev-tv"]]);
+    await chrome.manager.dispose();
+    const open = make(true);
+    await open.manager.settled();
+    assert.deepEqual(open.manager.devices().map((d) => d.id).sort(), ["dev-loop", "dev-public", "dev-tv"]);
+    await open.manager.dispose();
+  } finally {
+    console.warn = quiet;
+  }
 });

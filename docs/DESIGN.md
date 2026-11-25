@@ -169,7 +169,8 @@ endpoint" and reports the channel as not opened, so the sink never appears; the 
 `192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`, `203.0.113/24`, `224/3`); IPv6 only inside `2000::/3` and
 `ff00::/8` (unique-local, link-local, `::`, `::1` are not), an IPv4-mapped address by its IPv4 part; a string that is not an
 address counts as routable. Loopback is `127/8` and exactly `::1`, so `::ffff:127.0.0.1` passes, as in Chrome.
-`src/electron/address-filter.ts` hides refused devices from the manager.
+The sink service (`src/electron/sink-service.ts`, `openChannel`) applies them where Chrome does, to the endpoint it is
+about to open, every time; with `sinks.allowAllIps` (`SetCastAllowAllIPs`) it does not.
 
 ## Polyfill layer (`src/polyfill/`)
 

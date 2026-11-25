@@ -2,8 +2,8 @@
 // Chrome's CastMediaSinkServiceImpl does (chrome/browser/media/router/discovery/mdns/cast_media_sink_service_impl.cc;
 // docs/DESIGN.md lists each rule with its Chromium source). Nothing here is specific to an app.
 import { EventEmitter } from "node:events";
-import net from "node:net";
 import type { CastDevice } from "../discovery/index.ts";
+import { isLoopback, isPubliclyRoutable, parseIpBytes } from "../discovery/ip-policy.ts";
 import type { CastClientLike, DeviceSource } from "./session-service.ts";
 
 /** How a channel is opened (Chrome: `CastSocketOpenParams`, built by `CreateCastSocketOpenParams`). */
@@ -49,8 +49,9 @@ export interface CastSinkOptions {
   retry?: SinkRetryOptions;
   /**
    * Open channels to publicly routable and loopback addresses too. Default false: Chrome refuses them unless its
-   * `kMediaRouterCastAllowAllIPs` policy is set (`CastMediaSinkServiceImpl::OpenChannel`). Mind that device addresses
-   * come from mDNS, which anyone on the network can answer.
+   * `MediaRouterCastAllowAllIPs` policy is set (`CastMediaSinkServiceImpl::OpenChannel`, `SetCastAllowAllIPs`). The
+   * address checked is the one the channel is opened to, when it is opened. Mind that device addresses come from mDNS,
+   * which anyone on the network can answer.
    */
   allowAllIps?: boolean;
   /**
@@ -96,44 +97,6 @@ interface SinkEvents {
   channelRetired: [client: CastClientLike];
   /** An attempt to open a channel failed (it may be retried). */
   openFailed: [device: CastDevice, error: Error, willRetry: boolean];
-}
-
-const IPV4_RESERVED = new net.BlockList();
-// kReservedIPv4Ranges in net/base/ip_address.cc
-for (const [address, prefix] of [
-  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12],
-  ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15],
-  ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 3],
-] as const) {
-  IPV4_RESERVED.addSubnet(address, prefix, "ipv4");
-}
-const IPV6_PUBLIC = new net.BlockList();
-// kPublicIPv6Ranges in net/base/ip_address.cc: global unicast and multicast
-IPV6_PUBLIC.addSubnet("2000::", 3, "ipv6");
-IPV6_PUBLIC.addSubnet("ff00::", 8, "ipv6");
-
-const LOOPBACK = new net.BlockList();
-LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
-LOOPBACK.addAddress("::1", "ipv6");
-
-/** `net::IPAddress::IsPubliclyRoutable`. An address that is not an IP literal counts as routable (it cannot be vetted). */
-export function isPubliclyRoutable(host: string): boolean {
-  const bare = host.split("%")[0] ?? host;
-  if (net.isIPv4(bare)) return !IPV4_RESERVED.check(bare, "ipv4");
-  if (net.isIPv6(bare)) {
-    if (IPV6_PUBLIC.check(bare, "ipv6")) return true;
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(bare);
-    return mapped !== null && !IPV4_RESERVED.check(mapped[1] as string, "ipv4");
-  }
-  return true;
-}
-
-/** `net::IPAddress::IsLoopback`: 127.0.0.0/8 or ::1. */
-export function isLoopback(host: string): boolean {
-  const bare = host.split("%")[0] ?? host;
-  if (net.isIPv4(bare)) return LOOPBACK.check(bare, "ipv4");
-  if (net.isIPv6(bare)) return LOOPBACK.check(bare, "ipv6");
-  return false;
 }
 
 const endpointOf = (device: CastDevice): string => `${device.host}:${device.port}`;
@@ -341,11 +304,13 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
   /** `CastMediaSinkServiceImpl::OpenChannel`. `failures` counts the failed attempts so far in this run of retries. */
   private openChannel(device: CastDevice, source: OpenSource, failures: number, params?: ChannelParams): void {
     if (this.disposed) return;
-    if (!net.isIP(device.host.split("%")[0] ?? device.host)) {
+    if (parseIpBytes(device.host) === null) {
       // Chrome opens channels to IP endpoints only (`IPEndPoint`), and a name cannot be vetted against the address rules.
       this.skip(device, `"${device.host}" is a host name, not an IP address; a channel is opened to IP addresses only`);
       return;
     }
+    // Chrome checks the one endpoint it is about to open, here and nowhere else (`OpenChannel`), with
+    // net::IPAddress::IsPubliclyRoutable and IsLoopback (ported byte for byte in ip-policy.ts)
     if (!this.allowAllIps && (isPubliclyRoutable(device.host) || isLoopback(device.host))) {
       this.skip(device, `${device.host} is ${isLoopback(device.host) ? "a loopback" : "a publicly routable"} address (allowAllIps is off)`);
       return;

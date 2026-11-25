@@ -69,7 +69,7 @@ for (const [address, allowed, why] of CASES) {
   });
 }
 
-test("allowAllIPs allows every address, including unparseable ones", () => {
+test("allowAllIps allows every address, including unparseable ones", () => {
   for (const [address] of CASES) assert.equal(isCastAddressAllowed(address, true), true, address);
 });
 

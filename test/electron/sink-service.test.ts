@@ -3,7 +3,8 @@
 // does not drop an open channel. Tests of timing run on a fake clock, so nothing waits in real time.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CastSinkService, isLoopback, isPubliclyRoutable, type ChannelParams } from "../../src/electron/sink-service.ts";
+import { CastSinkService, type ChannelParams } from "../../src/electron/sink-service.ts";
+import { isLoopback, isPubliclyRoutable } from "../../src/discovery/ip-policy.ts";
 import { CastAuthError } from "../../src/client/errors.ts";
 import { FakeClient, FakeClock, FakeDevices, TV, SPEAKER, GROUP, device } from "./fakes.ts";
 import type { CastDevice } from "../../src/discovery/index.ts";
@@ -339,6 +340,65 @@ test("isPubliclyRoutable and isLoopback follow net/base/ip_address.cc", () => {
   assert.equal(isLoopback("127.5.5.5"), true);
   assert.equal(isLoopback("::1"), true);
   assert.equal(isLoopback("10.0.0.1"), false);
+});
+
+test("the address rule is ip-policy's byte-level port, applied to the endpoint being opened", async () => {
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    const { source, service, clients } = setup();
+    const at = (id: string, host: string) => device({ id, host, addresses: [host] });
+    source.list = [
+      at("mapped-loop", "::ffff:127.0.0.1"),  // not IsLoopback, and reserved IPv4: Chrome opens it
+      at("mapped-public", "::ffff:8.8.8.8"),  // judged by its IPv4 part: publicly routable
+      at("cgnat", "100.64.1.2"),
+      at("ula", "fd00::5"),
+      at("link-local", "fe80::1%3"),
+      at("global-v6", "2001:db8::5"),
+      at("v6-loop", "::1"),
+    ];
+    source.emit("deviceUp", source.list[0]!);
+    await service.settled();
+    assert.deepEqual(service.sinks().map((d) => d.id).sort(), ["cgnat", "link-local", "mapped-loop", "ula"]);
+    assert.deepEqual(clients.map((c) => c.device.id).sort(), ["cgnat", "link-local", "mapped-loop", "ula"], "no client for a refused address");
+    service.dispose();
+  } finally {
+    console.warn = quiet;
+  }
+});
+
+test("the address is checked when a channel is opened: a device that moves to a public address keeps no new channel there", async () => {
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    const { source, service, clients } = setup();
+    const skipped: string[] = [];
+    service.on("skipped", (d, reason) => skipped.push(`${d.id}: ${reason}`));
+    // first seen at a public address: refused
+    const moving = device({ id: "moving", host: "8.8.4.4", addresses: ["8.8.4.4"] });
+    source.list = [moving];
+    source.emit("deviceUp", moving);
+    await service.settled();
+    assert.deepEqual(service.sinks(), []);
+    // then at a private one: opened
+    source.list = [{ ...moving, host: "192.168.1.9", addresses: ["192.168.1.9"] }];
+    source.emit("deviceChanged", source.list[0]!);
+    await service.settled();
+    assert.deepEqual(service.sinks().map((d) => d.host), ["192.168.1.9"]);
+    // and at a public one again: OpenChannel refuses the new endpoint and leaves the open channel alone
+    source.list = [{ ...moving, host: "1.1.1.1", addresses: ["1.1.1.1"] }];
+    source.emit("deviceChanged", source.list[0]!);
+    await service.settled();
+    assert.deepEqual(clients.map((c) => c.device.host), ["192.168.1.9"]);
+    assert.deepEqual(service.sinks().map((d) => d.host), ["192.168.1.9"]);
+    assert.deepEqual(skipped, [
+      "moving: 8.8.4.4 is a publicly routable address (allowAllIps is off)",
+      "moving: 1.1.1.1 is a publicly routable address (allowAllIps is off)",
+    ]);
+    service.dispose();
+  } finally {
+    console.warn = quiet;
+  }
 });
 
 test("discoverSinksNow opens channels at once, including for a device that gave up", async () => {

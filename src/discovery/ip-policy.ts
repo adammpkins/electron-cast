@@ -89,9 +89,9 @@ export function isLoopback(address: string): boolean {
 }
 
 /**
- * Whether a channel may be opened to `address`: not publicly routable and not loopback, unless `allowAllIPs` (the
- * `MediaRouterCastAllowAllIPs` policy) is set.
+ * Whether a channel may be opened to `address`: not publicly routable and not loopback, unless `allowAllIps` (the
+ * `MediaRouterCastAllowAllIPs` policy) is set. The sink service applies it when it opens a channel.
  */
-export function isCastAddressAllowed(address: string, allowAllIPs = false): boolean {
-  return allowAllIPs || !(isPubliclyRoutable(address) || isLoopback(address));
+export function isCastAddressAllowed(address: string, allowAllIps = false): boolean {
+  return allowAllIps || !(isPubliclyRoutable(address) || isLoopback(address));
 }

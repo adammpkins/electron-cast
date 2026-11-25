@@ -9,7 +9,7 @@
   open, with a ping every 5 s, and is reopened after a failure (sleep and resume included); a device is dropped only
   when it cannot be reopened, not when mDNS stops reporting it. The list is reported once it has been quiet for 3 s.
   `manager.devices()`, the picker's list and the sinks observers show these devices, so right after `start()` the
-  list fills in over a few seconds. Public and loopback addresses are skipped, as in Chrome. New options: `sinks`
+  list fills in over a few seconds. New options: `sinks`
   (`openDelayMaxMs`, `reportDelayMs`, `retry`, `allowAllIps`) on `createCastManager` and `CastSessionService`.
   Each is a Chrome setting; there is no cap or off switch because Chrome has none. New methods:
   `CastManager.discoverSinksNow()` and `CastManager.settled()`.
@@ -50,8 +50,8 @@
   - `mode: "chromecast"` is unchanged.
 - **Public and loopback device addresses are refused, as in Chrome.** Chrome opens no Cast channel to a publicly
   routable or loopback address unless `MediaRouterCastAllowAllIPs` is set (`CastMediaSinkServiceImpl::OpenChannel`).
-  The manager now hides such devices (not listed, offered or connected to); the new `allowAllIPs` option on
-  `createCastManager` turns it off. Private, link-local, unique-local and `100.64.0.0/10` addresses are unaffected.
+  The sink service checks the address each time it opens a channel, so such a device is not listed, offered or
+  connected to; `sinks: { allowAllIps: true }` turns it off. Private, link-local, unique-local and `100.64.0.0/10` addresses are unaffected.
   `isPubliclyRoutable`, `isLoopback` and `isCastAddressAllowed` are exported from the discovery layer.
 - **Mirroring and remote-playback sources are never launched as ordinary apps.** A presentation URL naming a Cast
   Streaming app (`0F5096E8`, `85CDB22F`), alone or beside other apps in one legacy URL, and a `remote-playback:` URL

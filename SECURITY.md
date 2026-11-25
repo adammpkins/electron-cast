@@ -214,10 +214,12 @@ electron-cast regularly, and treat `revocationChecked: false` as a prompt to do 
 Answers to mDNS queries are accepted from any host on the network, so a hostile one can announce a device at an address
 of its choosing, including a public one on the internet or loopback (a local service on this machine). Chrome opens no
 Cast channel to a publicly routable or loopback address unless its `MediaRouterCastAllowAllIPs` policy is set
-(`CastMediaSinkServiceImpl::OpenChannel`), and the manager does the same: such a device is not listed, offered by
-`selectDevice` or connected to. Private, link-local, unique-local and carrier-grade-NAT (`100.64.0.0/10`) addresses are
-allowed, as in Chrome. `allowAllIPs: true` lifts the rule (devices on a routed or VPN network with public addressing).
-The check is on the discovery results the manager uses; a `CastClient` you create yourself connects wherever you point it.
+(`CastMediaSinkServiceImpl::OpenChannel`), and the manager does the same: no channel is opened to such an address, so
+the device is not listed, offered by `selectDevice` or connected to. Private, link-local, unique-local and
+carrier-grade-NAT (`100.64.0.0/10`) addresses are allowed, as in Chrome. `sinks: { allowAllIps: true }` lifts the rule
+(devices on a routed or VPN network with public addressing). As in Chrome the address checked is the one a channel is
+being opened to, each time one is opened, so a device that later announces a public address gets no channel there; a
+`CastClient` you create yourself connects wherever you point it.
 Chrome's quirks are kept: an IPv4-mapped loopback (`::ffff:127.0.0.1`) is not refused, and an address that cannot be
 parsed is.
 
