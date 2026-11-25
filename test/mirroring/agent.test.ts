@@ -267,3 +267,23 @@ test("port backend: the capture begin and end times of a frame reach the encoded
   port.emit({ t: "video-chunk", rtp: 93_000, key: false, data: new ArrayBuffer(3), encodeMs: 1 });
   assert.deepEqual(seen, [{ begin: 1000, end: 1004 }, { begin: undefined, end: undefined }]);
 });
+
+test("agent: a source that paints at 60 Hz is thinned to the target rate", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  for (let i = 0; i < 120; i++) await a.capture(Math.round(i * 16_667));
+  const kept = a.sent.filter((m) => m.t === "frame").length;
+  assert.ok(kept >= 59 && kept <= 62, `kept ${kept} of 120 frames at 60 Hz`);
+});
+
+test("agent: pairs of frames 17 ms apart with 90 ms gaps are all kept (Chrome's SmoothEventSampler token bucket)", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30 } });
+  let t = 0;
+  for (let burst = 0; burst < 40; burst++) {
+    await a.capture(Math.round(t * 1000));
+    await a.capture(Math.round((t + 16.7) * 1000));
+    t += 16.7 + 90;
+  }
+  assert.equal(a.sent.filter((m) => m.t === "frame").length, 80);
+});

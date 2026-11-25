@@ -17,8 +17,11 @@ const secs = Number(value("secs", "20"));
 const width = Number(value("width", "1920"));
 const height = Number(value("height", "1080"));
 const noise = args.includes("--noise");
+// The live harness shows a 960x540 window on screen; --visible and --window WxH reproduce that.
+const visible = args.includes("--visible");
+const [winW, winH] = value("window", `${width}x${height}`).split("x").map(Number);
 
-const PAGE = `<!doctype html><meta charset=utf-8><body style="margin:0;overflow:hidden"><canvas id=c width=${width} height=${height}></canvas><script>
+const PAGE = `<!doctype html><meta charset=utf-8><body style="margin:0;overflow:hidden"><canvas id=c width=${width} height=${height} style="width:100vw;height:100vh"></canvas><script>
   const c = document.getElementById("c"), g = c.getContext("2d");
   let n = 0;
   (function draw() { n++; g.fillStyle = "hsl(" + (n * 2 % 360) + ",60%,40%)"; g.fillRect(0, 0, ${width}, ${height});
@@ -56,9 +59,10 @@ const cast = createCastManager({
   },
 });
 await cast.start();
-const page = new BrowserWindow({ width, height, useContentSize: true, show: false, webPreferences: { backgroundThrottling: false } });
+const page = new BrowserWindow({ width: winW, height: winH, useContentSize: true, show: false, webPreferences: { backgroundThrottling: false } });
 await page.loadURL(`data:text/html;base64,${Buffer.from(PAGE).toString("base64")}`);
 const route = await cast.startCasting(TV.id, { castMode: "tab_mirror", webContentsId: page.webContents.id });
+if (visible) page.showInactive();
 await new Promise((r) => setTimeout(r, secs * 1000));
 const s = receiver.stats;
 console.log(`perf[${codec}]: receiver got ${s.videoFrames} video frames (${s.videoKeyFrames} key), ${Math.round((s.videoBytes * 8) / secs / 1000)} kbps over ${secs} s`);

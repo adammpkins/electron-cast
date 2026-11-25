@@ -166,6 +166,13 @@ export const AGENT_SOURCE = String.raw`
   async function pumpVideo(track, params) {
     videoInfo = params;
     videoReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    // Chrome's SmoothEventSampler (media/capture/content/smooth_event_sampler.cc): a token bucket that fills with the time
+    // between frames, holds at most 1.5 periods and pays one period per frame kept. A 60 Hz source thins to the target rate,
+    // and a burst after a gap (two frames 17 ms apart, then 90 ms of nothing) is kept whole instead of being cut in half.
+    const period = 1000 / params.frameRate;
+    const bucketCapacity = period * 1.5;
+    let tokens = bucketCapacity;
+    let lastEventMs = null;
     let lastAcceptedAt = -1e9;
     captureStats.since = 0;
     for (;;) {
@@ -180,7 +187,11 @@ export const AGENT_SOURCE = String.raw`
       captureStats.received++;
       if (captureStats.lastArrival > 0) captureStats.arrivalGaps.push(arrivalMs - captureStats.lastArrival);
       captureStats.lastArrival = arrivalMs;
-      if (captureMs - lastAcceptedAt < 0.6 * (1000 / params.frameRate)) { captureStats.limited++; frame.close(); continue; }
+      if (lastEventMs !== null && lastEventMs < captureMs) tokens = Math.min(bucketCapacity, tokens + (captureMs - lastEventMs));
+      lastEventMs = captureMs;
+      // The small allowance is for timestamps that are rounded to microseconds.
+      if (tokens < period - 0.01) { captureStats.limited++; frame.close(); continue; }
+      tokens = Math.max(0, tokens - period);
       if (lastAcceptedAt > -1e8) captureStats.intervals.push(captureMs - lastAcceptedAt);
       captureStats.arrivalLag.push(arrivalMs - (captureTimeOf(frame, captureMs, arrivalMs)));
       lastAcceptedAt = captureMs;
@@ -232,7 +243,7 @@ export const AGENT_SOURCE = String.raw`
     const gaps = captureStats.arrivalGaps.slice().sort((a, b) => a - b);
     const at = (a, q) => (a.length ? Math.round(a[Math.min(a.length - 1, Math.floor(a.length * q))] * 10) / 10 : 0);
     const seconds = (nowMs - captureStats.since) / 1000;
-    send({ t: "log", message: "capture: " + Math.round((captureStats.received / seconds) * 10) / 10 + " fps delivered, " + Math.round((iv.length / seconds) * 10) / 10 + " fps kept, " + captureStats.limited + " dropped by the rate limit; capture interval p50 " + at(iv, 0.5) + " ms, p95 " + at(iv, 0.95) + " ms, max " + at(iv, 1) + " ms; arrival gap p5 " + at(gaps, 0.05) + " ms, p50 " + at(gaps, 0.5) + " ms, p95 " + at(gaps, 0.95) + " ms; delivery delay p50 " + at(lag, 0.5) + " ms, p95 " + at(lag, 0.95) + " ms, max " + at(lag, 1) + " ms" });
+    send({ t: "log", message: "capture: " + Math.round((captureStats.received / seconds) * 10) / 10 + " fps delivered, " + Math.round((iv.length / seconds) * 10) / 10 + " fps kept, " + captureStats.limited + " dropped by the rate limit; capture interval p50 " + at(iv, 0.5) + " ms, p95 " + at(iv, 0.95) + " ms, max " + at(iv, 1) + " ms; arrival gap p5 " + at(gaps, 0.05) + " ms, p50 " + at(gaps, 0.5) + " ms, p95 " + at(gaps, 0.95) + " ms, max " + at(gaps, 1) + " ms; delivery delay p50 " + at(lag, 0.5) + " ms, p95 " + at(lag, 0.95) + " ms, max " + at(lag, 1) + " ms" });
     captureStats.received = 0; captureStats.limited = 0; captureStats.intervals = []; captureStats.arrivalLag = []; captureStats.arrivalGaps = []; captureStats.since = nowMs;
   }
 
