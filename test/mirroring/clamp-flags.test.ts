@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { displaySizeInPixels, getCaptureResolutionConstraint, getClampedResolution } from "../../src/mirroring/mirror-settings.ts";
-import { castStreamingCongestionSignal, castStreamingPerformanceOverlay, featureParams, systemAudioCaptureSupported } from "../../src/electron/switches.ts";
+import { MirrorSettings, displaySizeInPixels, getCaptureResolutionConstraint, getClampedResolution } from "../../src/mirroring/mirror-settings.ts";
+import {
+  bandwidthBackoffParams, castStreaming60fps, castStreamingGradualBandwidthBackoff, castStreamingMaxVideoBitrate, castStreamingOfferHardwareFirst, castStreamingCongestionSignal, castStreamingPerformanceOverlay, featureParams, systemAudioCaptureSupported,
+} from "../../src/electron/switches.ts";
 import { VideoSender } from "../../src/mirroring/sender/video-sender.ts";
 import type { PerformanceOverlayInfo, RawVideoFrame } from "../../src/mirroring/sender/video-sender.ts";
 import { FrameSender } from "../../src/mirroring/sender/frame-sender.ts";
@@ -94,4 +96,64 @@ test("VideoSender hands the overlay its numbers only when the feature is on", ()
   assert.equal(seen[0], undefined);
   assert.deepEqual(seen[1], { targetPlayoutDelayMs: 200, lowLatencyMode: false, targetBitrate: 5_000_000, framesAgo: 1, encoderUtilization: -1, lossiness: -1 });
   assert.equal(seen[2]!.framesAgo, 2, "frames_in_encoder_ + 1");
+});
+
+test("CastStreaming60fps is off by default and the max frame rate follows it", () => {
+  assert.equal(castStreaming60fps(commandLine([])), false);
+  assert.equal(castStreaming60fps(commandLine(["--enable-features=CastStreaming60fps"])), true);
+  assert.equal(castStreaming60fps(commandLine(["--enable-features=CastStreaming60fps", "--disable-features=CastStreaming60fps"])), false);
+  assert.equal(new MirrorSettings(undefined, {}).maxFrameRate, 30);
+  assert.equal(new MirrorSettings(undefined, {}, true).maxFrameRate, 60);
+  assert.equal(new MirrorSettings(undefined, {}, true).getVideoConfig("vp8").maxFrameRate, 60);
+});
+
+test("CastStreamingMaxVideoBitrate: max_bitrate_mbps (default 5), the legacy 5 Mbps when the feature is off, start at most 10 Mbps", () => {
+  const bitrate = (...args: string[]) => castStreamingMaxVideoBitrate(commandLine(args));
+  assert.equal(bitrate(), 5_000_000);
+  assert.equal(bitrate("--enable-features=CastStreamingMaxVideoBitrate"), 5_000_000);
+  assert.equal(bitrate("--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/8"), 8_000_000);
+  assert.equal(bitrate("--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/20"), 20_000_000);
+  assert.equal(bitrate("--disable-features=CastStreamingMaxVideoBitrate", "--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/8"), 5_000_000);
+  const warnings: string[] = [];
+  assert.equal(castStreamingMaxVideoBitrate(commandLine(["--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/fast"]), (m) => warnings.push(m)), 5_000_000);
+  assert.equal(warnings.length, 1);
+  assert.equal(bitrate("--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/"), 5_000_000);
+  assert.equal(bitrate("--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/6.5"), 5_000_000, "StringToInt rejects a fraction");
+  const high = new MirrorSettings(undefined, {}, false, 20_000_000).getVideoConfig("vp8");
+  assert.equal(high.maxBitrate, 20_000_000);
+  assert.equal(high.startBitrate, 10_000_000);
+  const low = new MirrorSettings(undefined, {}, false, 3_000_000).getVideoConfig("vp8");
+  assert.equal(low.startBitrate, 3_000_000);
+});
+
+test("GradualBandwidthBackoff parameters are read as doubles and clamped as GetBandwidthBackoffParams clamps them", () => {
+  const f = "--enable-features=CastStreamingGradualBandwidthBackoff:";
+  assert.deepEqual(bandwidthBackoffParams(commandLine([])), { goodNetworkCitizenFactor: 0.8, minBackoffFactor: 0.5, maxBackoffFactor: 0.85, fastRecoveryIncrease: 1.5, conservativeIncrease: 1.1 });
+  assert.deepEqual(
+    bandwidthBackoffParams(commandLine([f + "good_network_citizen_factor/0.9/min_backoff_factor/0.3/max_backoff_factor/0.7/fast_recovery_increase/2/conservative_increase/1.25"])),
+    { goodNetworkCitizenFactor: 0.9, minBackoffFactor: 0.3, maxBackoffFactor: 0.7, fastRecoveryIncrease: 2, conservativeIncrease: 1.25 },
+  );
+  // Out of range values are clamped; the maximum backoff is held to the minimum and the fast recovery to the conservative increase.
+  assert.deepEqual(
+    bandwidthBackoffParams(commandLine([f + "good_network_citizen_factor/5/min_backoff_factor/0.05/max_backoff_factor/0.01/fast_recovery_increase/1.2/conservative_increase/9"])),
+    { goodNetworkCitizenFactor: 1, minBackoffFactor: 0.1, maxBackoffFactor: 0.1, fastRecoveryIncrease: 4, conservativeIncrease: 4 },
+  );
+  assert.equal(bandwidthBackoffParams(commandLine([f + "good_network_citizen_factor/0.01"])).goodNetworkCitizenFactor, 0.1);
+  assert.equal(bandwidthBackoffParams(commandLine([f + "conservative_increase/0.5"])).conservativeIncrease, 1);
+  assert.equal(bandwidthBackoffParams(commandLine([f + "conservative_increase/3"])).fastRecoveryIncrease, 3, "the fast recovery is at least the conservative increase");
+  // An unparsable value is the default, with a warning; an empty one is the default quietly.
+  const warnings: string[] = [];
+  assert.equal(bandwidthBackoffParams(commandLine([f + "min_backoff_factor/half/max_backoff_factor/"]), (m) => warnings.push(m)).minBackoffFactor, 0.5);
+  assert.equal(warnings.length, 1);
+  // Parameters only count when the feature is enabled on the command line.
+  assert.equal(bandwidthBackoffParams(commandLine([f + "min_backoff_factor/0.3", "--disable-features=CastStreamingGradualBandwidthBackoff"])).minBackoffFactor, 0.5);
+});
+
+test("CastStreamingGradualBandwidthBackoff and CastStreamingOfferHardwareFirst are on by default and --disable-features turns them off", () => {
+  for (const [fn, name] of [[castStreamingGradualBandwidthBackoff, "CastStreamingGradualBandwidthBackoff"], [castStreamingOfferHardwareFirst, "CastStreamingOfferHardwareFirst"]] as const) {
+    assert.equal(fn(commandLine([])), true);
+    assert.equal(fn(commandLine([`--disable-features=${name}`])), false);
+    assert.equal(fn(commandLine([`--disable-features=Other,${name}`, `--enable-features=${name}`])), false, "disable wins");
+    assert.equal(fn(commandLine([`--enable-features=${name}`])), true);
+  }
 });

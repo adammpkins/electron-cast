@@ -15,7 +15,10 @@ import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { MirroringStats } from "../stats/statistics.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
-import { castDesktopMirroringKeepLocalAudio, castStreamingCongestionSignal, castStreamingPerformanceOverlay } from "../../electron/switches.ts";
+import {
+  bandwidthBackoffParams, castDesktopMirroringKeepLocalAudio, castStreaming60fps, castStreamingCongestionSignal, castStreamingGradualBandwidthBackoff,
+  castStreamingMaxVideoBitrate, castStreamingOfferHardwareFirst, castStreamingPerformanceOverlay,
+} from "../../electron/switches.ts";
 import { encodingPolicyFromCommandLine, hardwareCodecsToProbe, softwareCodecsToProbe, type CommandLineLike } from "../encoding-support.ts";
 import { getCaptureResolutionConstraint, getCodecParameterString, type PrimaryScreenLike } from "../mirror-settings.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
@@ -319,6 +322,11 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
             features: {
               congestionSignal: castStreamingCongestionSignal(e.app?.commandLine, (message) => log("info", message)),
               performanceOverlay: castStreamingPerformanceOverlay(e.app?.commandLine),
+              enable60fps: castStreaming60fps(e.app?.commandLine),
+              maxVideoBitrate: castStreamingMaxVideoBitrate(e.app?.commandLine, (message) => log("info", message)),
+              bandwidthBackoff: bandwidthBackoffParams(e.app?.commandLine, (message) => log("info", message)),
+              gradualBandwidthBackoff: castStreamingGradualBandwidthBackoff(e.app?.commandLine),
+              offerHardwareFirst: castStreamingOfferHardwareFirst(e.app?.commandLine),
             },
           },
           [channelMain.port2],

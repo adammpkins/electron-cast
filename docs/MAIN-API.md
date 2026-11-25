@@ -527,7 +527,11 @@ switches on `app.commandLine` change that (`--cast-streaming-force-{enable,disab
 `CastStreamingHardwareHevc`, and `--disable-cast-letterboxing`), including ones the app appends itself. The same
 command line carries `--enable-features=CastStreamingGradualBandwidthBackoff:congestion_signal/before_encoding`
 (or `after_encoding`; default `before_or_after_encoding`), `--enable-features=CastStreamingPerformanceOverlay` (Chrome's
-metrics overlay drawn on the frames sent) and, on Linux, `--enable-features=PulseaudioLoopbackForCast` (without it a
+metrics overlay drawn on the frames sent), `--enable-features=CastStreaming60fps`,
+`CastStreamingMaxVideoBitrate:max_bitrate_mbps/<n>`, the other `CastStreamingGradualBandwidthBackoff` parameters
+(`good_network_citizen_factor`, `min_backoff_factor`, `max_backoff_factor`, `fast_recovery_increase`,
+`conservative_increase`), `--disable-features=CastStreamingGradualBandwidthBackoff` (the legacy bandwidth update) and
+`--disable-features=CastStreamingOfferHardwareFirst` (one offer with every codec) and, on Linux, `--enable-features=PulseaudioLoopbackForCast` (without it a
 desktop capture carries no audio, as in Chrome). `screen` is Electron's `screen` module: as in Chrome, the capture is
 no larger than the primary display's size in pixels (landscape, in steps of 160x90, at most 1920x1080), for a tab and
 for a desktop alike; without it the limit is 1920x1080. A hardware

@@ -140,6 +140,88 @@ export function castStreamingCongestionSignal(commandLine: CommandLineLike | und
   return "before_or_after_encoding";
 }
 
+/** `base::StringToDouble` as `GetFieldTrialParamByFeatureAsDouble` uses it: the whole text must be a finite number. */
+function stringToDouble(text: string): number | undefined {
+  const t = text.replace(/^[ \t\n\v\f\r]+/, "");
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * `base::GetFieldTrialParamByFeatureAsInt` / `AsDouble`: the default when the parameter is absent or empty; a non-empty
+ * value that does not parse is reported to `warn` and also gives the default.
+ */
+function numberParam(commandLine: CommandLineLike | undefined, feature: string, name: string, fallback: number, kind: "int" | "double", warn: (message: string) => void): number {
+  const value = featureParams(commandLine, feature).get(name);
+  if (value === undefined || value === "") return fallback;
+  const n = kind === "int" ? stringToInt(value) : stringToDouble(value);
+  if (n !== undefined) return n;
+  warn(`Failed to parse field trial param ${name} with string value ${value} under feature ${feature} into ${kind === "int" ? "an int" : "a double"}. Falling back to default value of ${fallback}`);
+  return fallback;
+}
+
+/** `mirroring::features::kCastStreaming60fps` (mirroring_features.cc), disabled by default: `GetMaxFrameRate` is 60 instead of 30. */
+export function castStreaming60fps(commandLine: CommandLineLike | undefined): boolean {
+  return featureEnabled(commandLine, "CastStreaming60fps", false);
+}
+
+/**
+ * `media::kCastStreamingMaxVideoBitrate` and its `kCastStreamingMaxVideoBitrateMbps` parameter (`max_bitrate_mbps`,
+ * media/base/media_switches.cc), as `MirrorSettings::GetMaxVideoBitrate` reads them: the maximum video bitrate in bits per
+ * second. The feature is enabled by default with 5 Mbps; disabled, the legacy 5 Mbps. Given as
+ * `--enable-features=CastStreamingMaxVideoBitrate:max_bitrate_mbps/10`. The product is a `uint32_t` in Chrome (an `int`
+ * times 1000000, converted), so it wraps the same way.
+ */
+export function castStreamingMaxVideoBitrate(commandLine: CommandLineLike | undefined, warn: (message: string) => void = () => {}): number {
+  if (!featureEnabled(commandLine, "CastStreamingMaxVideoBitrate", true)) return 5_000_000;
+  const mbps = numberParam(commandLine, "CastStreamingMaxVideoBitrate", "max_bitrate_mbps", 5, "int", warn);
+  return Math.imul(mbps, 1_000_000) >>> 0;
+}
+
+/** `GetBandwidthBackoffParams` (openscreen_session_host.cc): the parameters of `kCastStreamingGradualBandwidthBackoff`, clamped. */
+export interface BandwidthBackoffParams {
+  goodNetworkCitizenFactor: number;
+  minBackoffFactor: number;
+  maxBackoffFactor: number;
+  fastRecoveryIncrease: number;
+  conservativeIncrease: number;
+}
+
+/**
+ * The `good_network_citizen_factor` (0.8), `min_backoff_factor` (0.5), `max_backoff_factor` (0.85),
+ * `fast_recovery_increase` (1.5) and `conservative_increase` (1.1) parameters of `CastStreamingGradualBandwidthBackoff`
+ * (mirroring_features.cc), clamped as `GetBandwidthBackoffParams` clamps them: 0.1 to 1.0, 0.1 to 1.0, the minimum to 1.0,
+ * 1.0 to 4.0 and the conservative increase to 4.0. They apply to both the gradual and the legacy bandwidth update.
+ */
+export function bandwidthBackoffParams(commandLine: CommandLineLike | undefined, warn: (message: string) => void = () => {}): BandwidthBackoffParams {
+  const f = "CastStreamingGradualBandwidthBackoff";
+  const get = (name: string, fallback: number): number => numberParam(commandLine, f, name, fallback, "double", warn);
+  const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
+  const goodNetworkCitizenFactor = clamp(get("good_network_citizen_factor", 0.8), 0.1, 1.0);
+  const minBackoffFactor = clamp(get("min_backoff_factor", 0.5), 0.1, 1.0);
+  const maxBackoffFactor = clamp(get("max_backoff_factor", 0.85), minBackoffFactor, 1.0);
+  const conservativeIncrease = clamp(get("conservative_increase", 1.1), 1.0, 4.0);
+  const fastRecoveryIncrease = clamp(get("fast_recovery_increase", 1.5), conservativeIncrease, 4.0);
+  return { goodNetworkCitizenFactor, minBackoffFactor, maxBackoffFactor, fastRecoveryIncrease, conservativeIncrease };
+}
+
+/**
+ * `kCastStreamingGradualBandwidthBackoff`, enabled by default: `UpdateBandwidthEstimate` backs off gradually.
+ * `--disable-features=CastStreamingGradualBandwidthBackoff` selects the legacy update.
+ */
+export function castStreamingGradualBandwidthBackoff(commandLine: CommandLineLike | undefined): boolean {
+  return featureEnabled(commandLine, "CastStreamingGradualBandwidthBackoff", true);
+}
+
+/**
+ * `kCastStreamingOfferHardwareFirst` (mirroring_features.cc), enabled by default: the offer holds the hardware codecs
+ * alone, and the software ones follow only when the receiver takes none. Disabled, every codec goes in one offer.
+ */
+export function castStreamingOfferHardwareFirst(commandLine: CommandLineLike | undefined): boolean {
+  return featureEnabled(commandLine, "CastStreamingOfferHardwareFirst", true);
+}
+
 /**
  * `media::kCastStreamingPerformanceOverlay` (media/base/media_switches.cc), disabled by default: `VideoSender` draws the
  * performance metrics overlay on each frame before it is encoded.
