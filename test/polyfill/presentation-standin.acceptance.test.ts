@@ -102,7 +102,7 @@ test("start() needs a user gesture, rejects with the main process DOMException n
   const idle = setup({ active: false });
   idle.run(`new PresentationRequest(${JSON.stringify(URL1)}).start().catch((e) => { window.__e = e.name; });`);
   await tick(5);
-  assert.equal(idle.run("__e"), "AbortError");
+  assert.equal(idle.run("__e"), "InvalidAccessError");
   assert.equal(idle.calls.length, 0);
 
   const h = setup();

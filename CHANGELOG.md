@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Presentation mode: `start()` now needs transient user activation in the main process too, not only in the page's
+  stand-in. The preload reads `navigator.userActivation.isActive` in its isolated world and the main process refuses
+  a start without it (`AbortError`, "PresentationRequest::start() requires user gesture.", as Chrome's browser-side
+  check). The stand-in's own refusal now throws Blink's `InvalidAccessError` instead of `AbortError`. Electron has no
+  main-process API for activation, so a compromised renderer could still forge it (see SECURITY.md).
 - CI now runs a smoke test in a real Electron (35, 40 and the latest stable, on Linux, Windows and macOS): a sandboxed
   preload built from `electron-cast/preload`, `createCastManager` from `electron-cast/main` with a fake device, both
   modes. `npm run smoke` runs it locally.

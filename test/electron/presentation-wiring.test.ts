@@ -51,7 +51,7 @@ class FakeIpcRenderer implements IpcRendererLike {
 test("preload default is presentation mode: only the presentation bridge, and the stand-in", async () => {
   const contextBridge = new FakeContextBridge();
   const ipcRenderer = new FakeIpcRenderer();
-  installCastBridge({ contextBridge, ipcRenderer });
+  installCastBridge({ contextBridge, ipcRenderer, isUserActive: () => true });
   assert.deepEqual([...contextBridge.exposed.keys()], ["__electronCastPresentationBridge"]);
   assert.equal(contextBridge.executed.length, 1);
   assert.equal(contextBridge.executed[0]?.func, installPresentationStandIn);
@@ -59,7 +59,7 @@ test("preload default is presentation mode: only the presentation bridge, and th
 
   const bridge = contextBridge.exposed.get("__electronCastPresentationBridge");
   assert.deepEqual(await bridge.call("start", { connectionId: "x" }), { ok: true, value: "pong" });
-  assert.deepEqual(ipcRenderer.invoked, [{ channel: "electron-cast:presentation", args: ["start", { connectionId: "x" }] }]);
+  assert.deepEqual(ipcRenderer.invoked, [{ channel: "electron-cast:presentation", args: ["start", { connectionId: "x", hasGesture: true }] }]);
   bridge.send("conn-1", "{}");
   assert.deepEqual(ipcRenderer.sent, [{ channel: "electron-cast:presentation:send", args: ["conn-1", "{}"] }]);
   const got: unknown[] = [];
@@ -173,10 +173,12 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     presentation: true,
     ...over,
   });
-  const pcall = (wc: FakeWebContents, method: string, params: unknown, frame: unknown = { url: `${ORIGIN}/`, origin: ORIGIN }) => {
+  const pcall = (wc: FakeWebContents, method: string, params: any, frame: unknown = { url: `${ORIGIN}/`, origin: ORIGIN }) => {
     const h = ipcMain.handlers.get("electron-cast:presentation");
     assert.ok(h, "presentation handler registered");
-    return Promise.resolve(h({ sender: wc, senderFrame: frame }, method, params)) as Promise<any>;
+    // The preload adds hasGesture to start; most tests are not about it
+    const sent = method === "start" ? { hasGesture: true, ...params } : params;
+    return Promise.resolve(h({ sender: wc, senderFrame: frame }, method, sent)) as Promise<any>;
   };
   const psend = (wc: FakeWebContents, connectionId: string, data: unknown) => {
     for (const l of ipcMain.listeners.get("electron-cast:presentation:send") ?? []) l({ sender: wc }, connectionId, data);
@@ -389,4 +391,55 @@ test("after a restart nothing is rejoined for another app, an unknown id, a sess
   const denied = setup({ allowOrigin: () => false });
   assert.equal((await denied.pcall(wc, "reconnect", { connectionId: "d", urls: [URL1], presentationId: `cast-session_${refused.sessionId}` })).ok, false);
   assert.equal(denied.clients.length, 0, "no device is contacted for a refused origin");
+});
+
+test("main refuses start() without transient activation, as PresentationServiceImpl::StartPresentation does", async () => {
+  const { ipcMain, clients } = setup();
+  const h = ipcMain.handlers.get("electron-cast:presentation")!;
+  const wc = new FakeWebContents(9);
+  const frame = { url: `${ORIGIN}/`, origin: ORIGIN };
+  const params = { connectionId: "g", urls: [URL1] };
+  for (const hasGesture of [undefined, false, "true", 1]) {
+    const r = (await h({ sender: wc, senderFrame: frame }, "start", { ...params, hasGesture })) as any;
+    assert.deepEqual(r, { ok: false, code: "AbortError", description: "PresentationRequest::start() requires user gesture." });
+  }
+  assert.equal(clients.length, 0);
+  assert.equal(((await h({ sender: wc, senderFrame: frame }, "start", { ...params, hasGesture: true })) as any).ok, true);
+});
+
+test("the preload stamps start() with the frame's own activation, whatever the page passed", async () => {
+  let active = false;
+  const contextBridge = new FakeContextBridge();
+  const ipcRenderer = new FakeIpcRenderer();
+  installCastBridge({ contextBridge, ipcRenderer, isUserActive: () => active });
+  const bridge = contextBridge.exposed.get("__electronCastPresentationBridge");
+  await bridge.call("start", { connectionId: "a", hasGesture: true });
+  active = true;
+  await bridge.call("start", { connectionId: "b", hasGesture: false });
+  await bridge.call("getAvailability", { watchId: "w" });
+  assert.deepEqual(ipcRenderer.invoked.map((i) => i.args), [
+    ["start", { connectionId: "a", hasGesture: false }],
+    ["start", { connectionId: "b", hasGesture: true }],
+    ["getAvailability", { watchId: "w" }],
+  ]);
+});
+
+test("the preload's default activation source is navigator.userActivation, and missing means false", async () => {
+  const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const set = (v: unknown) => Object.defineProperty(globalThis, "navigator", { value: v, configurable: true, writable: true });
+  try {
+    const contextBridge = new FakeContextBridge();
+    const ipcRenderer = new FakeIpcRenderer();
+    installCastBridge({ contextBridge, ipcRenderer });
+    const bridge = contextBridge.exposed.get("__electronCastPresentationBridge");
+    set({ userActivation: { isActive: true } });
+    await bridge.call("start", {});
+    set({ userActivation: { isActive: false } });
+    await bridge.call("start", {});
+    set({});
+    await bridge.call("start", {});
+    assert.deepEqual(ipcRenderer.invoked.map((i) => (i.args[1] as any).hasGesture), [true, false, false]);
+  } finally {
+    if (had) Object.defineProperty(globalThis, "navigator", had);
+  }
 });

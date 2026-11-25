@@ -344,6 +344,10 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           }
           case "start":
             if (!isId(p.connectionId) || !isUrls(p.urls)) return invalid("start expects { connectionId, urls }");
+            // PresentationServiceImpl::StartPresentation: PRESENTATION_REQUEST_CANCELLED, which the page sees as AbortError
+            if (p.hasGesture !== true) {
+              return { ok: false, code: "AbortError", description: "PresentationRequest::start() requires user gesture." };
+            }
             {
               const urls = p.urls;
               return await open(sid, p.connectionId, () => h.startPresentation({ urls, origin, senderId: sid }));

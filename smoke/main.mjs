@@ -32,12 +32,12 @@ app.on("window-all-closed", () => {});
 const pass = (name) => console.log(`smoke: ok   ${name}`);
 
 /** What the page's code runs as: an async function body, evaluated in the page's main world. */
-async function runInPage(win, body) {
+async function runInPage(win, body, userGesture = true) {
   // userGesture = true: the page sees transient user activation, which both modes require for a cast to start
   const json = await win.webContents.executeJavaScript(
     `(async () => { try { return JSON.stringify({ value: await (async () => { ${body} })() }); }` +
       ` catch (e) { return JSON.stringify({ error: String(e && e.stack || e) }); } })()`,
-    true,
+    userGesture,
   );
   const result = JSON.parse(json);
   if (result.error !== undefined) throw new Error(`page code failed: ${result.error}`);
@@ -73,6 +73,23 @@ const PRESENTATION_PAGE = `
   connection.terminate();
   await waitFor("terminate", () => terminated);
   out.stateAfterTerminate = connection.state;
+  return out;
+`;
+
+// Run without a gesture: both the page-side stand-in and, bypassing it, the bridge itself must be refused
+const NO_GESTURE_PAGE = `
+  const out = { activeAtStart: navigator.userActivation.isActive };
+  const url = ${JSON.stringify(CAST_URL)};
+  try {
+    await new PresentationRequest([url]).start();
+    out.standIn = "resolved";
+  } catch (e) { out.standIn = e.name + ": " + e.message; }
+  // What a hostile page would do: lie about userActivation in its own world, skip the stand-in and call the bridge
+  // with a claimed gesture. The preload reads the real flag in its isolated world, which the page cannot touch.
+  Object.defineProperty(Navigator.prototype, "userActivation", { get: () => ({ isActive: true, hasBeenActive: true }), configurable: true });
+  out.forgedActive = navigator.userActivation.isActive;
+  const raw = await window.__electronCastPresentationBridge.call("start", { connectionId: "forged", urls: [url], hasGesture: true });
+  out.bridge = raw;
   return out;
 `;
 
@@ -141,6 +158,16 @@ async function main() {
   {
     const win = await openPage("presentation");
     pass("sandboxed preload ran without throwing (presentation)");
+    // Before the gesture-bearing run: neither route may reach the picker without transient activation
+    const refused = await runInPage(win, NO_GESTURE_PAGE, false);
+    assert.equal(refused.activeAtStart, false, "the page unexpectedly had user activation");
+    assert.equal(refused.forgedActive, true, "the page could not forge its own navigator.userActivation");
+    assert.equal(refused.standIn, "InvalidAccessError: PresentationRequest::start() requires user gesture.");
+    assert.equal(refused.bridge.ok, false, "a bridge start() without a gesture was accepted");
+    assert.equal(refused.bridge.code, "AbortError");
+    assert.equal(refused.bridge.description, "PresentationRequest::start() requires user gesture.");
+    assert.equal(requests.length, 0, "start() without a gesture reached selectDevice");
+    pass("start() without a gesture is refused (stand-in, and the bridge called directly with a forged flag)");
     const out = await runInPage(win, PRESENTATION_PAGE);
     assert.equal(out.hasNavigatorPresentation, true, "navigator.presentation is missing");
     assert.equal(out.standIn, true, "PresentationRequest was not replaced by the stand-in");

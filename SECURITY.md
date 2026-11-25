@@ -72,13 +72,25 @@ into markup. Treat everything a device sends as untrusted data.
 
 ## User gesture
 
-Chrome only lets a page start a cast from a user gesture, and electron-cast follows that in default mode: the
-page-side stand-in rejects `PresentationRequest.start()` with `AbortError` when `navigator.userActivation.isActive`
-is false.
+Chrome only lets a page start a cast from a user gesture, and electron-cast follows that in default mode, in two places:
 
-That check runs in the page's own JavaScript, so it is a compatibility behaviour, not a security boundary. The main
-process does not check it (the stand-in sends a `hasGesture` flag, which is ignored), and `mode: "chromecast"` has no
-gesture check. A hostile page can call the bridge directly without a click.
+- The page-side stand-in rejects `PresentationRequest.start()` with `InvalidAccessError` ("PresentationRequest::start()
+  requires user gesture.") when `navigator.userActivation.isActive` is false, as Blink's `PresentationRequest::start()`
+  does. This runs in the page's own JavaScript, so it is a compatibility behaviour, not a security boundary.
+- The preload reads `navigator.userActivation.isActive` itself, in its isolated world, when the page calls the bridge's
+  `start`, and sends that as `hasGesture`, replacing anything the page passed. The main process refuses a `start`
+  whose `hasGesture` is not `true` with `AbortError` and Chrome's message (what `PresentationServiceImpl::StartPresentation`
+  reports as `PRESENTATION_REQUEST_CANCELLED`). A page script cannot forge this: it cannot reach the IPC channel, and
+  overriding `navigator.userActivation` in the main world does not change the isolated world's view (smoke-tested).
+
+Known gap: Electron has no main-process API for a frame's transient user activation (`WebFrameMain` and
+`IpcMainInvokeEvent` have none; only `webContents.executeJavaScript(code, userGesture)` and the media-access
+handler's `userGesture` touch the concept), so the check is made in the renderer process, by the preload, instead of
+in the browser process as Chrome does. It holds against a page's scripts. It does not hold against a compromised
+renderer process, which can also forge the IPC itself. An Electron-native handler would get Chromium's browser-side
+check for free.
+
+`mode: "chromecast"` has no gesture check at all. A hostile page can call that bridge without a click.
 
 The real consent step is `selectDevice`. A session only starts if your callback resolves a device, and the callback
 is your UI in the main process, so the page cannot answer it. Always show the user a prompt, show the requesting

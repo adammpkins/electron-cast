@@ -172,7 +172,8 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       const nav = g.navigator;
       const ua = nav ? nav.userActivation : undefined;
       if (ua && ua.isActive === false) {
-        return Promise.reject(new DE("Presentation.start() requires a user gesture.", "AbortError"));
+        // Blink's PresentationRequest::start() throws kInvalidAccessError with this message
+        return Promise.reject(new DE("PresentationRequest::start() requires user gesture.", "InvalidAccessError"));
       }
       if (pendingStart) {
         return Promise.reject(new DE("A call to start() is already in progress.", "OperationError"));
@@ -181,7 +182,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       const connectionId = uuid();
       const conn = new PresentationConnection(connectionId, "connecting");
       connections.set(connectionId, conn);
-      return Promise.resolve(bridge.call("start", { connectionId, urls: [...this.urls], hasGesture: !(ua && ua.isActive === false) }))
+      return Promise.resolve(bridge.call("start", { connectionId, urls: [...this.urls] }))
         .then((result: any) => settleConnection(conn, connectionId, result))
         .finally(() => {
           pendingStart = false;

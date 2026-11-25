@@ -167,7 +167,9 @@ talks to Chrome's Media Router over the `PresentationConnection` in a private JS
 one:
 
 - `src/polyfill/presentation-standin.ts` replaces `PresentationRequest`, `PresentationConnection`,
-  `PresentationAvailability` and `navigator.presentation` in the main world. It checks the user gesture, allows
+  `PresentationAvailability` and `navigator.presentation` in the main world. It checks the user gesture (as Blink does:
+  `InvalidAccessError`; the preload stamps the real activation on the call and main refuses without it, see SECURITY.md
+  "User gesture" for the trust boundary and the known gap against Chrome's browser-side check), allows
   one `start()` at a time, and moves strings over the bridge. It knows nothing about Cast.
 - `src/electron/presentation-envelope.ts` parses the Cast presentation URLs and converts between the envelope and
   the session service's shapes. Examples: receiver labels are hashed, the media-command bitmask becomes strings, and

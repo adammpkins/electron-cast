@@ -27,6 +27,16 @@ export interface CastBridgeOptions {
    */
   mode?: "chromecast" | "presentation";
   presentationBridgeKey?: string;  // default "__electronCastPresentationBridge"
+  /**
+   * Whether the frame has transient user activation right now. Default: `navigator.userActivation.isActive` read in
+   * the preload's own (isolated) world, false when the property is missing. Presentation mode only.
+   */
+  isUserActive?: () => boolean;
+}
+
+function frameIsUserActive(): boolean {
+  const nav = (globalThis as { navigator?: { userActivation?: { isActive?: unknown } } }).navigator;
+  return nav?.userActivation?.isActive === true;
 }
 
 function describe(err: unknown): string {
@@ -81,12 +91,16 @@ function installPresentationBridge(options: CastBridgeOptions, channel: string):
   const ipc = options.ipcRenderer;
   if (typeof ipc.send !== "function") throw new TypeError("presentation mode needs ipcRenderer.send");
   const send = ipc.send.bind(ipc);
+  const isUserActive = options.isUserActive ?? frameIsUserActive;
   const bridge = {
     /** Forward one call to the main process; never rejects. */
     call(method: string, params: unknown): Promise<unknown> {
       let invoked: Promise<unknown>;
       try {
-        invoked = ipc.invoke(`${channel}:presentation`, method, params);
+        // This runs in the preload's world, inside the page's call, so a page cannot supply its own value: Chrome
+        // checks RenderFrameHost::HasTransientUserActivation() in the browser, and this is the nearest Electron offers.
+        const sent = method === "start" ? { ...(typeof params === "object" && params !== null ? params : {}), hasGesture: isUserActive() } : params;
+        invoked = ipc.invoke(`${channel}:presentation`, method, sent);
       } catch (err) {
         invoked = Promise.reject(err);
       }

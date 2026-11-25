@@ -60,8 +60,10 @@ function setup(over: Partial<CastManagerOptions> = {}) {
     },
     ...over,
   });
-  const pcall = (wc: FramedWebContents, frame: FakeFrame | null, method: string, params: unknown) =>
-    Promise.resolve(ipcMain.handlers.get("electron-cast:presentation")!({ sender: wc, senderFrame: frame }, method, params)) as Promise<any>;
+  // The preload adds hasGesture to start; these tests are not about it
+  const pcall = (wc: FramedWebContents, frame: FakeFrame | null, method: string, params: any) =>
+    Promise.resolve(ipcMain.handlers.get("electron-cast:presentation")!({ sender: wc, senderFrame: frame }, method,
+      method === "start" ? { hasGesture: true, ...params } : params)) as Promise<any>;
   const ccall = (wc: FramedWebContents, frame: FakeFrame | null, method: string, params: unknown) =>
     Promise.resolve(ipcMain.handlers.get("electron-cast:call")!({ sender: wc, senderFrame: frame }, method, params)) as Promise<any>;
   const psend = (wc: FramedWebContents, frame: FakeFrame | null | undefined, connectionId: string, data: unknown) => {
