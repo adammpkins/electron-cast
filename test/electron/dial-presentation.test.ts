@@ -126,8 +126,13 @@ async function setup(over: { warm?: boolean; cast?: CastDevice[]; http?: FakeHtt
   };
   if (over.warm !== false) {
     // The SDK watches availability before anything starts; that is what makes the manager ask devices about the app.
-    await pcall(new FakeWebContents(99), "getAvailability", { watchId: "warm", urls: [DIAL_URL] });
-    await tick(40);
+    // Wait until the DIAL sink is up rather than a fixed time: a slow runner can take longer than 40 ms to find it.
+    const warm = new FakeWebContents(99);
+    for (let t = 0; t < 5000; t += 20) {
+      const r = await pcall(warm, "getAvailability", { watchId: "warm", urls: [DIAL_URL] });
+      if (r?.value?.available) break;
+      await tick(20);
+    }
   }
   return { manager, http, clients, picked, pcall, psend };
 }
