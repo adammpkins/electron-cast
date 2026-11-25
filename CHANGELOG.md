@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Tested on real devices
+
+- **DIAL dedup tested with real Chromecasts.** With DIAL on, three Chromecasts that answer both mDNS and DIAL were each listed
+  once over 60 s, as Cast sinks and never as DIAL sinks (the DIAL entry shows for about a second until the Cast channel
+  opens and then goes, as in Chrome's `CastMediaSinkServiceImpl::OnChannelOpenSucceeded`); the other five devices were
+  listed once each. No flapping.
+- **Casting from an iframe, tested on a Nest Hub Max.** Google's SDK in a same-origin and in a cross-origin iframe started a
+  session on the Default Media Receiver through `selectDevice` (the iframe's own origin, a sender id from 2^30 up), media
+  reached `PLAYING` and the page stopped the session. The top page did the same as a control.
+- **Casting from the app's own UI, tested on a Nest Hub Max.** `startCasting(sinkId, { webContentsId })` from the main
+  process for the page's default `PresentationRequest` (set by the SDK) started a session without a click, the page got
+  `connectionavailable`, the SDK adopted the session, media reached `PLAYING`, and `terminateRoute` ended it.
+
+### Fixed
+
+- A sandboxed iframe without `allow-presentation` can no longer construct a `PresentationRequest`: it throws Blink's
+  `SecurityError` ("The document is sandboxed and lacks the 'allow-presentation' flag.") as
+  `PresentationRequest::Create` does. A page cannot read its sandbox flags, so this is seen only for an iframe that is
+  same-origin with its parent (the stand-in reads the `sandbox` attribute through `frameElement`); see
+  [docs/DESIGN.md](docs/DESIGN.md).
+
+### Added
+
+- `npm run live:checks` ([examples/live-checks](examples/live-checks)): unattended live checks for DIAL dedup (read-only) and
+  for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, and the
+  app's own UI. The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.
+
 ## 0.5.0-next.1 (prerelease)
 
 A prerelease of 0.5.0 on the npm `next` tag: install it with `npm i electron-cast@next` (`npm i electron-cast`

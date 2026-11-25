@@ -107,9 +107,17 @@ What to expect for an iframe:
 - The picker sees the iframe's origin in `request.origin`. Show it: the user should know which embedded site is asking.
 - `mode: "chromecast"` stays main-frame only: a call from an iframe is refused with `extension_missing`.
 
-**What was tested.** The frame handling is covered by unit tests against fake frames. The smoke test in a real Electron
-does not load an iframe, and iframes have not been tried against a real device. Treat it as implemented and unit-tested,
-not field-proven.
+- A sandboxed iframe (`<iframe sandbox>`) needs `allow-presentation`, as in Chrome: without it `new PresentationRequest()`
+  throws `SecurityError: The document is sandboxed and lacks the 'allow-presentation' flag.` electron-cast can only see
+  that when the iframe is same-origin with its parent (it reads the `sandbox` attribute through `frameElement`; see
+  [DESIGN](../DESIGN.md)). There is no `allow="..."` Permissions Policy to set for casting.
+
+**What was tested.** The frame handling is covered by unit tests against fake frames. On a Nest Hub Max, Google's SDK in a
+same-origin iframe and in a cross-origin iframe (another host name and port) each started a session on the Default Media
+Receiver through `selectDevice` (the iframe's own origin and a sender id from 2^30 up), media reached `PLAYING`, and the page
+stopped the session; the top page did the same as a control, and an iframe with `sandbox="... allow-presentation"` cast as
+well. The smoke test in a real Electron does not load an iframe, and the iframe cases that move or remove a frame while it
+casts (navigation, removal, several iframes at once) have not been tried on a device.
 
 One difference from Chrome is left: Chrome also cancels a pending start whose frame navigated to another origin while the
 picker was open (`HandleStartPresentationResponse`). Here a pending start is cancelled when the frame is removed or
