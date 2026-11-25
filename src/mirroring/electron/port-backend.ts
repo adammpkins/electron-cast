@@ -108,6 +108,7 @@ export class PortBackend implements MirroringBackend {
         const ref = pending.ref;
         this.stages.add("video encode (agent)", m.encodeMs);
         this.stages.add("video capture to encoded", performance.now() - ref);
+        this.stages.add(m.key ? "video key frame bytes" : "video delta frame bytes", m.data.byteLength);
         const frameId = this.nextVideoFrameId++;
         const referenced = m.key ? frameId : this.lastVideoFrameId;
         this.lastVideoFrameId = frameId;

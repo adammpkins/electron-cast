@@ -151,6 +151,27 @@ export class SenderPacketRouter extends BandwidthEstimator {
     if (next !== NEVER) this.cancelAlarm = this.env.schedule(next, () => this.sendBurstOfPackets());
   }
 
+  /** Where to write the burst statistics (a debug aid, not in openscreen). */
+  debugLog: ((message: string) => void) | undefined;
+  private burstStats = { since: NEVER, bursts: 0, bytes: 0, maxBytes: 0, full: 0 };
+
+  /** Every five seconds: how much the router sent per burst, and how often a burst used its whole packet budget. */
+  private noteBurst(bytes: number, packets: number, nowMs: number): void {
+    const s = this.burstStats;
+    if (this.debugLog === undefined) return;
+    if (s.since === NEVER) s.since = nowMs;
+    s.bursts++;
+    s.bytes += bytes;
+    s.maxBytes = Math.max(s.maxBytes, bytes);
+    if (packets >= this.maxPacketsPerBurst) s.full++;
+    if (nowMs - s.since < 5000) return;
+    this.debugLog(
+      `router bursts: ${s.bursts} in ${Math.round((nowMs - s.since) / 100) / 10} s, mean ${Math.round(s.bytes / s.bursts)} bytes, max ${s.maxBytes} bytes, ` +
+        `${s.full} used the whole budget of ${this.maxPacketsPerBurst} packets (${Math.round(((this.maxPacketsPerBurst * this.env.maxPacketSize * 8 * 1000) / this.burstIntervalMs) / 1e5) / 10} Mbps)`,
+    );
+    this.burstStats = { since: nowMs, bursts: 0, bytes: 0, maxBytes: 0, full: 0 };
+  }
+
   /** `SendBurstOfPackets`: RTCP first, then RTP up to the burst budget. */
   private sendBurstOfPackets(): void {
     this.cancelAlarm = undefined;
@@ -158,6 +179,7 @@ export class SenderPacketRouter extends BandwidthEstimator {
     const rtcp = this.sendJustTheRtcpPackets(burstTime);
     const rtp = this.sendJustTheRtpPackets(burstTime, this.maxPacketsPerBurst - rtcp.packets);
     this.lastBurstTime = burstTime;
+    this.noteBurst(rtcp.bytes + rtp.bytes, rtcp.packets + rtp.packets, burstTime);
     this.onBurstComplete(rtcp.bytes + rtp.bytes, burstTime);
     this.scheduleNextBurst();
   }
