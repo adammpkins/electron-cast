@@ -256,6 +256,11 @@ export class CastSinkService extends EventEmitter<SinkEvents> implements DeviceS
     return [...this.sinkMap.values()].map((s) => ({ ...s.device }));
   }
 
+  /** `CastSinkExtraData::discovery_type == CastDiscoveryType::kDial`: the sink's channel was first opened for a device DIAL found. */
+  discoveredByDial(deviceId: string): boolean {
+    return this.sinkMap.get(deviceId)?.openedBy === "dial";
+  }
+
   /** The open channel's client for a device; undefined when it has none right now. */
   clientOf(deviceId: string): CastClientLike | undefined {
     return this.sinkMap.get(deviceId)?.client;
