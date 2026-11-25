@@ -292,6 +292,14 @@ electron-cast:
 - `main.ts` keeps a `DefaultPresentationRequests` (`default-presentation.ts`) keyed by `webContents.id`; a call from a
   subframe is ignored, an equal URL list is a no-op, an empty one clears. A main frame navigation or a destroyed window
   clears it (through the same `senderGone` that ends the page's connections).
+- Chrome's launch details (`chrome/browser/media/router/providers/cast/cast_activity_manager.cc`,
+  `cast_media_route_provider.cc`, `cast_app_availability_tracker.cc`, `cast_app_discovery_service.cc`,
+  `components/media_router/common/providers/cast/cast_media_source.cc`, `chrome/browser/ui/media_router/media_router_ui_helper.cc`):
+  `LaunchSession` launches even on a sink with a route and `DoLaunchSession` stops the frame's earlier route
+  (`routes_by_frame_`); the launch timeout is the source's `__castLaunchTimeout__` or 60 s, not the dialog's 20 s
+  (`GetRouteRequestTimeout`), which the provider ignores; a sink is offered for a source only when the device answered
+  `GET_APP_AVAILABILITY` with the app and has the capabilities (`GetAvailableSinks`). `CastSessionService.checkAppAvailability`
+  asks and caches per device and app (cleared when the device goes or comes back).
 - `startCasting` follows `CreateRouteParameters` (a source for the sink, else `unable_to_cast`), launches through the
   session service's `requestSessionOnDevice` (the same code as `requestSession` with the picker's answer already
   known, reachable from main only), registers the connection like a page's `start()`, and announces it with a

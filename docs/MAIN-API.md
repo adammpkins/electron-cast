@@ -201,10 +201,25 @@ Differences from Chrome:
   one, so the window identifies it.
 - The sinks for a presentation source are asked for with `MediaSinksQuery.presentationUrls`; Chrome builds a
   `MediaSource` per URL. A sink matches when the URL is a Cast URL (`https://google.com/cast#__castAppId__=...` or
-  `cast:<appId>`) and the sink has the capabilities its app id names. Only the capabilities are checked, as for
-  `getAvailability()`.
-- Casting to a sink where the window's page already has a session for the app returns that session and hands the page a
-  new connection to it, as the page's own picker path does here. Chrome's handling of a second route on one sink was
-  not checked.
-- `startCasting` uses the launch timeout in the request's URL (`__castLaunchTimeout__`), else 60 s, as the page's own
-  `start()` does; Chrome passes `GetRouteRequestTimeout(cast_mode)` to `CreateRoute`.
+  `cast:<appId>`), the sink has the capabilities its app id names **and the device answered `GET_APP_AVAILABILITY`
+  with the app available**, as Chrome's `CastAppAvailabilityTracker::GetAvailableSinks` requires
+  (`CastAppDiscoveryServiceImpl::StartObservingMediaSinks` asks every sink when a source is first observed). So a
+  sinks observer with `presentationUrls` first reports the sinks that were already asked, and the others when the
+  device has answered; `startCasting` asks (once per device and app) before launching, so it works without an observer. A
+  device that cannot be reached counts as not having the app until it next goes away and comes back (the answer is
+  cached per device and app). Chrome refreshes on `DiscoverSinksNow`; there is no refresh here. This costs a
+  connection per device asked, closed again when idle (Chrome keeps its sockets open). The page's own
+  `getAvailability()` and `requestSession` still check capabilities only, as before.
+- Launching: `CastMediaRouteProvider::CreateRoute` ignores the `timeout` it is given (the dialog's
+  `GetRouteRequestTimeout(PRESENTATION)`, 20 s, `media_router_ui_helper.cc`). `CastActivityManager::DoLaunchSession`
+  gives the receiver the source's own `launch_timeout()`: `__castLaunchTimeout__` from the URL when it is a positive
+  number of milliseconds, else `kDefaultLaunchTimeout`, 60 s (`cast_media_source.cc` / `.h`). `startCasting` does the same,
+  as the page's own `start()` does.
+- A sink that already has a route: `CastActivityManager::LaunchSession` launches anyway (a pending removal is noted for
+  the old activity, which goes when the receiver's status update says its session is gone). It does not reuse the route, so
+  neither does `startCasting` (the page's own picker path here still returns an existing session on the chosen sink).
+  `DoLaunchSession` also stops the route this frame launched before (`routes_by_frame_`); `startCasting` stops the
+  route its window's main frame last launched, by `startCasting` or by the page's `start()`, if it is still running.
+- A default request replaced during the launch: `OnPresentationResponse` records the presentation and the route stays
+  (`DoLaunchSession` already added it); only the connection is not handed over. The route stays here too, listed by
+  routes observers, until the window launches another, the app terminates it or the receiver ends it.

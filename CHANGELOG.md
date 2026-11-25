@@ -15,7 +15,10 @@
     connection and the route appears in routes observers. It rejects with `MediaRouteError` carrying Chrome's
     `RouteRequestResultCode` (`timed_out`, `sink_not_found`, `invalid_origin`, `cancelled`, `redundant_request`,
     `unknown_error`) or `unable_to_cast`.
-  - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL. New types
+  - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
+    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities. `startCasting` launches anew on a
+    sink that already has a route, stops the route its window launched before, and uses the URL's
+    `__castLaunchTimeout__` or 60 s, all as Chrome's `CastActivityManager` does. New types
     `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
   - `navigator.presentation.defaultRequest` is now a nullable attribute as in Blink: it takes a `PresentationRequest`
     or `null` and throws `TypeError` for anything else. `connectionavailable` fires after the current task, as Blink
