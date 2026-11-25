@@ -6,11 +6,12 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import { installPresentationStandIn } from "../../src/polyfill/presentation-standin.ts";
 import { installPresentationReceiver } from "../../src/polyfill/presentation-receiver.ts";
+import { MAX_MESSAGE_SIZE } from "../../src/electron/wired-display/local-presentation.ts";
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 type Sent = [string, string | number[]];
 
-function make(kind: "controller" | "receiver") {
+function make(kind: "controller" | "receiver", local = true) {
   const KEY = "__bridge";
   const sent: Sent[] = [];
   let listener: ((e: any) => void) | null = null;
@@ -20,7 +21,7 @@ function make(kind: "controller" | "receiver") {
     navigator: { userAgent: "Mozilla/5.0 Chrome/140", userActivation: { isActive: true } },
   };
   sandbox[KEY] = {
-    call: async (method: string) => (method === "start" ? { ok: true, value: { id: "mr_1", url: "https://example.com/r" } } : { ok: true }),
+    call: async (method: string) => (method === "start" ? { ok: true, value: { id: "mr_1", url: "https://example.com/r", ...(local ? { local: true } : {}) } } : { ok: true }),
     send: (id: string, data: unknown) => { sent.push([id, typeof data === "string" ? data : Array.from(data as Uint8Array)]); },
     onEvent: (l: (e: any) => void) => { listener = l; },
   };
@@ -126,3 +127,55 @@ for (const kind of ["controller", "receiver"] as const) {
     assert.deepEqual(Array.from(new Uint8Array(await (h.run("got[2]") as Blob).arrayBuffer())), [9], "only the viewed bytes");
   });
 }
+
+test("the stand-ins carry the same size cap as main (MAX_MESSAGE_SIZE)", () => {
+  for (const install of [installPresentationStandIn, installPresentationReceiver]) {
+    const m = /const MAX_MESSAGE_SIZE = (\d+) \* 1024 \* 1024;/.exec(install.toString());
+    assert.ok(m, "the literal is there");
+    assert.equal(Number(m[1]) * 1024 * 1024, MAX_MESSAGE_SIZE);
+  }
+});
+
+for (const kind of ["controller", "receiver"] as const) {
+  const rangeError = (h: ReturnType<typeof make>, code: string) =>
+    h.run(`(() => { try { ${code}; return "sent"; } catch (e) { return e.name + ": " + e.message; } })()`);
+
+  test(`${kind}: send() past the cap throws RangeError for text, ArrayBuffer, view and Blob, and nothing is queued`, async () => {
+    const h = make(kind);
+    const id = await h.connect();
+    const expected = `RangeError: Message size exceeds the maximum supported size (${MAX_MESSAGE_SIZE})`;
+    h.ctx.big = new ArrayBuffer(MAX_MESSAGE_SIZE + 1);
+    h.ctx.bigText = "x".repeat(MAX_MESSAGE_SIZE + 1);
+    h.ctx.bigBlob = { [Symbol.toStringTag]: "Blob", size: MAX_MESSAGE_SIZE + 1, arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)) };
+    assert.equal(rangeError(h, "conn.send(bigText)"), expected);
+    assert.equal(rangeError(h, "conn.send(big)"), expected);
+    assert.equal(rangeError(h, "conn.send(new Uint8Array(big))"), expected);
+    assert.equal(rangeError(h, "conn.send(bigBlob)"), expected);
+    assert.equal(h.sent.length, 0);
+    h.run("conn.send('still works')");
+    assert.deepEqual(h.sent, [[id, "still works"]]);
+  });
+
+  test(`${kind}: a detached ArrayBuffer is a TypeError at the call and the queue is left as it was`, async () => {
+    const h = make(kind);
+    const id = await h.connect();
+    const buf = new ArrayBuffer(8);
+    structuredClone(buf, { transfer: [buf] });
+    h.ctx.dead = buf;
+    h.ctx.deadView = new Uint8Array(new ArrayBuffer(8));
+    structuredClone(h.ctx.deadView.buffer, { transfer: [h.ctx.deadView.buffer] });
+    assert.match(rangeError(h, "conn.send(dead)"), /^TypeError/);
+    assert.match(rangeError(h, "conn.send(deadView)"), /^TypeError/);
+    h.run("conn.send('after')");
+    assert.deepEqual(h.sent, [[id, "after"]]);
+  });
+}
+
+test("controller: only a local connection is capped by the stand-in; a Cast message is main's to limit", async () => {
+  const h = make("controller", false);
+  const id = await h.connect();
+  h.ctx.bigText = "x".repeat(MAX_MESSAGE_SIZE + 1);
+  h.run("conn.send(bigText)");
+  assert.equal((h.sent[0]![1] as string).length, MAX_MESSAGE_SIZE + 1);
+  assert.equal(h.sent[0]![0], id);
+});

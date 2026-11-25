@@ -1,4 +1,5 @@
 import type { BridgeEvent, BridgeResult, SessionSnapshot, VolumeSnapshot } from "../polyfill/bridge-types.ts";
+import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
 import { CastTimeoutError } from "../client/index.ts";
@@ -61,6 +62,17 @@ export interface CastRequestInfo {
   senderId: number;
   /** The sender's current session for this app, if it has one; the key is absent when it does not. */
   session?: { sessionId: string; deviceId: string };
+  /**
+   * Set when the page's request could also be shown on a display (its URLs mix a Cast app URL and a standard presentation
+   * source) and displays exist: Chrome's dialog lists both kinds of sink. Answer `{ display: <sink id> }` to pick one.
+   */
+  displays?: readonly WiredDisplaySink[];
+}
+
+/** A display chosen in a picker that also lists displays (see {@link CastRequestInfo.displays}). */
+export interface DisplayChoice {
+  /** The id of one of `request.displays`. */
+  display: string;
 }
 
 /** The picker's answer: a device to cast to, `null` (cancel) or `"stop"` (stop the sender's current session). */

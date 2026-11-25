@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createReceiverWindows, receiverPreloadSource } from "../../src/electron/wired-display/electron-windows.ts";
+import { RECEIVER_SANDBOX, createReceiverWindows, receiverPreloadSource } from "../../src/electron/wired-display/electron-windows.ts";
 import { createWiredDisplay } from "../../src/electron/wired-display/index.ts";
 import { FakeScreen } from "./wired-fakes.ts";
 
@@ -44,6 +44,8 @@ class FakeBrowserWindow extends EventEmitter {
   setFullScreen(f: boolean) { this.fullscreen = f; this.shown.push(`fullscreen:${f}`); }
   isFullScreen() { return this.fullscreen; }
   isDestroyed() { return this.destroyed; }
+  menuRemoved = false;
+  removeMenu() { this.menuRemoved = true; }
   close() { this.closeCalls++; this.destroyed = true; this.webContents.destroyed = true; this.emit("closed"); }
 }
 
@@ -52,10 +54,13 @@ class FakeSession {
   permissionCheck: ((wc: unknown, p: string) => boolean) | null = null;
   downloads: ((e: { preventDefault(): void }) => void) | null = null;
   cleared = 0;
+  clearFails = false;
+  headers: ((d: any, cb: (r: any) => void) => void) | null = null;
+  webRequest = { onHeadersReceived: (l: any) => { this.headers = l; } };
   setPermissionRequestHandler(h: any) { this.permissionRequest = h; }
   setPermissionCheckHandler(h: any) { this.permissionCheck = h; }
   on(_e: "will-download", l: any) { this.downloads = l; }
-  async clearStorageData() { this.cleared++; }
+  async clearStorageData() { this.cleared++; if (this.clearFails) throw new Error("clear failed"); }
   async clearCache() {}
 }
 
@@ -278,5 +283,96 @@ test("the receiver page's IPC carries bytes both ways, and refuses what is neith
   const [bytes, text] = wc.sent.slice(1).map((s) => s.payload);
   assert.deepEqual([bytes.type, Array.from(bytes.bytes as Uint8Array), bytes.data], ["message", [9, 8], undefined]);
   assert.deepEqual([text.type, text.data, text.bytes], ["message", "text", undefined]);
+  t.done();
+});
+
+const headersFor = (ses: FakeSession, details: object): any => {
+  let out: any;
+  ses.headers!(details, (r) => { out = r; });
+  return out;
+};
+
+test("every receiver document gets kPresentationReceiverSandboxFlags as a CSP sandbox, frames included, merged with the page's own CSP", () => {
+  const t = setup();
+  t.wired.controllers.start({ urls: [URL1], origin: "https://c.test", senderId: 1 }, "wired_display_2");
+  const ses = [...t.sessions.values()][0]!;
+  // kModals | kPopups | kTopNavigation are the capabilities taken away; everything else stays
+  const tokens = RECEIVER_SANDBOX.split(" ").slice(1);
+  for (const token of ["allow-modals", "allow-popups", "allow-top-navigation", "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols"]) {
+    assert.ok(!tokens.includes(token), token + " must not be allowed");
+  }
+  for (const token of ["allow-scripts", "allow-same-origin", "allow-forms", "allow-pointer-lock", "allow-presentation"]) assert.ok(tokens.includes(token), token);
+  assert.ok(RECEIVER_SANDBOX.startsWith("sandbox "));
+  for (const resourceType of ["mainFrame", "subFrame"]) {
+    assert.deepEqual(headersFor(ses, { resourceType, responseHeaders: { "content-type": ["text/html"] } }).responseHeaders, {
+      "content-type": ["text/html"], "Content-Security-Policy": [RECEIVER_SANDBOX],
+    });
+  }
+  const merged = headersFor(ses, { resourceType: "subFrame", responseHeaders: { "content-security-policy": ["default-src 'self'"] } });
+  assert.deepEqual(merged.responseHeaders, { "content-security-policy": ["default-src 'self'", RECEIVER_SANDBOX] });
+  assert.deepEqual(headersFor(ses, { resourceType: "script", responseHeaders: {} }), {}, "other resources are left alone");
+  assert.deepEqual(headersFor(ses, { resourceType: "mainFrame" }).responseHeaders, { "Content-Security-Policy": [RECEIVER_SANDBOX] }, "a response with no headers");
+  t.done();
+});
+
+test("the receiver window has no menu and no developer tools", () => {
+  const t = setup();
+  t.wired.controllers.start({ urls: [URL1], origin: "https://c.test", senderId: 1 }, "wired_display_2");
+  const win = FakeBrowserWindow.all[0]!;
+  assert.equal(win.menuRemoved, true);
+  assert.equal(win.options.webPreferences.devTools, false);
+  t.done();
+});
+
+test("a cleared session is reused by the next presentation, never while it is in use, and one that fails to clear is dropped", async () => {
+  const t = setup();
+  const start = (n: number) => t.wired.controllers.start({ urls: [URL1 + "?" + n], origin: "https://c.test", senderId: 1 }, "wired_display_2");
+  start(1);
+  const first = FakeBrowserWindow.all[0]!.options.webPreferences.partition as string;
+  FakeBrowserWindow.all[0]!.emit("closed");
+  await new Promise((r) => setImmediate(r));
+  start(2);
+  assert.equal(FakeBrowserWindow.all[1]!.options.webPreferences.partition, first, "reused");
+  assert.equal(t.sessions.size, 1, "no second session was made");
+  // two at once need two sessions
+  t.wired.controllers.start({ urls: [URL1 + "?3"], origin: "https://c.test", senderId: 1 }, "wired_display_1");
+  assert.equal(t.sessions.size, 2);
+  assert.notEqual(FakeBrowserWindow.all[2]!.options.webPreferences.partition, first);
+  // a session whose clearing failed is not offered again
+  const ses2 = t.sessions.get(FakeBrowserWindow.all[2]!.options.webPreferences.partition)!;
+  ses2.clearFails = true;
+  FakeBrowserWindow.all[2]!.emit("closed");
+  await new Promise((r) => setImmediate(r));
+  t.wired.controllers.start({ urls: [URL1 + "?4"], origin: "https://c.test", senderId: 1 }, "wired_display_1");
+  assert.equal(t.sessions.size, 3, "a fresh session instead");
+  t.done();
+});
+
+test("createReceiverWindows twice on one ipcMain and channel throws until the first is disposed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ec-receiver-"));
+  const ipcMain = new FakeIpcMain();
+  const make = (channel?: string) => createReceiverWindows({
+    BrowserWindow: FakeBrowserWindow as any, session: { fromPartition: () => new FakeSession() as any }, ipcMain: ipcMain as any, preloadDir: dir, ...(channel ? { channel } : {}),
+  });
+  const a = make();
+  assert.throws(() => make(), /already in use/);
+  assert.doesNotThrow(() => make("electron-cast:other").dispose());
+  a.dispose();
+  assert.doesNotThrow(() => make().dispose());
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a receiver text message over the cap is dropped", () => {
+  const t = setup();
+  const conn = t.wired.controllers.start({ urls: [URL1], origin: "https://c.test", senderId: 1 }, "wired_display_2");
+  const got: unknown[] = [];
+  conn.onmessage = (m) => got.push(typeof m === "string" ? m.length : m);
+  const wc = FakeBrowserWindow.all[0]!.webContents;
+  t.ipcMain.handlers.get(CH)!(main(wc), "register", {});
+  const cid = wc.sent[0]!.payload.connectionId as string;
+  const send = t.ipcMain.listeners.get(`${CH}:send`)!;
+  send(main(wc), cid, "x".repeat(2 * 1024 * 1024));
+  send(main(wc), cid, "x".repeat(64 * 1024 * 1024 + 1));
+  assert.deepEqual(got, [2 * 1024 * 1024]);
   t.done();
 });

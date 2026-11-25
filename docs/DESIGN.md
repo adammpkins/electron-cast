@@ -324,10 +324,24 @@ and `LocalPresentationManager`, with the receiver side of Blink's `PresentationR
   through the window closing, and every controller sees `terminated`. A controller going away only unregisters its
   connection.
 - **Receiver window** (`electron-windows.ts`): fullscreen, shown inactive, on the display's bounds, own non-persistent
-  session per presentation, popups, dialogs and downloads refused, only fullscreen permitted, and the first main-frame
-  navigation is the only one allowed (`PresentationNavigationPolicy`). F11 toggles fullscreen (Control+Command+F on macOS).
+  session per presentation, downloads refused, only fullscreen permitted, and the first main-frame navigation is the only one
+  allowed (`PresentationNavigationPolicy`). Chrome starts the receiver's browsing context with `kPresentationReceiverSandboxFlags`
+  (kModals, kPopups, kTopNavigation: `presentation_receiver_flags.h`), which every frame inherits and which makes
+  `ShouldSuppressDialogs` moot. Electron cannot set starting flags, so the same sandbox is sent as a `Content-Security-Policy:
+  sandbox` header (`RECEIVER_SANDBOX`: every token but `allow-modals`, `allow-popups` and the `allow-top-navigation*` ones) on each
+  main-frame and subframe response through `session.webRequest.onHeadersReceived`; an iframe's `alert()` is refused like the
+  page's own. `setWindowOpenHandler` denies windows, a `beforeunload` prompt cannot hold the window, and there is no menu
+  (`removeMenu`, so no reload or developer-tools accelerator) and no `devTools`, as Chrome's receiver window has no browser UI.
+  A finished presentation's in-memory session is cleared and kept for the next one (up to four), instead of one new session each.
+  `createReceiverWindows` can be called once per `ipcMain` and channel until its `dispose()`; a second call throws. F11 toggles fullscreen (Control+Command+F on macOS).
 - **Receiver page API** (`presentation-receiver.ts`): `navigator.presentation.receiver.connectionList`,
   `connectionavailable`, `send`, `close`, `terminate`; it registers lazily on first use.
+- **Sizes**: Blink limits only binary, to 4 GiB, with a `RangeError` from `send()` ("ArrayBuffer size exceeds the maximum supported
+  size (4294967295)"); text has no limit. Here a local presentation has one cap, 64 MiB, in both directions and for text (UTF-16
+  code units), bytes and Blobs alike (`MAX_MESSAGE_SIZE`). Both stand-ins refuse a larger `send()` with that `RangeError` before
+  anything crosses IPC, so nothing is lost silently; main drops what a page past the stand-in sends anyway. A Cast connection keeps its
+  own 1 MiB limit in main. An ArrayBuffer or view is copied at the call (Blink reads an ArrayBuffer when its turn comes), so a
+  detached one is a `TypeError` at the call and never reaches the queue.
 - **Binary messages** (`presentation_connection.cc`, `presentation.mojom`'s `PresentationConnectionMessage` union of `message` and
   `data`): on both stand-ins `send()` takes a string, an ArrayBuffer, an ArrayBufferView or a Blob (anything else is converted
   to a string, as WebIDL picks the DOMString overload). Sends leave through one queue, in order; while a Blob is being read the
@@ -348,6 +362,14 @@ app gives (`preloadDir`); the package never imports Electron, so `screen`, `Brow
 in; Electron has no per-window display observer, so the display of a page is derived from its window's bounds on move and
 resize; a binary message over IPC is capped at 64 MiB (`MAX_BINARY_BYTES`; Blink allows 4 GiB) because it is cloned through
 the main process. The Blob is read in the page, as Blink reads it in the renderer, and sent as bytes.
+
+- **Mixed requests** (a Cast app URL and a standard source in one `PresentationRequest`): Chrome's dialog lists both kinds of sink.
+  When displays and Cast devices both exist, `selectDevice` is the one picker: it gets `request.displays` and answers `{ display: id }`
+  for a display, which starts the wired presentation, or a device, which casts. With devices but no displays it is the Cast flow
+  unchanged, with displays but no devices `selectDisplay` runs. `reconnect(id)` goes to a display for a local id and to Cast otherwise.
+- **Differences kept on purpose**: `reconnect(id)` with a local id but a URL the presentation was not started with is rejected with
+  `NotFoundError`, where Chrome never settles the promise; and one manager serves one provider where Chrome's
+  `MediaRouter` is per profile, so presentations of different `createCastManager` calls do not know of each other.
 
 Notes for docs/CHROMIUM-MAP.md (absent on this branch), one row per rule: sink ids/names and ordering, mirrored displays,
 source rule, CreateRoute terminating the display's presentation, route description, receiver window lockdown and navigation

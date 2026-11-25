@@ -9,7 +9,7 @@ export {
   availableDisplays, isWiredDisplaySource, routeDescription, sinkIdForDisplay, wiredDisplaySinks,
   type DisplayLike, type RectLike, type WiredDisplaySink,
 } from "./displays.ts";
-export { MAX_BINARY_BYTES, type PresentationMessage } from "./local-presentation.ts";
+export { MAX_MESSAGE_SIZE, type PresentationMessage } from "./local-presentation.ts";
 export { createReceiverWindows, receiverPreloadSource } from "./electron-windows.ts";
 export type {
   ReceiverBrowserWindowLike, ReceiverIpcMainLike, ReceiverSessionLike, ReceiverWebContentsLike, ReceiverWindows, ReceiverWindowsOptions,

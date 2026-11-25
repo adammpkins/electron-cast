@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installPresentationReceiver } from "../../polyfill/presentation-receiver.ts";
-import { MAX_BINARY_BYTES, asBytes, messageFields, type ReceiverEnd } from "./local-presentation.ts";
+import { MAX_MESSAGE_SIZE, asBytes, messageFields, type ReceiverEnd } from "./local-presentation.ts";
 import type { ReceiverWindow, ReceiverWindowFactory, ReceiverWindowRequest } from "./provider.ts";
 
 /** The part of an Electron `Session` used here. */
@@ -16,6 +16,14 @@ export interface ReceiverSessionLike {
   on(event: "will-download", listener: (event: { preventDefault(): void }) => void): unknown;
   clearStorageData(): Promise<void>;
   clearCache(): Promise<void>;
+  readonly webRequest: {
+    onHeadersReceived(
+      listener: (
+        details: { resourceType?: string; responseHeaders?: Record<string, string[]> },
+        callback: (response: { responseHeaders?: Record<string, string[]> }) => void,
+      ) => void,
+    ): void;
+  };
 }
 
 /** The part of an Electron `WebContents` used here. */
@@ -39,6 +47,8 @@ export interface ReceiverBrowserWindowLike {
   isFullScreen(): boolean;
   isDestroyed(): boolean;
   close(): void;
+  /** Windows and Linux; absent where there is no per-window menu. */
+  removeMenu?(): void;
   once(event: "closed", listener: () => void): unknown;
 }
 
@@ -73,6 +83,24 @@ export interface ReceiverWindows {
 }
 
 const BRIDGE_KEY = "__electronCastReceiverBridge";
+
+/**
+ * `kPresentationReceiverSandboxFlags` (content/public/browser/presentation_receiver_flags.h) is kModals | kPopups |
+ * kTopNavigation, set as the starting sandbox flags of the receiver's browsing context so every frame in it inherits them.
+ * Electron has no way to set starting flags, so the same sandbox is sent as a `Content-Security-Policy: sandbox` header on
+ * every document the receiver loads. A sandbox removes every capability its tokens do not name, so this names all of the
+ * capabilities but those three: no `allow-modals` (alert, confirm, prompt, print, beforeunload dialogs, in any frame),
+ * no `allow-popups` and no `allow-top-navigation`, `allow-top-navigation-by-user-activation` or
+ * `allow-top-navigation-to-custom-protocols`. `allow-same-origin` keeps the page's origin, as without a sandbox.
+ */
+export const RECEIVER_SANDBOX =
+  "sandbox allow-downloads allow-forms allow-orientation-lock allow-pointer-lock allow-presentation allow-same-origin allow-scripts allow-storage-access-by-user-activation";
+
+/** Sessions that were cleared and can serve another presentation; more would only hold memory. */
+const MAX_POOLED_SESSIONS = 4;
+
+/** An `ipcMain` can have one receiver bridge per channel; a second `ipcMain.handle` on it would throw an opaque error. */
+const claimedChannels = new WeakMap<object, Set<string>>();
 
 /** The generated preload: exposes the receiver bridge and installs the receiver stand-in before the page's scripts. */
 export function receiverPreloadSource(channel: string): string {
@@ -131,18 +159,28 @@ interface Live {
  * The receiver windows of wired display presentations. Per Chrome's `PresentationReceiverWindowController`:
  *  - a window of its own on the display's bounds, shown without stealing focus, then fullscreen (`ShowInactiveFullscreen`);
  *  - a separate, non-persistent session per presentation, as Chrome uses a unique off-the-record profile
- *    (`OTRProfileID::CreateUniqueForMediaRouter`);
- *  - the page may not open windows or dialogs and may not navigate: the first main-frame navigation is the start URL,
- *    any later one that is not same-document stops the page and terminates the presentation
- *    (`PresentationNavigationPolicy`, `kPresentationReceiverSandboxFlags`);
+ *    (`OTRProfileID::CreateUniqueForMediaRouter`); a finished presentation's session is cleared (storage, cache) and
+ *    reused by a later one, so sessions do not pile up, at most {@link MAX_POOLED_SESSIONS} are kept;
+ *  - no popups, dialogs or top-level navigation by the page or any frame in it: the {@link RECEIVER_SANDBOX} header
+ *    (`kPresentationReceiverSandboxFlags`), `setWindowOpenHandler`, and beforeunload prompts that cannot hold the window;
+ *  - the first main-frame navigation is the start URL, any later one that is not same-document stops the page and
+ *    terminates the presentation (`PresentationNavigationPolicy`);
  *  - closing the window terminates the presentation (`WindowClosed` -> `Terminate`).
+ *
+ * One call per `ipcMain` and `channel` until its `dispose()`: a second one throws.
  */
 export function createReceiverWindows(options: ReceiverWindowsOptions): ReceiverWindows {
   const channel = options.channel ?? "electron-cast:receiver";
   const platform = options.platform ?? process.platform;
-  const preload = writePreload(options.preloadDir, channel);
-  const byContents = new Map<number, Live>();
   const ipc = options.ipcMain;
+  const claimed = claimedChannels.get(ipc) ?? new Set<string>();
+  if (claimed.has(channel)) {
+    throw new Error(`createReceiverWindows: the channel "${channel}" is already in use on this ipcMain; dispose() the first one, or pass another channel`);
+  }
+  const preload = writePreload(options.preloadDir, channel);
+  claimed.add(channel);
+  claimedChannels.set(ipc, claimed);
+  const byContents = new Map<number, Live>();
 
   /** The receiver page's IPC is trusted only from the main frame of a window of ours. */
   const liveOf = (event: { sender: ReceiverWebContentsLike; senderFrame?: { parent?: unknown } | null }): Live | undefined => {
@@ -197,14 +235,17 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
     const live = liveOf(event);
     if (live === undefined || typeof connectionId !== "string") return;
     const message = typeof data === "string" ? data : asBytes(data);
-    if (message === null || (typeof message !== "string" && message.byteLength > MAX_BINARY_BYTES)) return;
+    if (message === null || (typeof message === "string" ? message.length : message.byteLength) > MAX_MESSAGE_SIZE) return;
     live.connections.get(connectionId)?.send(message);
   };
   ipc.on(`${channel}:send`, onSend);
 
   const open = new Set<Live>();
 
-  const factory: ReceiverWindowFactory = (request) => {
+  const pool: { partition: string; ses: ReceiverSessionLike }[] = [];
+  let disposed = false;
+
+  const newSession = (): { partition: string; ses: ReceiverSessionLike } => {
     // A partition without the `persist:` prefix lives in memory only
     const partition = `electron-cast-receiver-${randomUUID()}`;
     const ses = options.session.fromPartition(partition);
@@ -213,6 +254,23 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
     ses.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "fullscreen"));
     ses.setPermissionCheckHandler((_wc, permission) => permission === "fullscreen");
     ses.on("will-download", (e) => e.preventDefault());
+    // kPresentationReceiverSandboxFlags on every document of the receiver, frames included
+    ses.webRequest.onHeadersReceived((details, callback) => {
+      if (details.resourceType !== "mainFrame" && details.resourceType !== "subFrame") {
+        callback({});
+        return;
+      }
+      const headers = { ...details.responseHeaders };
+      const key = Object.keys(headers).find((k) => k.toLowerCase() === "content-security-policy") ?? "Content-Security-Policy";
+      headers[key] = [...(headers[key] ?? []), RECEIVER_SANDBOX];
+      callback({ responseHeaders: headers });
+    });
+    return { partition, ses };
+  };
+
+  const factory: ReceiverWindowFactory = (request) => {
+    const session = pool.pop() ?? newSession();
+    const { partition, ses } = session;
 
     const b = request.bounds;
     const win = new options.BrowserWindow({
@@ -230,11 +288,14 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
         contextIsolation: true,
         nodeIntegration: false,
         webSecurity: true,
+        devTools: false,
         webviewTag: false,
         spellcheck: false,
         allowRunningInsecureContent: false,
       },
     });
+    // Chrome's receiver window has no browser UI, so no menu accelerators (reload, developer tools) either
+    win.removeMenu?.();
     const wc = win.webContents;
     const wcId = wc.id;
     const live: Live = { win, wc, presentationId: "", request, connections: new Map() };
@@ -249,14 +310,19 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
       live.connections.clear();
       // Receiver Reset: the page is gone
       if (live.presentationId !== "") request.receiverReset(live.presentationId);
-      void ses.clearStorageData().catch(() => {});
-      void ses.clearCache().catch(() => {});
+      // The session goes back to the pool once nothing of the page is left in it; one that fails to clear is dropped
+      void Promise.all([ses.clearStorageData(), ses.clearCache()]).then(
+        () => {
+          if (!disposed && pool.length < MAX_POOLED_SESSIONS) pool.push(session);
+        },
+        () => {},
+      );
       request.onTerminated();
     };
     byContents.set(wcId, live);
     open.add(live);
 
-    // kPopups
+    // kPopups (the sandbox header covers frames; this covers the window itself even for a document without headers)
     wc.setWindowOpenHandler(() => ({ action: "deny" }));
     wc.on("will-attach-webview", (e: { preventDefault(): void }) => e.preventDefault());
     // ClosePage runs unload handlers but a beforeunload prompt cannot hold the window open
@@ -310,6 +376,8 @@ export function createReceiverWindows(options: ReceiverWindowsOptions): Receiver
   return {
     factory,
     dispose() {
+      disposed = true;
+      claimed.delete(channel);
       ipc.removeHandler(channel);
       ipc.removeListener(`${channel}:send`, onSend);
       for (const live of [...open]) if (!live.win.isDestroyed()) live.win.close();

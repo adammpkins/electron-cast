@@ -4,7 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createCastManager, type CastManagerOptions, type WiredDisplayOptions, type WiredDisplayRequest, type WiredDisplaySink } from "../../src/electron/main.ts";
-import { FakeDevices } from "./fakes.ts";
+import { FakeClient, FakeDevices, TV } from "./fakes.ts";
+import { MEDIA_NAMESPACE } from "../../src/electron/presentation-envelope.ts";
 import { FakePageWindow, FakeScreen, disp, windowFactory } from "./wired-fakes.ts";
 
 const ORIGIN = "http://127.0.0.1:4000";
@@ -298,5 +299,102 @@ test("an open picker follows the page's window as it moves or resizes, and displ
   t.screen.add(disp(4, 5760, 0));
   assert.deepEqual(seen, [["wired_display_1"], ["wired_display_1", "wired_display_3"], ["wired_display_2", "wired_display_3"]]);
   assert.equal(win.listenerCount("move") + win.listenerCount("resize"), 0, "stopping removes the window listeners");
+  await t.manager.dispose();
+});
+
+// ---- a request that a display and a Cast device can both serve (Chrome's dialog lists both kinds of sink)
+const MIXED = [URL1, CAST_URL];
+function mixedSetup(opts: { devices?: boolean; displays?: boolean; choose: (devices: unknown[], request: any) => unknown }) {
+  const picked: { sinks?: WiredDisplaySink[] } = {};
+  const clients: FakeClient[] = [];
+  const asked: { devices: unknown[]; request: any }[] = [];
+  const t = setup({
+    discovery: new FakeDiscovery(opts.devices === false ? [] : [TV]),
+    createClient: (d) => {
+      const c = new FakeClient(d);
+      const launch = c.launch.bind(c);
+      c.launch = async (id: string) => {
+        const app = await launch(id);
+        app.namespaces.push({ name: MEDIA_NAMESPACE });
+        return app;
+      };
+      clients.push(c);
+      return c;
+    },
+    selectDevice: async (devices, request) => {
+      asked.push({ devices, request });
+      return opts.choose(devices, request) as any;
+    },
+  }, picked);
+  if (opts.displays === false) t.screen.remove(2);
+  return { ...t, picked, clients, asked };
+}
+
+test("mixed URLs: one picker lists the displays with the devices, and a display chosen there starts the wired presentation", async () => {
+  const t = mixedSetup({ choose: () => ({ display: "wired_display_2" }) });
+  const wc = new FakeWebContents(5);
+  const r = await t.pcall(wc, "start", { connectionId: "c1", urls: MIXED });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(t.asked[0]!.request.displays.map((d: WiredDisplaySink) => d.id), ["wired_display_2"], "the page's own display is left out");
+  assert.match(r.value.id, /^mr_/);
+  assert.equal(r.value.url, URL1);
+  assert.equal(t.f.windows.length, 1);
+  assert.equal(t.clients.length, 0, "no Cast session was opened");
+  assert.equal(t.picked.sinks, undefined, "selectDisplay is not used when selectDevice shows both");
+  await t.manager.dispose();
+});
+
+test("mixed URLs: a device chosen in the one picker casts, and the displays are not started", async () => {
+  const t = mixedSetup({ choose: (devices) => devices[0] });
+  const wc = new FakeWebContents(5);
+  const r = await t.pcall(wc, "start", { connectionId: "c1", urls: MIXED });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(r.value.id, /^cast-session_/);
+  assert.equal(t.f.windows.length, 0);
+  await t.manager.dispose();
+});
+
+test("mixed URLs: cancelling, or naming a display that was not offered, is AbortError", async () => {
+  for (const answer of [null, { display: "wired_display_99" }]) {
+    const t = mixedSetup({ choose: () => answer });
+    const r = await t.pcall(new FakeWebContents(5), "start", { connectionId: "c1", urls: MIXED });
+    assert.deepEqual([r.ok, r.code], [false, "AbortError"]);
+    assert.equal(t.f.windows.length, 0);
+    await t.manager.dispose();
+  }
+});
+
+test("mixed URLs: with no Cast devices the display picker runs, with no displays the Cast picker runs without displays", async () => {
+  const noDevices = mixedSetup({ devices: false, choose: () => null });
+  await noDevices.pcall(new FakeWebContents(5), "start", { connectionId: "c1", urls: MIXED });
+  assert.equal(noDevices.asked.length, 0);
+  assert.deepEqual(noDevices.picked.sinks!.map((s) => s.id), ["wired_display_2"]);
+  await noDevices.manager.dispose();
+  const noDisplays = mixedSetup({ displays: false, choose: (d) => d[0] });
+  const r = await noDisplays.pcall(new FakeWebContents(5), "start", { connectionId: "c1", urls: MIXED });
+  assert.match(r.value.id, /^cast-session_/);
+  assert.equal(noDisplays.asked[0]!.request.displays, undefined);
+  await noDisplays.manager.dispose();
+});
+
+test("mixed URLs: reconnect with an id that is not local goes to the Cast provider with the Cast URL", async () => {
+  const t = mixedSetup({ choose: () => null });
+  const r = await t.pcall(new FakeWebContents(5), "reconnect", { connectionId: "c1", urls: MIXED, presentationId: "cast-session_nothing" });
+  assert.equal(r.ok, false);
+  assert.notEqual(r.code, "NotSupportedError", "the Cast provider was given the Cast URL, not the page URL");
+  await t.manager.dispose();
+});
+
+test("size: a local text message over the cap is dropped in main, one at the cap is delivered", async () => {
+  const t = setup();
+  const wc = new FakeWebContents(5);
+  await t.pcall(wc, "start", { connectionId: "c1", urls: [URL1] });
+  const win = t.f.windows[0]!;
+  win.register();
+  const rx: unknown[] = [];
+  win.ends[0]!.onmessage = (m) => rx.push(typeof m === "string" ? m.length : m);
+  t.psend(wc, "c1", "x".repeat(2 * 1024 * 1024)); // past the 1 MiB a Cast message may be, fine for a display
+  t.psend(wc, "c1", "x".repeat(64 * 1024 * 1024 + 1));
+  assert.deepEqual(rx, [2 * 1024 * 1024]);
   await t.manager.dispose();
 });

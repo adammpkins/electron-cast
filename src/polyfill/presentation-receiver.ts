@@ -49,6 +49,8 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
   };
 
   const connections = new Map<string, any>();
+  // Largest message of a local presentation (see MAX_MESSAGE_SIZE in electron/wired-display/local-presentation.ts)
+  const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
 
   // PresentationConnection::send overloads (presentation_connection.cc): a string, an ArrayBuffer, an ArrayBufferView or a
   // Blob; anything else is converted to a string, as WebIDL resolves the DOMString overload. Cross-realm safe (no instanceof).
@@ -117,12 +119,30 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
     }
     send(data: any): void {
       if (this.__state !== "connected") throw new DE("The presentation connection is not connected.", "InvalidStateError");
+      const size = (n: number): void => {
+        if (true && n > MAX_MESSAGE_SIZE) {
+          // presentation_connection.cc: send() throws a RangeError for a message past the supported size
+          throw new g.RangeError("Message size exceeds the maximum supported size (" + MAX_MESSAGE_SIZE + ")");
+        }
+      };
       let item: any;
-      if (typeof data === "string") item = data;
-      else if (tagOf(data) === "[object ArrayBuffer]") item = { buffer: data };
-      else if (g.ArrayBuffer.isView(data)) item = { bytes: copyView(data) };
-      else if (tagOf(data) === "[object Blob]") item = { blob: data };
-      else item = String(data);
+      if (typeof data === "string") {
+        size(data.length);
+        item = data;
+      } else if (tagOf(data) === "[object ArrayBuffer]") {
+        size(data.byteLength);
+        // Copied now, not when its turn comes: a detached buffer is a TypeError at the call, as in Blink's bindings
+        item = { bytes: new g.Uint8Array(data.slice(0)) };
+      } else if (g.ArrayBuffer.isView(data)) {
+        size(data.byteLength);
+        item = { bytes: copyView(data) };
+      } else if (tagOf(data) === "[object Blob]") {
+        size(data.size);
+        item = { blob: data };
+      } else {
+        item = String(data);
+        size(item.length);
+      }
       this.__out.push(item);
       this.__pump();
     }
@@ -133,9 +153,6 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
         if (typeof item === "string") {
           this.__out.shift();
           bridge.send(this.__connectionId, item);
-        } else if (item.buffer !== undefined) {
-          this.__out.shift();
-          bridge.send(this.__connectionId, new g.Uint8Array(item.buffer.slice(0)));
         } else if (item.bytes !== undefined) {
           this.__out.shift();
           bridge.send(this.__connectionId, item.bytes);
@@ -318,7 +335,10 @@ export function installPresentationReceiver(bridgeKey: string): boolean {
   expose("PresentationConnectionAvailableEvent", PresentationConnectionAvailableEvent);
   expose("PresentationConnectionCloseEvent", PresentationConnectionCloseEvent);
 
-  // kModals in kPresentationReceiverSandboxFlags (content/public/browser/presentation_receiver_flags.h): no dialogs
+  // kModals in kPresentationReceiverSandboxFlags (content/public/browser/presentation_receiver_flags.h): no dialogs. The
+  // receiver window's sandbox header (RECEIVER_SANDBOX in electron/wired-display/electron-windows.ts) is what removes them,
+  // in every frame; this only makes the top window's own calls return what a sandboxed page gets, if a page ever runs
+  // without that header.
   const quiet = (name: string, result: any): void => {
     Object.defineProperty(g, name, { value: () => result, writable: true, configurable: true, enumerable: true });
   };

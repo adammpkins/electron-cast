@@ -24,6 +24,8 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
   const uuid = (): string => g.crypto.randomUUID();
 
   const MAX_QUEUED_MESSAGES = 1000;
+  // Largest message of a local presentation (see MAX_MESSAGE_SIZE in electron/wired-display/local-presentation.ts)
+  const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
 
   // PresentationConnection::send overloads (presentation_connection.cc): a string, an ArrayBuffer, an ArrayBufferView or a
   // Blob; anything else is converted to a string, as WebIDL resolves the DOMString overload. Cross-realm safe (no instanceof).
@@ -106,6 +108,7 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
     __out: any[];
     __reading: boolean;
     __gen: number;
+    __local: boolean;
     __flushScheduled: boolean;
     __msgListeners: number;
     __h_message: any;
@@ -120,18 +123,37 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       this.__out = [];
       this.__reading = false;
       this.__gen = 0;
+      this.__local = false;
       this.__flushScheduled = false;
       this.__msgListeners = 0;
       this.__h_message = null;
     }
     send(data: any): void {
       if (this.state !== "connected") throw new DE("The connection is not open.", "InvalidStateError");
+      const size = (n: number): void => {
+        if (this.__local && n > MAX_MESSAGE_SIZE) {
+          // presentation_connection.cc: send() throws a RangeError for a message past the supported size
+          throw new g.RangeError("Message size exceeds the maximum supported size (" + MAX_MESSAGE_SIZE + ")");
+        }
+      };
       let item: any;
-      if (typeof data === "string") item = data;
-      else if (tagOf(data) === "[object ArrayBuffer]") item = { buffer: data };  // read when its turn comes, as Blink does
-      else if (g.ArrayBuffer.isView(data)) item = { bytes: copyView(data) };
-      else if (tagOf(data) === "[object Blob]") item = { blob: data };
-      else item = String(data);
+      if (typeof data === "string") {
+        size(data.length);
+        item = data;
+      } else if (tagOf(data) === "[object ArrayBuffer]") {
+        size(data.byteLength);
+        // Copied now, not when its turn comes: a detached buffer is a TypeError at the call, as in Blink's bindings
+        item = { bytes: new g.Uint8Array(data.slice(0)) };
+      } else if (g.ArrayBuffer.isView(data)) {
+        size(data.byteLength);
+        item = { bytes: copyView(data) };
+      } else if (tagOf(data) === "[object Blob]") {
+        size(data.size);
+        item = { blob: data };
+      } else {
+        item = String(data);
+        size(item.length);
+      }
       this.__out.push(item);
       this.__pump();
     }
@@ -142,9 +164,6 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
         if (typeof item === "string") {
           this.__out.shift();
           bridge.send(this.connectionId, item);
-        } else if (item.buffer !== undefined) {
-          this.__out.shift();
-          bridge.send(this.connectionId, new g.Uint8Array(item.buffer.slice(0)));
         } else if (item.bytes !== undefined) {
           this.__out.shift();
           bridge.send(this.connectionId, item.bytes);
@@ -209,6 +228,8 @@ export function installPresentationStandIn(bridgeKey: string): boolean {
       const value = result.value || {};
       conn.id = value.id ?? "";
       conn.url = value.url ?? "";
+      // Only a local presentation (a display) carries messages past what a Cast message may be
+      conn.__local = value.local === true;
       // A connection to a local receiver (a wired display) starts out connecting, as Blink's does, and connects with a
       // statechange once the receiver page is ready; one that has connected already is left as it is.
       if (value.state === "connecting") {

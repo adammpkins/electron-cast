@@ -11,10 +11,13 @@
 export type PresentationMessage = string | Uint8Array;
 
 /**
- * Largest binary message taken from a page over IPC. Blink allows up to 4 GiB (`wtf_size_t`); an Electron IPC message is
- * a structured clone through the main process, so this caps what one page can make it hold.
+ * Largest message of a local presentation, in bytes for binary and UTF-16 code units for text, in both directions.
+ * Blink limits only binary, to 4 GiB (`wtf_size_t`, a RangeError from `send()`); an Electron IPC message is a structured
+ * clone through the main process, so a smaller cap keeps one page from making it hold gigabytes. The stand-ins refuse an
+ * oversized `send()` with that same RangeError, and main drops what a compromised page sends past it anyway. The stand-ins
+ * carry this number as a literal (they are injected as source); a test keeps the three in step.
  */
-export const MAX_BINARY_BYTES = 64 * 1024 * 1024;
+export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
 
 /** The bytes of what a page sent over IPC (it arrives as a Uint8Array, or an ArrayBuffer), or null when it is not binary. */
 export function asBytes(value: unknown): Uint8Array | null {

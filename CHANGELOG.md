@@ -18,6 +18,13 @@
   text. Before, `send()` threw a `TypeError` for anything but a string.
 - Wired displays: the display a page is on is left out of the picker by default, found with the new `BrowserWindow` option and
   `screen.getDisplayMatching`, and `request.observeSinks` follows the window as it moves. `displayOf` is now an override.
+- Wired displays, review fixes: the receiver is sandboxed as Chrome's is (`kPresentationReceiverSandboxFlags`: no modals, popups or
+  top-level navigation) by a `Content-Security-Policy: sandbox` header on every receiver document, so an iframe's `alert()` is
+  refused too; the receiver window has no menu and no developer tools; receiver sessions are cleared and reused instead of one
+  per presentation; calling `createReceiverWindows` twice on one `ipcMain` and channel throws a clear error. One 64 MiB cap now
+  holds for text and bytes in both directions, and a larger `send()` throws `RangeError` instead of being dropped; a detached
+  ArrayBuffer is a `TypeError`. A request that lists both a Cast app URL and a page URL is one picker (`selectDevice` gets
+  `request.displays` and may answer `{ display }`) and starts on the sink it returns.
 
 ## 0.4.0
 
