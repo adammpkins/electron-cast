@@ -39,9 +39,11 @@ export interface DialSinkServiceOptions {
   /** `kDeviceDescriptionCacheTimeHours` 12 h. */
   descriptionCacheMs?: number;
   /**
-   * True when a Cast sink has this id (the part after `dial:`, `cast:<uuid>` there). Chromium removes such a sink from the DIAL service
-   * (`CastMediaSinkServiceImpl::TryConnectDialDiscoveredSink`, `OnChannelOpenSucceeded`), so here it is hidden: it is
-   * not listed, queried for apps, or routable. Call {@link DialSinkService.refilter} when the answer may have changed.
+   * True when a Cast sink has this id (the part after `dial:`, `cast:<uuid>` there). Chromium removes such a sink from
+   * the DIAL sink service when the Cast channel opens (`CastMediaSinkServiceImpl::OnChannelOpenSucceeded`) and when the
+   * DIAL sink is added or updated while the Cast sink exists (`OnSinkAddedOrUpdated` -> `TryConnectDialDiscoveredSink`),
+   * and so does this. A removed sink stays removed until a DIAL discovery round adds it again, whether or not the Cast
+   * sink is still there. Call {@link DialSinkService.refilter} when the Cast sinks changed.
    */
   isCastSink?: (uuid: string) => boolean;
 }
@@ -105,15 +107,15 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
     this.source.on("deviceList", this.onList);
   }
 
-  /** `GetSinks`, minus the sinks that are Cast sinks too. */
+  /** `GetSinks`. */
   sinks(): DialSink[] {
-    return [...this.all.values()].filter((s) => !this.hidden(s)).map((s) => ({ ...s }));
+    return [...this.all.values()].map((s) => ({ ...s }));
   }
 
   /** `GetSinkById`. */
   getSink(id: string): DialSink | undefined {
     const sink = this.all.get(id);
-    return sink === undefined || this.hidden(sink) ? undefined : { ...sink };
+    return sink === undefined ? undefined : { ...sink };
   }
 
   /** `GetAvailableSinks(app_name)`: the sinks whose app info for `appName` said the app exists. */
@@ -167,11 +169,18 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
     for (const sink of this.sinks()) for (const app of this.queries.keys()) this.fetchAppInfoForSink(sink, app);
   }
 
-  /** Tell the service the Cast sinks changed, so the sinks that are also Cast sinks are hidden or shown again. */
+  /**
+   * Tell the service the Cast sinks changed: the DIAL sinks that are Cast sinks now are removed
+   * (`CastMediaSinkServiceImpl::OnChannelOpenSucceeded` -> `RemoveSinkById`). A Cast sink going away brings nothing
+   * back: as in Chrome, a removed DIAL sink returns only when DIAL discovery adds it again.
+   */
   refilter(): void {
     if (this.stopped) return;
-    for (const sink of this.sinks()) for (const app of this.queries.keys()) this.fetchAppInfoForSink(sink, app);
-    this.publishIfChanged();
+    if (this.removeCastSinks()) {
+      // MediaSinkServiceBase::RemoveSinkById starts the discovery timer
+      this.startTimer();
+      this.publishIfChanged();
+    }
   }
 
   stop(): void {
@@ -188,8 +197,19 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
     this.fetching.clear();
   }
 
-  private hidden(sink: DialSink): boolean {
+  private isCast(sink: DialSink): boolean {
     return this.isCastSink(sink.id.slice("dial:".length));
+  }
+
+  /** Removes the sinks that are Cast sinks too (`TryConnectDialDiscoveredSink`'s `RemoveSink`); true when one went. */
+  private removeCastSinks(): boolean {
+    let removed = false;
+    for (const [id, sink] of this.all) {
+      if (!this.isCast(sink)) continue;
+      this.all.delete(id);
+      removed = true;
+    }
+    return removed;
   }
 
   /** `OnDialDeviceList`: forget the previous round's sinks and look every device up again. */
@@ -275,13 +295,19 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
     this.timer.unref?.();
   }
 
-  /** `DialMediaSinkServiceImpl::OnDiscoveryComplete`: the sinks that answered replace the sinks that were known. */
+  /**
+   * `DialMediaSinkServiceImpl::OnDiscoveryComplete`: the sinks that answered replace the sinks that were known. A sink
+   * that is added or updated while it is a Cast sink is removed again at once, as Chrome's observer does
+   * (`CastMediaSinkServiceImpl::OnSinkAddedOrUpdated`, synchronously inside `AddOrUpdateSink`), so it is never reported.
+   */
   private onDiscoveryComplete(): void {
     if (this.stopped) return;
     for (const id of this.all.keys()) if (!this.latest.has(id)) this.all.delete(id);
     for (const [id, sink] of this.latest) {
       const old = this.all.get(id);
-      if (old === undefined || !sameSink(old, sink)) this.all.set(id, sink);
+      if (old !== undefined && sameSink(old, sink)) continue;
+      if (this.isCast(sink)) this.all.delete(id);
+      else this.all.set(id, sink);
     }
     this.publishIfChanged();
   }
@@ -296,7 +322,6 @@ export class DialSinkService extends EventEmitter<DialSinkServiceEvents> {
   /** `FetchAppInfoForSink`: asks only about what is not known yet, and never a discovery-only model. */
   private fetchAppInfoForSink(sink: DialSink, appName: string): void {
     if (DISCOVERY_ONLY_MODELS.has(sink.modelName.toLowerCase())) return;
-    if (this.hidden(sink)) return;
     const key = `${sink.id}:${appName}`;
     if (this.statuses.has(key)) return;
     void this.fetchAppInfo(sink, appName).then((result) => {

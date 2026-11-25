@@ -219,7 +219,10 @@ const off = manager.addPresentationObserver(id, {
 // the devices that can run it, kept current (the dialog's sinks observers for its presentation source)
 manager.registerMediaSinksObserver(
   { onSinksUpdated: (sinks) => menu.setDevices(sinks) },
-  { presentationUrls: manager.getDefaultPresentationRequest(id)?.presentationUrls ?? [] },
+  {
+    presentationUrls: manager.getDefaultPresentationRequest(id)?.presentationUrls ?? [],
+    origin: manager.getDefaultPresentationRequest(id)?.frameOrigin,
+  },
 );
 
 // the user picked a device in my menu
@@ -243,7 +246,9 @@ What happens, with Chrome's counterparts:
    navigation keeps it) or goes away. Observers then get `null`.
 3. **`startCasting(sinkId, { webContentsId })`** is `MediaRouterUI::StartCasting(sink_id, PRESENTATION)`.
    `MediaRouteStarter::CreateRouteParameters` needs a presentation source for the sink: the first of the request's URLs
-   the sink can run (`QueryResultManager::GetSourceForCastModeAndSink`). With no default request, an unknown sink, or no
+   the sink can run (`QueryResultManager::GetSourceForCastModeAndSink`): a Cast app URL for a Cast sink, a `cast-dial:`
+   URL for a DIAL sink (`MediaRouteStarter::OnDefaultPresentationChanged` makes a source of every URL, and the DIAL
+   provider serves the `cast-dial:` ones). With no default request, an unknown sink, or no
    URL the sink suits (a Cast URL that is not one, or capabilities the sink lacks), Chrome shows an "unable to cast"
    issue and starts nothing; here the promise rejects with `unable_to_cast`. Otherwise `MediaRouter::CreateRoute` runs,
    here a launch on the sink with no picker. The session is a route like any other: routes observers see it, and it is
@@ -292,6 +297,13 @@ Differences from Chrome:
   asks again too, by the same rules (`CastAppDiscoveryServiceImpl::Refresh`). The question goes over the channel the
   device already has open; nothing else is connected. The page's own `getAvailability()` and `start()` use the same
   answers (see [API.md](API.md#app-availability)).
+- A DIAL sink matches a `cast-dial:` URL whose app its DIAL server said it has, for the query's `origin` when the app is
+  one Chrome offers to some origins only (`DialMediaRouteProvider::GetOrigins`); pass the request's `frameOrigin`. While
+  the observer is registered the DIAL sinks are asked about those apps, as the DIAL provider's `StartObservingMediaSinks`
+  does. `startCasting` on a DIAL sink asks too and waits up to 5 s for the answer, then starts the DIAL route; the page
+  gets `connectionavailable` with an `mr_` presentation id, and the SDK's DIAL launch round trip runs on it as for its own
+  `start()`. A DIAL route has no earlier-route rule: `CastActivityManager`'s is Cast's, and the DIAL provider stops the
+  route already on the sink itself.
 - Launching: `CastMediaRouteProvider::CreateRoute` ignores the `timeout` it is given (the dialog's
   `GetRouteRequestTimeout(PRESENTATION)`, 20 s, `media_router_ui_helper.cc`). `CastActivityManager::DoLaunchSession`
   gives the receiver the source's own `launch_timeout()`: `__castLaunchTimeout__` from the URL when it is a positive

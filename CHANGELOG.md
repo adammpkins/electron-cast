@@ -38,7 +38,9 @@ is frozen and behaves as before for pages; it shares the device list.
     route its window launched before, and uses the URL's `__castLaunchTimeout__` or 60 s, all as Chrome's
     `CastActivityManager` does. New types `PresentationRequest`, `PresentationObserver` and `MediaCastMode`.
   - `MediaSinksQuery` gains `presentationUrls`, the sinks that can run a presentation URL: as in Chrome, the device
-    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities.
+    must say the app is available (`GET_APP_AVAILABILITY`) and have its capabilities. A DIAL sink matches a
+    `cast-dial:` URL whose app it has, for the query's new `origin`, and `startCasting` starts a DIAL route on it, as
+    Chrome's dialog offers DIAL sinks for a default request's `cast-dial:` URLs.
 - **DIAL, as Chrome's Media Router does it (presentation mode).** electron-cast now discovers DIAL devices by SSDP and
   serves the `cast-dial:` sources that Google's SDK adds to a request when the page passes a `dialRequest`
   (`chrome.cast.DialRequest`, as YouTube's web app does for non-Cast TVs). Each rule follows a Chromium function,
@@ -51,9 +53,11 @@ is frozen and behaves as before for pages; it shares the device list.
   URL. A device that is also a Cast sink (its UDN is the Cast id, and its channel is open) is shown as a Cast device
   only, as in Chrome. On by default, as in Chrome; `dial: false` on `createCastManager` turns it off (SSDP and the
   HTTP requests to devices stop entirely). A custom `discovery` turns it off unless `dial` is given.
-  - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009), a DIAL
-    sink hidden by a Cast sink comes back as soon as the Cast sink goes, requests have timeouts (Chrome sets none), and
-    a DIAL route has no volume or media control (`BindMediaController` is not implemented there either).
+  - A DIAL sink that is a Cast sink too is removed, as Chrome removes it, and only DIAL discovery adds it back (not
+    the Cast sink going away).
+  - Differences from Chrome: a DIAL device is not promoted to a Cast channel (Chrome opens one to port 8009) and
+    requests have timeouts (Chrome sets none). A DIAL route has no volume or media control, as in Chrome
+    (`BindMediaController` is not implemented there).
   - DIAL discovery errors (no interface, a socket that fails to bind or send) are logged through `dial.log` and never
     thrown; `start()` works with no network. Nothing is asked of a device for an app the page's origin may not see,
     the monitored apps are bounded, stopping aborts requests in flight (a route terminated mid-launch cancels its
@@ -61,7 +65,7 @@ is frozen and behaves as before for pages; it shares the device list.
   - API: `MediaSink` and `MediaRoute` gain `providerId` (`"cast"` or `"dial"`), `SinkIconType` gains `"generic"`, and
     `CastDevice` gains an optional `dial` field that marks a DIAL sink. The sinks observer without a query also
     reports DIAL sinks (they have no capabilities, so a `capabilities` query never does, and a `presentationUrls` query
-    matches Cast URLs only); `manager.devices()` still lists Cast devices only. `selectDevice` can be handed a DIAL
+    matches them for its `cast-dial:` URLs); `manager.devices()` still lists Cast devices only. `selectDevice` can be handed a DIAL
     device when the request carries a `cast-dial:` URL: return it like any other and the manager does the rest (do not
     connect to it yourself). `getMediaController` on a DIAL route throws `route_not_found`. The SDK canary no longer
     lists the DIAL messages and `cast-dial:` as unhandled.

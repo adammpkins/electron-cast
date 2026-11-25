@@ -93,7 +93,7 @@ export class DialService extends EventEmitter<{ change: [] }> {
     this.provider.dispose();
   }
 
-  /** The Cast sinks changed: hide or show the DIAL sinks that are also Cast devices. */
+  /** The Cast sinks changed: remove the DIAL sinks that are Cast sinks now (they return with DIAL discovery). */
   castDevicesChanged(): void {
     this.sinks.refilter();
   }

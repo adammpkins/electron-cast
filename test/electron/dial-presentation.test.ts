@@ -217,6 +217,42 @@ test("a DIAL route has no media controller, as Chrome's DIAL provider binds none
   await manager.dispose();
 });
 
+test("a default request with a cast-dial: URL offers the DIAL sink and startCasting on it starts the DIAL route, as Chrome's dialog does", async () => {
+  // MediaRouteStarter::OnDefaultPresentationChanged makes a source of each URL, QueryResultManager observes each one,
+  // and GetSourceForCastModeAndSink picks the URL the sink is compatible with: the cast-dial: one for a DIAL sink
+  const { manager, pcall, psend, http, picked } = await setup({ warm: false });
+  const wc = new FakeWebContents(5);
+  assert.deepEqual(await pcall(wc, "setDefaultRequest", { urls: [CAST_URL, DIAL_URL] }), { ok: true, value: undefined });
+  const lists: any[][] = [];
+  const stop = manager.registerMediaSinksObserver({ onSinksUpdated: (s) => lists.push(s) }, { presentationUrls: [CAST_URL, DIAL_URL], origin: ORIGIN });
+  await tick(60);
+  assert.deepEqual(lists.at(-1)?.map((s) => s.id), [SINK_ID], "the DIAL sink is offered once its DIAL server says it has the app");
+  const other: any[][] = [];
+  const stopOther = manager.registerMediaSinksObserver({ onSinksUpdated: (s) => other.push(s) }, { presentationUrls: [DIAL_URL], origin: "https://example.test" });
+  assert.deepEqual(other.at(-1), [], "not for an origin Chrome does not allow for the app");
+  stopOther();
+  stop();
+
+  const route = await manager.startCasting(SINK_ID, { webContentsId: 5 });
+  assert.equal(picked.length, 0, "no picker");
+  assert.equal(route.providerId, "dial");
+  assert.equal(route.mediaSource, DIAL_URL);
+  assert.equal(route.sinkId, SINK_ID);
+  const available = wc.events().find((e) => e.type === "connectionavailable");
+  assert.ok(available, "the page gets connectionavailable");
+  assert.match(available.id, /^mr_/);
+  assert.equal(available.url, DIAL_URL);
+  // the SDK's launch round trip runs on that connection as on a page's own start()
+  psend(wc, available.connectionId, envelope("client_connect", { clientId: "c1" }));
+  await tick(20);
+  const ask = wc.messages(available.connectionId).find((m) => m.type === "custom_dial_launch");
+  assert.ok(ask);
+  psend(wc, available.connectionId, envelope("custom_dial_launch", { doLaunch: true, launchParameter: "v=2" }, ask.sequenceNumber));
+  await tick(20);
+  assert.deepEqual(http.calls.filter((c) => c.method === "POST").map((c) => c.body), ["v=2"]);
+  await manager.dispose();
+});
+
 test("a STOP v2_message from the page terminates the connection", async () => {
   const { manager, pcall, psend, http } = await setup();
   const wc = new FakeWebContents(1);

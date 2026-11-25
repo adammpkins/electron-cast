@@ -298,18 +298,45 @@ test("apps are not queried on a discovery-only model", async () => {
   sinks.stop();
 });
 
-test("a DIAL sink that is also a Cast device is hidden, the way Chrome leaves it a Cast sink", async () => {
+test("a DIAL sink that is also a Cast sink is removed, and only DIAL discovery brings it back, as in Chrome", async () => {
+  // CastMediaSinkServiceImpl::TryConnectDialDiscoveredSink and OnChannelOpenSucceeded remove the DIAL sink from the DIAL
+  // sink service; nothing adds it back when the Cast sink goes, only DialMediaSinkServiceImpl::OnDiscoveryComplete
   let cast = true;
   const { registry, sinks } = sinkService(healthyDevice(), { isCastSink: (uuid) => cast && uuid === "aaaa1111222233334444555566667777" });
   sinks.monitorApp("YouTube");
   registry.emit("deviceList", [DEVICE]);
   await settle();
-  assert.deepEqual(sinks.sinks(), []);
+  assert.deepEqual(sinks.sinks(), [], "added while a Cast sink: removed at once");
   assert.deepEqual(sinks.availableSinks("YouTube"), []);
   cast = false;
   sinks.refilter();
   await settle();
-  assert.equal(sinks.sinks().length, 1);
+  assert.deepEqual(sinks.sinks(), [], "the Cast sink going brings nothing back");
+  registry.emit("deviceList", [DEVICE]);
+  await settle();
+  assert.equal(sinks.sinks().length, 1, "the next discovery round adds it again");
+
+  // listed first, then a Cast channel to the same device opens: removed at once
+  let changes = 0;
+  sinks.on("change", () => changes++);
+  cast = true;
+  sinks.refilter();
+  assert.deepEqual(sinks.sinks(), []);
+  assert.equal(changes, 1);
+  // RemoveSinkById starts the discovery timer, and OnDiscoveryComplete adds the round's sinks back that are missing:
+  // listed again if the Cast sink went before the timer fired (Chrome does the same)
+  cast = false;
+  await settle();
+  assert.equal(sinks.sinks().length, 1, "the removal's own timer re-adds it");
+  // while the Cast sink is there, that re-add is removed again at once, and then no timer is left running
+  cast = true;
+  sinks.refilter();
+  await settle();
+  assert.deepEqual(sinks.sinks(), []);
+  cast = false;
+  sinks.refilter();
+  await settle();
+  assert.deepEqual(sinks.sinks(), [], "nothing comes back until DIAL discovery reports again");
   sinks.stop();
 });
 

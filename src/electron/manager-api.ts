@@ -6,6 +6,7 @@ import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
 import { APP_AVAILABILITY_REFRESH_MS, type DeviceSource } from "./session-service.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
+import { appNameFromDialSource, isDialSource } from "../dial/parse.ts";
 import type { DefaultPresentationRequests, PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
@@ -32,10 +33,19 @@ export interface MediaSinksQuery {
   /** Only sinks with all of these capabilities (`video_out`, `audio_out`, ...), like `requestSession`'s. */
   capabilities?: string[];
   /**
-   * Only sinks that can run one of these presentation URLs (Chrome: the observer's `MediaSource`, as the Cast dialog
-   * sets it from the page's default request). A URL that is not a Cast URL matches no sink. Combines with `capabilities`.
+   * Only sinks that can run one of these presentation URLs (Chrome: a `MediaSinksObserver` per URL's `MediaSource`, as
+   * the Cast dialog sets them from the page's default request). A Cast sink matches a Cast app URL whose app it said it
+   * has; a DIAL sink matches a `cast-dial:` URL whose app its DIAL server said it has, and while the observer is
+   * registered the DIAL sinks are asked about those apps (`DialMediaRouteProvider::StartObservingMediaSinks`). Other
+   * URLs match no sink. Combines with `capabilities`.
    */
   presentationUrls?: string[];
+  /**
+   * The origin of the page the URLs are for (Chrome: the default request's `frame_origin`, which the dialog's observers
+   * carry). A DIAL app that Chrome offers to some origins only (`DialMediaRouteProvider::GetOrigins`) matches only for
+   * one of them; with no origin, only apps open to every origin match.
+   */
+  origin?: string;
 }
 
 /** Chrome: `MediaCastMode`; the Cast dialog's `PRESENTATION` mode is the one electron-cast has (no tab or desktop mirroring). */
@@ -201,9 +211,18 @@ export function presentationUrlForDevice(
   urls: readonly string[],
   /** When given, the app must also be known to be available on the device (`GET_APP_AVAILABILITY`). */
   appAvailable?: (device: CastDevice, appId: string) => boolean | undefined,
+  /** When given, a DIAL sink matches a `cast-dial:` URL whose app it has. */
+  dialAvailable?: (device: CastDevice, appName: string) => boolean,
 ): string | null {
-  // A DIAL sink runs no Cast app URL; the cast-dial: sources it does run are the DIAL provider's (not queried here yet)
-  if (device.dial !== undefined) return null;
+  // A DIAL sink runs the cast-dial: sources whose app it has (DialMediaRouteProvider), never a Cast app URL
+  if (device.dial !== undefined) {
+    if (dialAvailable === undefined) return null;
+    for (const url of urls) {
+      const app = isDialSource(url) ? appNameFromDialSource(url) : "";
+      if (app !== "" && dialAvailable(device, app)) return url;
+    }
+    return null;
+  }
   for (const url of urls) {
     const parsed = parsePresentationUrl(url);
     if (parsed !== null && capsMatch(device, parsed.capabilities)
@@ -212,10 +231,18 @@ export function presentationUrlForDevice(
   return null;
 }
 
-/** How a sinks observer learns which devices have an app (Chrome: CastAppDiscoveryService). */
+/** How a sinks observer learns which devices have an app (Chrome: CastAppDiscoveryService, and the DIAL sink service). */
 export interface AppAvailability {
   cached(device: CastDevice, appId: string): boolean | undefined;
   check(device: CastDevice, appId: string): Promise<boolean>;
+  /**
+   * DIAL sinks: whether `device` has `appName` for a page at `origin`, and `monitor`, which makes the DIAL sink service
+   * find out until the returned function is called (null when the origin may not see the app).
+   */
+  dial?: {
+    available(device: CastDevice, appName: string, origin: string): boolean;
+    monitor(appName: string, origin: string): (() => void) | null;
+  };
 }
 
 /** The sink for a discovered device. */
@@ -298,8 +325,15 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
     register(observer, query, signal, eligible) {
       const caps = query?.capabilities;
       const urls = query?.presentationUrls;
+      const origin = query?.origin ?? "";
+      const dial = availability?.dial;
+      const dialAvailable = dial === undefined ? undefined : (d: CastDevice, app: string): boolean => dial.available(d, app, origin);
       const matches = (d: CastDevice): boolean => (eligible?.(d) ?? true) && (caps === undefined || capsMatch(d, caps))
-        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability)) !== null);
+        && (urls === undefined || presentationUrlForDevice(d, urls, availability?.cached.bind(availability), dialAvailable) !== null);
+      // DialMediaRouteProvider::StartObservingMediaSinks: the DIAL sinks are asked about each cast-dial: app while the
+      // observer is registered
+      const dialApps = urls === undefined || dial === undefined ? [] : [...new Set(urls.map((u) => (isDialSource(u) ? appNameFromDialSource(u) : "")))].filter((a) => a !== "");
+      const releases: (() => void)[] = [];
       let active = true;
       // Chrome offers a sink for a presentation source only once the device has said the app is available: ask for the
       // ones not yet known and look again when the answer arrives
@@ -338,11 +372,16 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       };
       const unregister = (): void => {
         active = false;
+        for (const release of releases.splice(0)) release();
         entries.delete(check);
         signal?.removeEventListener("abort", unregister);
         detach();
       };
       if (signal?.aborted) return () => {};
+      for (const app of dialApps) {
+        const release = dial?.monitor(app, origin);
+        if (release) releases.push(release);
+      }
       entries.add(check);
       attach();
       signal?.addEventListener("abort", unregister, { once: true });

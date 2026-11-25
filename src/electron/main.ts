@@ -13,7 +13,7 @@ import { DefaultPresentationRequests, samePresentationRequest } from "./default-
 import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
-import { processDeviceUuid } from "../dial/parse.ts";
+import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -149,6 +149,39 @@ function originOf(frame: FrameLike | null): string | null {
  * a sender that leaves its sessions when it is destroyed or navigates. Unless
  * `presentation: false` it also serves `<channel>:presentation` (see {@link CastManagerOptions.presentation}).
  */
+/** How long starting a default request on a DIAL sink waits for its app info, as a page's request does. */
+const DIAL_APP_WAIT_MS = 5000;
+
+/**
+ * The first `cast-dial:` URL, in order, whose app the DIAL sink has for a page at `origin`. Apps not known yet are
+ * asked about and the answers waited for (up to 5 s), as the Cast path asks the device (`checkAppAvailability`).
+ */
+async function dialUrlFor(dial: DialService, device: CastDevice, urls: readonly string[], origin: string): Promise<string | null> {
+  const candidates = urls.map((url) => ({ url, app: isDialSource(url) ? appNameFromDialSource(url) : "" })).filter((c) => c.app !== "");
+  const first = (): string | null =>
+    candidates.find((c) => dial.availableFor(c.app, origin).some((d) => d.id === device.id))?.url ?? null;
+  if (candidates.length === 0 || first() !== null) return first();
+  const releases = candidates.map((c) => dial.monitorApp(c.app, origin)).filter((r): r is () => void => r !== null);
+  if (releases.length === 0) return null;
+  try {
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        dial.off("change", check);
+        resolve();
+      };
+      const check = (): void => {
+        if (first() !== null) done();
+      };
+      const timer = setTimeout(done, DIAL_APP_WAIT_MS);
+      dial.on("change", check);
+    });
+  } finally {
+    for (const release of releases) release();
+  }
+  return first();
+}
+
 export function createCastManager(options: CastManagerOptions): CastManager {
   const channel = options.channel ?? "electron-cast";
   if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
@@ -166,9 +199,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   // The receiver labels of Cast and DIAL routes are hashed with one per-process token, as in Chrome.
   const hashToken = randomBytes(16).toString("hex");
   const dialOption = options.dial ?? (options.discovery === undefined);
-  // A DIAL sink whose processed UDN is a Cast sink's id is hidden: CastMediaSinkServiceImpl removes it from the DIAL
+  // A DIAL sink whose processed UDN is a Cast sink's id is removed: CastMediaSinkServiceImpl removes it from the DIAL
   // sink service when the Cast channel opens (OnChannelOpenSucceeded) and when the DIAL sink comes after the Cast one
-  // (TryConnectDialDiscoveredSink). A Cast sink is a device with an open, authenticated channel, not one mDNS merely
+  // (TryConnectDialDiscoveredSink), and only DIAL discovery adds it back. A Cast sink is a device with an open, authenticated channel, not one mDNS merely
   // heard, so this asks the session service; `service` exists before DIAL is started.
   let castSinks: () => CastDevice[] = () => [];
   const dial = dialOption === false ? undefined : new DialService({
@@ -531,16 +564,24 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         // No source for the sink (no default request, or its URLs do not suit the sink): CreateRouteParameters is null
         const unable = (why: string) => new MediaRouteError("unable_to_cast", why);
         if (request === null) throw unable("the window has no default presentation request");
-        const device = service.devices().find((d) => d.id === sinkId);
+        // The dialog's sinks are the Cast sinks and the DIAL sinks (QueryResultManager observes each URL's source, and
+        // the DIAL provider serves the cast-dial: ones)
+        const device = [...service.devices(), ...(dial?.devices() ?? [])].find((d) => d.id === sinkId);
         if (device === undefined) throw unable(`no sink ${sinkId}`);
-        // The sink is a source's only once the device says the app is there (CastAppAvailabilityTracker::GetAvailableSinks)
+        // GetSourceForCastModeAndSink: the first URL, in order, the sink is compatible with. A Cast sink is a source's
+        // once the device says the app is there (CastAppAvailabilityTracker::GetAvailableSinks); a DIAL sink once its
+        // DIAL server says so for the page's origin (DialMediaSinkServiceImpl, DialMediaRouteProvider::GetOrigins).
         let url: string | null = null;
-        for (const candidate of request.presentationUrls) {
-          const parsed = parsePresentationUrl(candidate);
-          if (parsed === null || presentationUrlForDevice(device, [candidate]) === null) continue;
-          if (await service.checkAppAvailability(device, parsed.appId)) {
-            url = candidate;
-            break;
+        if (device.dial !== undefined) {
+          url = dial === undefined ? null : await dialUrlFor(dial, device, request.presentationUrls, request.frameOrigin);
+        } else {
+          for (const candidate of request.presentationUrls) {
+            const parsed = parsePresentationUrl(candidate);
+            if (parsed === null || presentationUrlForDevice(device, [candidate]) === null) continue;
+            if (await service.checkAppAvailability(device, parsed.appId)) {
+              url = candidate;
+              break;
+            }
           }
         }
         if (url === null) throw unable("the sink cannot run the default presentation request's URLs");
@@ -584,6 +625,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             : bridge === "invalid_parameter" ? "redundant_request"
             : "unknown_error";
           throw new MediaRouteError(code, result.description);
+        }
+        if (device.dial !== undefined) {
+          // A DIAL route's id is MediaRoute::GetMediaRouteId(presentation id, sink id, source)
+          const prefix = `urn:x-org.chromium:media:route:${result.value.id}/`;
+          const dialRoute = routes().find((r) => r.providerId === "dial" && r.id.startsWith(prefix));
+          if (dialRoute === undefined) throw new MediaRouteError("route_not_found", `no route for ${result.value.id}`);
+          return dialRoute;
         }
         const sessionId = result.value.id.slice("cast-session_".length);
         launchedFrom.set(webContentsId, sessionId);
@@ -635,6 +683,12 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   const api = createManagerApi(createSinksObservers(dialSource === undefined ? castDevices : combineSources(castDevices, dialSource), {
     cached: (d, appId) => service.cachedAppAvailability(d, appId),
     check: (d, appId) => service.checkAppAvailability(d, appId),
+    ...(dial === undefined ? {} : {
+      dial: {
+        available: (d: CastDevice, app: string, origin: string) => dial.availableFor(app, origin).some((x) => x.id === d.id),
+        monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
+      },
+    }),
   }), {
     mediaRoutes: routes,
     observeSessions: (l) => {
