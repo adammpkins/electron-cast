@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>electron-cast live iframe harness</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 10px; }
+  h1 { font-size: 16px; margin: 0 0 6px; }
+  button { margin: 0 4px 4px 0; padding: 4px 8px; }
+  .row { display: flex; gap: 10px; }
+  .row iframe { flex: 1; height: 440px; border: 2px solid #888; background: #fff; }
+  .gone { flex: 1; height: 440px; border: 2px dashed #c33; display: flex; align-items: center; justify-content: center; color: #c33; }
+  table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+  td, th { border: 1px solid #ccc; padding: 2px 6px; text-align: left; font: 12px ui-monospace, monospace; word-break: break-all; }
+  #main { white-space: pre-wrap; font: 12px ui-monospace, monospace; background: #f3f3f3; border: 1px solid #ccc; padding: 6px; max-height: 160px; overflow: auto; }
+</style>
+<h1>electron-cast live iframe harness <small id="origin"></small></h1>
+<div>
+  <button id="nav-same">Navigate same-origin iframe</button>
+  <button id="rm-same">Remove same-origin iframe</button>
+  <button id="add-same">Add same-origin iframe</button>
+  &nbsp;
+  <button id="nav-cross">Navigate cross-origin iframe</button>
+  <button id="rm-cross">Remove cross-origin iframe</button>
+  <button id="add-cross">Add cross-origin iframe</button>
+  &nbsp;
+  <button id="reload">Reload top page</button>
+</div>
+<div class="row" id="frames"></div>
+<table>
+  <thead><tr><th>frame</th><th>in DOM</th><th>origin (as the top page sees it)</th><th>instance</th><th>cast state</th><th>session state</th><th>session id</th><th>events</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<b>Main process view</b> (what electron-cast's manager reports; senders 2^30 and up are iframes)
+<div id="main"></div>
+<script src="top.js"></script>

@@ -7,3 +7,4 @@ site/node_modules/
 site/.vitepress/cache/
 site/.vitepress/dist/
 site/brand/.cache/
+examples/live-iframe/.out/
