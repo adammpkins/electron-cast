@@ -8,8 +8,8 @@ the page, and in the main process a translator for the router's message format p
 protocol. The older alternative (`mode: "chromecast"`) gives the page electron-cast's own `chrome.cast`
 implementation instead.
 
-First consumer: YouTube Music Desktop (YTM's web player uses the legacy `chrome.cast` API with the YouTube receiver
-`233637DE` and the `urn:x-cast:com.google.youtube.mdx` namespace). The library is generic: nothing YouTube-specific
+The first target was a web player that uses the legacy `chrome.cast` API with the YouTube receiver
+`233637DE` and the `urn:x-cast:com.google.youtube.mdx` namespace. The library is generic: nothing YouTube-specific
 lives in it.
 
 ## Goals

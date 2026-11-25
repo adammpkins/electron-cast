@@ -1,0 +1,199 @@
+/* Tailwind: theme tokens and utilities only. No preflight, so VitePress's own reset stays in charge. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ------------------------------------------------------------------ tokens (see site/BRAND.md): "On air"
+   Paper and ink carry the page. Tally red-orange is the one signal colour: live state, the primary action, the one thing to look at. */
+:root {
+  --ec-ink: #15130f;
+  --ec-bg: #f4f1ea;
+  --ec-surface: #ebe7de;
+  --ec-muted: #5a564e;          /* graphite, 6.5:1 on paper */
+  --ec-line: rgba(21, 19, 15, 0.22);
+  --ec-hair: rgba(21, 19, 15, 0.12);
+  --ec-tally: #ff4a1c;          /* fills, dots, large marks; 3.0:1 on paper, so never small text */
+  --ec-signal: #b02a06;         /* tally as text or a thin rule on paper: 5.9:1 (5.1:1 on the code tint) */
+  --ec-signal-fill: #ff4a1c;
+  --ec-on-tally: #15130f;       /* ink on tally: 5.5:1 */
+  --ec-on-ink: #f4f1ea;
+  --ec-grid: rgba(21, 19, 15, 0.07);
+
+  --ec-display: "Archivo Variable", "Archivo", system-ui, sans-serif;
+  --ec-serif: "Archivo Variable", "Archivo", system-ui, sans-serif;
+  --ec-mono: "Commit Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* VitePress */
+  --vp-font-family-base: var(--ec-display);
+  --vp-font-family-mono: var(--ec-mono);
+  --vp-c-bg: var(--ec-bg);
+  --vp-c-bg-alt: var(--ec-surface);
+  --vp-c-bg-elv: var(--ec-bg);
+  --vp-c-bg-soft: var(--ec-surface);
+  --vp-c-text-1: var(--ec-ink);
+  --vp-c-text-2: var(--ec-muted);
+  --vp-c-text-3: #6b665c;
+  --vp-c-divider: var(--ec-line);
+  --vp-c-gutter: var(--ec-line);
+  --vp-c-border: var(--ec-line);
+  --vp-c-brand-1: var(--ec-signal);
+  --vp-c-brand-2: #8f2105;
+  --vp-c-brand-3: var(--ec-tally);
+  --vp-c-brand-soft: rgba(255, 74, 28, 0.12);
+  --vp-code-block-bg: #ebe7de;
+  --vp-code-bg: rgba(21, 19, 15, 0.07);
+  --vp-code-color: #15130f;
+  --vp-nav-height: 60px;
+  --vp-layout-max-width: 1440px;
+  --vp-custom-block-tip-text: var(--ec-ink);
+  --vp-custom-block-tip-bg: rgba(255, 74, 28, 0.08);
+  --vp-custom-block-tip-border: transparent;
+}
+/* Control room: near-black, warm text, tally unchanged. */
+.dark {
+  --ec-bg: #15130f;
+  --ec-surface: #1d1a15;
+  --ec-ink: #f4f1ea;
+  --ec-muted: #a29d92;          /* 6.9:1 on the dark base */
+  --ec-line: rgba(244, 241, 234, 0.22);
+  --ec-hair: rgba(244, 241, 234, 0.12);
+  --ec-signal: #ff6b47;         /* tally as text on ink: 6.6:1 (5.3:1 on the code tint); the fill stays #ff4a1c */
+  --ec-on-ink: #15130f;
+  --ec-grid: rgba(244, 241, 234, 0.07);
+  --vp-c-bg: #15130f;
+  --vp-c-bg-alt: #1a1813;
+  --vp-c-bg-elv: #1d1a15;
+  --vp-c-bg-soft: #1d1a15;
+  --vp-c-text-3: #8d887d;
+  --vp-c-brand-2: #ff7a55;
+  --vp-c-brand-soft: rgba(255, 74, 28, 0.16);
+  --vp-code-block-bg: #1d1a15;
+  --vp-code-bg: rgba(244, 241, 234, 0.09);
+  --vp-code-color: #f4f1ea;
+  --vp-custom-block-tip-bg: rgba(255, 74, 28, 0.1);
+}
+
+html { scroll-padding-top: 76px; }
+body { font-feature-settings: "kern", "liga"; }
+:root { --ec-focus: #15130f; }
+.dark { --ec-focus: #f4f1ea; }
+:where(a, button, summary, input, [tabindex]):focus-visible { outline: 2px solid var(--ec-focus); outline-offset: 3px; border-radius: 1px; }
+.receiver :focus-visible { outline-color: #f4f1ea; } /* the signal-path band is ink in both themes */
+.ec-btn-signal:focus-visible { outline-offset: 4px; }
+::selection { background: var(--ec-tally); color: #15130f; }
+
+/* ------------------------------------------------------------------ nav */
+.VPNavBar { --vp-nav-bg-color: var(--vp-c-bg); }
+.VPNavBar .divider-line { background: var(--ec-line); }
+.VPNavBarTitle .logo { height: 22px; width: auto; margin-right: 0; }
+.VPNavBarMenuLink, .VPNavBarSearchButton .text, .VPSidebarItem .text, .VPDocAsideOutline .outline-title {
+  font-family: var(--ec-display);
+  font-variation-settings: "wdth" 100;
+}
+.VPNavBarMenuLink { font-weight: 600; font-size: 0.875rem; }
+.VPSidebarItem .text { font-weight: 500; font-size: 0.875rem; }
+.VPSidebar .group .title .title-text { font-family: var(--ec-mono); font-weight: 400; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ec-muted); }
+.VPSidebarItem.is-active > .item .text { color: var(--ec-signal); font-weight: 700; }
+.VPSidebarItem.level-0.is-active > .item .indicator { background: var(--ec-signal); }
+.VPFooter { border-top: 0; position: relative; padding-top: 40px; }
+.VPFooter::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--ec-ink); }
+
+/* ------------------------------------------------------------------ documentation prose */
+.vp-doc { font-size: 1rem; line-height: 1.68; font-variation-settings: "wdth" 100; font-optical-sizing: auto; }
+.vp-doc p, .vp-doc li { font-variation-settings: "wght" 400; }
+.vp-doc h1, .vp-doc h2, .vp-doc h3, .vp-doc h4 { font-family: var(--ec-display); letter-spacing: -0.015em; }
+.vp-doc h1 { font-size: clamp(2rem, 4vw, 2.9rem); font-weight: 800; font-variation-settings: "wdth" 75; line-height: 1.02; text-transform: none; margin-bottom: 1.2rem; }
+.vp-doc h2 {
+  font-size: 1.65rem; font-weight: 780; font-variation-settings: "wdth" 80; border-top: 0;
+  margin-top: 3.2rem; padding-top: 1.4rem; position: relative; line-height: 1.2;
+}
+.vp-doc h2::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 1px; background: var(--ec-line); }
+/* the tally dot hangs in the gutter beside the first line of the heading, vertically centred on it */
+.vp-doc h2::after { content: ""; position: absolute; top: calc(1.4rem + 0.6lh - 4.5px); left: -1.3rem; width: 9px; height: 9px; background: var(--ec-tally); }
+.vp-doc h3 { font-size: 1.2rem; font-weight: 720; font-variation-settings: "wdth" 88; margin-top: 2.2rem; }
+.vp-doc h4 { font-size: 1rem; font-weight: 700; }
+.vp-doc a { font-weight: 500; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, var(--ec-signal) 55%, transparent); }
+.vp-doc a:hover { text-decoration-thickness: 2px; }
+.vp-doc .header-anchor { text-decoration: none; }
+.vp-doc :not(pre) > code { margin: 0; padding: 0.05em 0.3em; line-height: 1; border-radius: 0; overflow-wrap: anywhere; font-size: 0.86em; }
+.vp-doc h2 > code, .vp-doc h3 > code, .vp-doc h4 > code { background: transparent; padding: 0; }
+.vp-doc a > code { background: none; padding: 0; color: var(--ec-signal); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.vp-doc td:first-child code { white-space: nowrap; overflow-wrap: normal; }
+.vp-doc div[class*="language-"] { border-radius: 0; border: 1px solid var(--ec-line); border-left: 3px solid var(--ec-ink); margin: 1.4rem 0; }
+.vp-doc div[class*="language-"] code { font-size: 0.84rem; line-height: 1.65; }
+.vp-doc blockquote { border-left: 3px solid var(--ec-ink); background: transparent; padding-left: 1rem; }
+.vp-doc table { display: table; width: 100%; border-collapse: collapse; font-size: 0.93rem; border-top: 2px solid var(--ec-ink); border-bottom: 2px solid var(--ec-ink); }
+.vp-doc tr { background: transparent !important; border-top: 1px solid var(--ec-line); }
+.vp-doc th { font-family: var(--ec-mono); font-weight: 400; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ec-ink); text-align: left; background: transparent; border: 0; padding: 0.6rem 0.8rem; }
+.vp-doc td { border: 0; padding: 0.6rem 0.8rem; vertical-align: top; }
+.vp-doc .custom-block { border-radius: 0; border: 0; border-left: 3px solid var(--ec-signal); }
+.vp-doc .custom-block.warning { border-left-color: var(--ec-tally); }
+.vp-doc .custom-block.danger { border-left-color: var(--ec-tally); }
+.vp-doc .custom-block-title { font-family: var(--ec-display); }
+.vp-doc hr { border: 0; border-top: 1px solid var(--ec-line); margin: 2.4rem 0; }
+.vp-doc ul li::marker { color: var(--ec-ink); }
+.vp-doc ol li::marker { color: var(--ec-muted); font-family: var(--ec-mono); font-size: 0.85em; }
+.VPDoc .container .content-container { max-width: 760px; }
+.VPDoc.has-aside .content-container { max-width: 760px; }
+
+.ec-mermaid { margin: 1.6rem 0; padding: 1rem; border: 1px solid var(--ec-line); background: var(--ec-surface); overflow-x: auto; }
+.ec-mermaid-svg svg { max-width: 100%; height: auto; margin: 0 auto; display: block; }
+.ec-mermaid-src { margin: 0; font-size: 0.82rem; white-space: pre-wrap; font-family: var(--ec-mono); }
+
+/* ------------------------------------------------------------------ buttons and tabs (shadcn-vue, restyled) */
+.ec-btn { padding: 0 1.6rem; min-height: 3rem; line-height: 1.1; gap: 0.6rem; font-family: var(--ec-display); font-variation-settings: "wdth" 108; letter-spacing: 0.005em; border-radius: 0; cursor: pointer; text-decoration: none; }
+.ec-btn-ink { background: var(--ec-ink); color: var(--ec-bg) !important; border: 2px solid var(--ec-ink); }
+.ec-btn-ink:hover { background: var(--ec-tally); border-color: var(--ec-ink); color: #15130f !important; }
+.ec-btn-signal { background: var(--ec-tally); color: #15130f !important; border: 2px solid var(--ec-signal-fill); }
+.ec-btn-signal:hover { filter: brightness(1.08); }
+.ec-btn-outline { background: transparent; color: var(--ec-ink) !important; border: 2px solid var(--ec-ink); }
+.ec-btn-outline:hover { background: var(--ec-ink); color: var(--ec-bg) !important; }
+.ec-btn-ghost { background: transparent; color: var(--ec-ink) !important; border: 2px solid transparent; }
+.ec-btn-ghost:hover { background: var(--vp-c-bg-soft); }
+
+.ec-tabs-list { display: flex; gap: 0; border-bottom: 2px solid var(--ec-ink); }
+.ec-tab {
+  font-family: var(--ec-mono); font-size: 0.82rem; padding: 0.6rem 1rem; color: var(--ec-muted); background: transparent;
+  border: 0; border-bottom: 4px solid transparent; margin-bottom: -2px; cursor: pointer;
+}
+.ec-tab[data-state="active"] { color: var(--ec-ink); border-bottom-color: var(--ec-tally); font-weight: 600; }
+.ec-tab:hover { color: var(--ec-ink); }
+.ec-tab-panel div[class*="language-"] { margin: 0 !important; border-left: 0 !important; }
+
+/* ------------------------------------------------------------------ the landing page lives in a bare "home" layout */
+.VPHome { padding-bottom: 0 !important; margin-bottom: 0 !important; }
+.VPHome .vp-doc { font-size: inherit; line-height: inherit; }
+.VPHome .vp-doc h1, .VPHome .vp-doc h2 { margin: 0; padding: 0; border: 0; }
+.VPHome .vp-doc h2::before { display: none; }
+.VPHome .container { max-width: none; }
+.VPHome .content-container, .VPHome .vp-doc { max-width: none; padding: 0; }
+.VPHome .vp-doc a { text-decoration: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+}
+.vp-doc p[align="center"] { display: none; } /* the README banner and site link: redundant on the site itself */
+.vp-doc h2, .vp-doc h3, .vp-doc h4 { scroll-margin-top: 80px; }
+
+.ec-btn.w-9 { padding: 0; min-height: 0; } /* icon buttons */
+.ec-btn.h-9:not(.w-9) { padding: 0 1rem; min-height: 2.5rem; }
+/* code comments: the high-contrast theme's grey is 4.1:1 on the code tint; darken to pass AA */
+html:not(.dark) .vp-doc [style*="--shiki-light:#66707B" i] { --shiki-light: #4a525c !important; }
+
+@media (max-width: 640px) { .vp-doc table { display: block; overflow-x: auto; } }
+/* previous / next cards */
+.VPDocFooter .pager-link { border-radius: 0; border: 1px solid var(--ec-line); }
+.VPDocFooter .pager-link:hover { border-color: var(--ec-ink); }
+.VPFooter .container, .VPFooter .message, .VPFooter .copyright { text-align: left; margin: 0; max-width: none; }
+.VPFooter .container { padding: 0 24px; }
+/* landing headings: the tally dot sits on the first line's centre; on phones it leads the label inline */
+.VPHome .vp-doc h2::after { top: calc(0.5lh - 4.5px); }
+@media (max-width: 640px) {
+  .VPHome .vp-doc h2::after { position: static; display: inline-block; margin-right: 0.55rem; vertical-align: 0.12em; }
+}
+
+/* landing: the navbar shares the content column, so the logo lines up with the headline */
+@media (min-width: 960px) {
+  .VPNavBar.home .wrapper { padding: 0; }
+  .VPNavBar.home .container { max-width: 1200px; padding: 0 48px; }
+  .VPNavBar.home .title { padding-left: 0; }
+}

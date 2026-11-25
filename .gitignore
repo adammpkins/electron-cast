@@ -3,3 +3,7 @@ dist/
 *.log
 .DS_Store
 smoke/.out/
+site/node_modules/
+site/.vitepress/cache/
+site/.vitepress/dist/
+site/brand/.cache/

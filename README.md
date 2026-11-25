@@ -1,4 +1,23 @@
+<div align="center">
+  <a href="https://adammpkins.github.io/electron-cast/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-dark.jpg">
+      <img src="docs/readme/hero-light.jpg" width="100%" alt="The electron-cast front page: the headline 'Chromecast for Electron.' in heavy condensed type on a faint blueprint grid, a one-line explanation that Electron ships the Presentation API with nothing behind it, the install command npm install electron-cast, a Read the docs button and a link to the source on GitHub.">
+    </picture>
+  </a>
+</div>
+
 # electron-cast
+
+<p>
+  <img src="docs/readme/badges/node.svg" alt="node >=20">
+  <img src="docs/readme/badges/electron.svg" alt="electron >=35">
+  <img src="docs/readme/badges/license.svg" alt="license MIT">
+  <img src="docs/readme/badges/dependencies.svg" alt="runtime dependencies 0">
+  <a href="https://github.com/adammpkins/electron-cast/actions/workflows/ci.yml"><img src="https://github.com/adammpkins/electron-cast/actions/workflows/ci.yml/badge.svg" alt="GitHub CI"></a>
+</p>
+
+**Google's own Cast SDK, running unchanged in your Electron app.** Docs: [adammpkins.github.io/electron-cast](https://adammpkins.github.io/electron-cast/).
 
 Chromecast for Electron. Web pages that use Google's Cast SDK (`chrome.cast`, `cast.framework`) can cast, running
 Google's own SDK, while your main process handles device discovery and the Cast v2 protocol. No native modules, no
@@ -128,6 +147,11 @@ installCastBridge({ contextBridge, ipcRenderer, mode: "chromecast" });
 
 The main process serves both modes. `createCastManager({ ..., presentation: false })` serves only `"chromecast"`.
 
+<div align="center">
+  <img src="docs/readme/trace.svg" width="100%" alt="A recorded Cast v2 session between electron-cast 0.4.0 and a Chromecast Ultra, replayed as a log: device authentication, CONNECT, GET_STATUS, LAUNCH of the Default Media Receiver, RECEIVER_STATUS, media LOAD, MEDIA_STATUS moving from buffering to playing, PING and PONG, PAUSE and PLAY, then STOP and CLOSE. ON AIR lights from LOAD to STOP.">
+  <br><sub>A real session, frame by frame. Silences over 1.5 seconds are marked and shortened.</sub>
+</div>
+
 ## Device authentication
 
 Like Chrome, electron-cast checks that a device is a genuine Google-certified Cast device before using it (the
@@ -185,7 +209,7 @@ there describes the top-level await form of the same hang).
 
 - Google's SDK gets what Chrome would give it: receiver availability, the device picker, sessions and joining them
   (including by id after a restart), messages on any namespace, volume, and media commands with their status replies.
-- Tested end to end with YouTube Music (YouTube Music Desktop, Electron 45) casting to speaker groups, a Nest Hub
+- Tested end to end in an Electron 45 app casting to speaker groups, a Nest Hub
   and several Chromecasts, and with `cast.framework` on a Nest Hub: session start, volume, HLS load, play, pause,
   seek, resume and stop.
 
@@ -197,10 +221,20 @@ there describes the top-level await form of the same hang).
   volume, tracks, queue operations), receive media status updates, and watch for media with media listeners.
 - `cast.framework` (`CastContext`, `RemotePlayer`, `RemotePlayerController`) on top of the polyfill. Google's
   loader scripts are blocked so they can't overwrite it.
-- Tested end to end with a Chromecast (YouTube Music), and with `cast.framework` media on a Nest Hub (load, play,
+- Tested end to end with a Chromecast, and with `cast.framework` media on a Nest Hub (load, play,
   pause, seek, volume, and stopping from the picker).
 
 Discovery and connections are tested with Chromecast Ultra, Google Home Mini, Nest Hub, Nest Hub Max and speaker groups.
+
+<details>
+<summary><b>From the site</b>: the parity table and the replay at rest</summary>
+<br>
+<div align="center">
+  <img src="docs/readme/parity.jpg" width="100%" alt="The 'As Chrome does it' table from the front page: each row names a rule, what Chrome does, what electron-cast does, and the Chromium source file it is tied to, with the first row open.">
+  <br><br>
+  <img src="docs/readme/nosignal.jpg" width="100%" alt="The recorded-session replay before it starts: a greyscale test card with a NO SIGNAL plate, play, back, step and reset controls and a scrub bar.">
+</div>
+</details>
 
 ## Staying compatible with Google's SDK
 
@@ -225,6 +259,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for how the pieces fit.
 To observe and control casting from the main process (devices, sessions, volume, a live picker), see [docs/MAIN-API.md](docs/MAIN-API.md).
 More docs: [API reference](docs/API.md), [security notes](SECURITY.md), [changelog](CHANGELOG.md) and a
 [runnable example app](examples/electron-app).
+
+<div align="center"><img src="docs/readme/board.jpg" width="100%" alt="The electron-cast brand board: the mark, a square-cornered c with a red square in its opening, on paper and on ink; the palette of ink, paper, tally red, graphite and rule; Archivo and Commit Mono type; lockups; and icon sizes from 512 down to 16 pixels."></div>
 
 ## License
 
