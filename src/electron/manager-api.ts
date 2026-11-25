@@ -13,7 +13,7 @@ export type SinkIconType = "cast" | "cast_audio" | "cast_audio_group";
 export interface MediaSink {
   id: string;
   name: string;
-  /** The device model, shown under the name in Chrome's dialog. */
+  /** The device model. electron-cast's own: Chrome's MediaSink has none (the model is `CastSinkExtraData::model_name`). */
   description: string;
   iconType: SinkIconType;
   /** The discovered device behind the sink. */
@@ -62,7 +62,7 @@ export interface MediaRoutesObserver {
   onRoutesUpdated(routes: MediaRoute[]): void;
 }
 
-/** Chrome: `MediaRouteController`, here only the volume half (`SetMute`, `SetVolume`). */
+/** Chrome: `media_router::mojom::MediaController`, here only the volume half (`SetMute`, `SetVolume`). */
 export interface MediaRouteController {
   setMute(muted: boolean): Promise<void>;
   /** 0 to 1. */
@@ -89,9 +89,9 @@ export interface CastManagerApi {
   getRoutes(): MediaRoute[];
   /** `MediaRouter::TerminateRoute`: stops the receiver app; pages get `sessionEnded` as if the device had. */
   terminateRoute(routeId: string): Promise<void>;
-  /** `MediaRouter::DetachRoute`: every page lets go of the route and its transport closes; the app keeps running. */
+  /** electron-cast's own (Chrome's Cast provider leaves `DetachRoute` unimplemented): every page lets go of the route and its transport closes; the app keeps running. */
   detachRoute(routeId: string): void;
-  /** `MediaRouter::GetMediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
+  /** `MediaRouter::GetMediaController` / `mojom::MediaController`: volume and mute go to the receiver, so pages see `sessionUpdated`. */
   getRouteController(routeId: string): MediaRouteController;
 }
 
@@ -141,7 +141,8 @@ export class ObservedMap<K, V> extends Map<K, V> {
 
 /** The sink for a discovered device. */
 export function toMediaSink(device: CastDevice): MediaSink {
-  const iconType: SinkIconType = device.isGroup ? "cast_audio_group" : (device.capabilities & 1) === 0 ? "cast_audio" : "cast";
+  // GetCastSinkIconType (media_sink_util.cc): video_out first, then a multizone group, else audio.
+  const iconType: SinkIconType = (device.capabilities & 1) !== 0 ? "cast" : (device.capabilities & 32) !== 0 ? "cast_audio_group" : "cast_audio";
   return { id: device.id, name: device.name, description: device.model, iconType, device: { ...device } };
 }
 

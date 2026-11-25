@@ -263,3 +263,15 @@ test("a two-argument picker still works", async () => {
   const r = (await call(wc, "requestSession", REQ)) as { ok: boolean };
   assert.equal(r.ok, true);
 });
+
+test("sink icons follow Chrome's GetCastSinkIconType: video_out first, then multizone group, else audio", () => {
+  const { manager, discovery } = setup();
+  discovery.up(device({ id: "g-video", capabilities: 1 | 32, isGroup: true }));
+  discovery.up(device({ id: "plain-audio", capabilities: 4 }));
+  let sinks: MediaSink[] = [];
+  manager.registerMediaSinksObserver({ onSinksUpdated: (s) => (sinks = s) });
+  const icon = (id: string) => sinks.find((s) => s.id === id)?.iconType;
+  assert.equal(icon("g-video"), "cast", "a group that can show video is a plain Cast sink in Chrome");
+  assert.equal(icon("plain-audio"), "cast_audio");
+  assert.equal(icon("dev-group"), "cast_audio_group");
+});

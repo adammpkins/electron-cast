@@ -26,6 +26,8 @@
   `nodeIntegrationInSubFrames: true` in the window's `webPreferences` so the preload runs in iframes; without it nothing
   changes. `mode: "chromecast"` stays main-frame only.
 - Main-process API on the cast manager, modelled on Chrome's Media Router: sinks and routes observers, `terminateRoute`, `detachRoute`, route volume control, and a third `selectDevice` argument that streams devices found while the picker is open. See docs/MAIN-API.md.
+- Joining a session by id (`reconnect("cast-session_<id>")`) no longer checks the origin, also for a session this run holds, as in Chrome (`AppActivity::CanJoinSession`).
+- Sink icon types follow Chrome's `GetCastSinkIconType`; route `members` are `webContents.id`s, also for iframes.
 
 ## 0.3.1
 

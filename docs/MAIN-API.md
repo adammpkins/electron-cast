@@ -9,35 +9,43 @@ session service.
 
 ## Mapping to Chrome
 
+Checked against Chromium `main` (November 2026). Paths are relative to the Chromium source root.
+
 | electron-cast | Chrome | Chromium source |
 |---|---|---|
-| `registerMediaSinksObserver(observer, query?)` | `MediaRouter::RegisterMediaSinksObserver`, `MediaSinksObserver::OnSinksUpdated` | `components/media_router/browser/media_router.h`, `media_sinks_observer.h` |
-| `MediaSink` | `media_router::MediaSink` (id, name, description, icon type) | `components/media_router/common/media_sink.h` |
-| `registerMediaRoutesObserver(observer)` | `MediaRouter::RegisterMediaRoutesObserver`, `MediaRoutesObserver::OnRoutesUpdated` | `components/media_router/browser/media_routes_observer.h` |
-| `MediaRoute` (`id`, `mediaSource`, `sinkId`, `description`) | `media_router::MediaRoute` (`media_route_id`, `media_source`, `media_sink_id`, `description`) | `components/media_router/common/media_route.h` |
-| `terminateRoute(id)` | `MediaRouter::TerminateRoute` (what the Cast dialog's "Stop casting" calls) | `media_router.h`, `chrome/browser/ui/media_router/media_router_ui.cc` |
-| `detachRoute(id)` | `MediaRouter::DetachRoute` | `media_router.h` |
-| `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController`, `MediaRouteController::SetVolume / SetMute` (the controller the dialog and global media controls use) | `components/media_router/browser/media_route_controller.h`, `chrome/browser/ui/global_media_controls/` |
-| `selectDevice`'s third argument | the Cast dialog's `QueryResultManager`, which registers sinks observers while the dialog is open | `chrome/browser/ui/media_router/query_result_manager.cc` |
-| the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager` | `chrome/browser/media/router/providers/cast/` |
-
-The Chromium paths and names above were written from memory of the source tree and not re-checked against a current
-checkout; confirm them before quoting them elsewhere.
+| `registerMediaSinksObserver(observer, query?)` | `MediaSinksObserver` (constructed with a `MediaSource` and an origin, or for all sinks; `Init()` registers it) and its `OnSinksUpdated(sinks, origins)`. `MediaRouter::RegisterMediaSinksObserver` is private to the observer class | `components/media_router/browser/media_router.h`, `components/media_router/browser/media_sinks_observer.h` |
+| `MediaSink` | `media_router::MediaSink`: `id`, `name`, `icon_type`, `provider_id` (no description) | `components/media_router/common/media_sink.h` |
+| `MediaSink.iconType` | `GetCastSinkIconType`: `video_out` gives `CAST`, else a multizone group gives `CAST_AUDIO_GROUP`, else `CAST_AUDIO` | `chrome/browser/media/router/discovery/mdns/media_sink_util.cc` |
+| `registerMediaRoutesObserver(observer)` | `MediaRoutesObserver` (constructed with the router) and `OnRoutesUpdated(routes)`; `MediaRouter::RegisterMediaRoutesObserver` is private to it | `components/media_router/browser/media_routes_observer.h` |
+| `MediaRoute` (`mediaSource`, `sinkId`, `description`) | `media_router::MediaRoute` (`media_source`, `media_sink_id`, `description`; the id is `media_route_id`) | `components/media_router/common/media_route.h`, `media_route.cc` |
+| `MediaRoute.description` | `CastSession::GetRouteDescription`: the status text, else the display name | `chrome/browser/media/router/providers/cast/cast_internal_message_util.cc` |
+| `terminateRoute(id)` | `MediaRouter::TerminateRoute`, called by the Cast dialog's stop (`MediaRouterUI::StopCasting`) and by the global media controls' `CastMediaNotificationItem::StopCasting`; `CastActivityManager::TerminateSession` stops the receiver app | `media_router.h`, `chrome/browser/ui/media_router/media_router_ui.cc`, `chrome/browser/ui/global_media_controls/cast_media_notification_item.cc`, `chrome/browser/media/router/providers/cast/cast_activity_manager.cc` |
+| `detachRoute(id)` | `MediaRouter::DetachRoute` exists, but the Cast provider does not implement it (`CastMediaRouteProvider::DetachRoute` is `NOTIMPLEMENTED`): a page lets go through its Presentation connection closing (`CastSessionClientImpl::DidClose`). No counterpart for "every page lets go" | `media_router.h`, `chrome/browser/media/router/providers/cast/cast_media_route_provider.cc`, `cast_session_client_impl.cc` |
+| `getRouteController(id).setVolume / setMute` | `MediaRouter::GetMediaController` binds a `mojom::MediaController` (`SetVolume`, `SetMute`); on a Cast route `CastMediaController` sends a receiver `SET_VOLUME` request. Used by the global media controls (`CastMediaNotificationItem::SetVolume / SetMute`, controller bound in `cast_media_notification_producer.cc`), not by the Cast dialog. There is no class named `MediaRouteController` in current Chromium | `components/media_router/common/mojom/media_controller.mojom`, `chrome/browser/media/router/providers/cast/cast_media_controller.cc`, `app_activity.cc`, `chrome/browser/ui/global_media_controls/` |
+| `selectDevice`'s third argument | `QueryResultManager` (owns the sinks observers the dialog's `MediaRouteStarter` / `MediaRouterUI` uses while open) | `chrome/browser/ui/media_router/query_result_manager.cc` |
+| the Cast provider behind routes | `CastMediaRouteProvider`, `CastActivityManager`, `AppActivity` | `chrome/browser/media/router/providers/cast/` |
 
 Where electron-cast differs from Chrome:
 
 - Observers get the full list straight away on registration, then after each change, as Chrome's observers do once
   the router has a list. A sinks observer is only called when its (filtered) list actually changed.
+- Chrome's sinks observer is scoped by a `MediaSource` and origin; here `query.capabilities` filters instead. Chrome's
+  `MediaSink` has no description; `description` here is the device model (Chrome keeps it in
+  `CastSinkExtraData::model_name`, not on the sink).
 - Registration returns the unregister function; Chrome unregisters when the observer object is destroyed.
 - Control methods return promises and reject with `MediaRouteError` (`code`: `route_not_found` or a bridge code such
   as `session_error`); Chrome's are fire-and-forget.
-- `MediaRoute` also carries `appId`, `displayName`, `origin`, `volume`, `members` (live `webContents.id`s),
-  `parkedSenders` and `parked`, because in an Electron app main wants to know which windows hold a route. A route is
-  `parked` when its pages navigated away (a reload, say) and none is attached; it stays on the device so the next
-  page can rejoin (see CHANGELOG 0.3.1).
-- Volume is the receiver's volume (what `setReceiverVolume` sets for the page). It is not the media session volume
-  that Chrome's `MediaRouteController` sends over the media namespace; the route's `volume` shows what the device
-  last reported. There is no media status (play state, position) in this API.
+- A route's id is the Cast session id. Chrome's `media_route_id` is `urn:x-org.chromium:media:route:<presentation id>/<sink id>/<source id>`
+  (`MediaRoute::GetMediaRouteId`).
+- `MediaRoute` also carries `appId`, `displayName`, `origin`, `volume`, `members` (`webContents.id`s, once each however
+  many of a window's frames hold the route), `parkedSenders` and `parked`, because in an Electron app main wants to
+  know which windows hold a route. A route is `parked` when its pages navigated away (a reload, say) and none is
+  attached; it stays on the device so the next page can rejoin (see CHANGELOG 0.3.1).
+- `detachRoute` has no Chrome counterpart (see the table). It is electron-cast's own.
+- Volume matches Chrome: both send the receiver's `SET_VOLUME` (`level` or `muted`), the volume of the device, not of
+  a media session; the route's `volume` shows what the device last reported. Chrome additionally ignores the call
+  when the route has no session yet. Chrome's controller also plays, pauses and seeks and reports media status; there is
+  none of that here.
 
 ## Sinks
 
