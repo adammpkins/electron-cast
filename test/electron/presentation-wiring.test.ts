@@ -277,3 +277,39 @@ test("errors: picker cancel, bad params, unknown method, no frame", async () => 
   const unsupported = await pcall(wc, "start", { connectionId: "c2", urls: ["https://example.test/"] });
   assert.equal(unsupported.code, "NotSupportedError");
 });
+
+test("presentation without ipcMain.on throws before registering anything", () => {
+  const handlers: string[] = [];
+  assert.throws(() => createCastManager({
+    ipcMain: { handle: (c: string) => { handlers.push(c); }, removeHandler() {} },
+    discovery: new FakeDiscovery(),
+    selectDevice: async () => null,
+    presentation: true,
+  }), TypeError);
+  assert.deepEqual(handlers, []);
+});
+
+test("a connection id is reserved while the picker is open", async () => {
+  let pick!: (v: any) => void;
+  const { pcall } = setup({ selectDevice: (devices) => new Promise((r) => { pick = () => r(devices.find((d) => d.id === TV.id) ?? null); }) });
+  const wc = new FakeWebContents(5);
+  const first = pcall(wc, "start", { connectionId: "dup", urls: [URL1] });
+  await tick();
+  const second = await pcall(wc, "start", { connectionId: "dup", urls: [URL1] });
+  assert.equal(second.code, "InvalidAccessError");
+  pick(null);
+  assert.equal((await first).ok, true);
+  assert.deepEqual(await pcall(wc, "close", { connectionId: "dup" }), { ok: true, value: undefined });
+});
+
+test("availability watches are capped per page, oldest dropped", async () => {
+  const devices = new FakeDiscovery([]);
+  const { pcall } = setup({ discovery: devices });
+  const wc = new FakeWebContents(5);
+  for (let i = 0; i < 40; i++) await pcall(wc, "getAvailability", { watchId: `w${i}`, urls: [URL1] });
+  devices.up(TV);
+  await tick();
+  const ids = wc.events().filter((e) => e.type === "availability").map((e) => e.watchId);
+  assert.equal(ids.length, 32);
+  assert.ok(!ids.includes("w0") && ids.includes("w39"));
+});

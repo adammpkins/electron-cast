@@ -253,6 +253,11 @@ export class CastPresentationHandler {
     }
     const clientId = parsed.clientId ?? randomBytes(16).toString("hex");
     const state = this.senderState(req.senderId);
+    const previous = state.conns.get(clientId);
+    if (previous !== undefined) {
+      state.conns.delete(clientId);
+      previous.end("closed");
+    }
     const conn = new Conn(this, presentationId, (req.urls[0] ?? ""), req.senderId, req.origin, clientId, snapshot.sessionId, snapshot);
     state.conns.set(clientId, conn);
     const label = receiverLabel(snapshot.receiver.label, this.token);

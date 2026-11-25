@@ -49,6 +49,11 @@ export interface CastManager {
   dispose(): Promise<void>;
 }
 
+/** Availability watches kept per webContents; the page never releases one, so the oldest are dropped. */
+const MAX_WATCHES_PER_PAGE = 32;
+/** Largest page-to-receiver message accepted (Cast messages are capped at 64 KiB on the wire). */
+const MAX_MESSAGE_CHARS = 1 << 20;
+
 /** The sending frame's origin; null when there is no frame. An unparseable URL gives "" so allowOrigin decides. */
 function originOf(frame: FrameLike | null): string | null {
   if (frame === null) return null;
@@ -68,6 +73,9 @@ function originOf(frame: FrameLike | null): string | null {
  */
 export function createCastManager(options: CastManagerOptions): CastManager {
   const channel = options.channel ?? "electron-cast";
+  if (options.presentation === true && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
+    throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
+  }
   const discovery = options.discovery ?? new CastDiscovery();
   const createClient = options.createClient ?? ((d: CastDevice) => new CastClient({ host: d.host, port: d.port }));
   const contents = new Map<number, WebContentsLike>();
@@ -78,7 +86,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     selectDevice: options.selectDevice,
     allowOrigin: options.allowOrigin,
     emit(senderId, event) {
-      handler?.onServiceEvent(senderId, event);
+      try {
+        handler?.onServiceEvent(senderId, event);
+      } catch (err) {
+        console.error("electron-cast: presentation handler failed on a service event", err);
+      }
       const wc = contents.get(senderId);
       if (wc === undefined || wc.isDestroyed()) return;
       try {
@@ -116,14 +128,11 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   /** Presentation mode: IPC for the page's stand-in Presentation API, answered by a CastPresentationHandler. */
   const setUpPresentation = () => {
     const ipc = options.ipcMain;
-    const on = ipc.on?.bind(ipc);
-    const off = ipc.removeListener?.bind(ipc);
-    if (on === undefined || off === undefined) {
-      throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
-    }
+    const on = ipc.on!.bind(ipc);
+    const off = ipc.removeListener!.bind(ipc);
     const h = new CastPresentationHandler({ service });
     handler = h;
-    const connections = new Map<string, { conn: PresentationConnectionHandle; wcId: number }>();
+    const connections = new Map<string, { conn: PresentationConnectionHandle | null; wcId: number }>();
     const watches = new Map<string, { ac: AbortController; wcId: number }>();
     const sendTo = (wcId: number, payload: unknown): void => {
       const wc = contents.get(wcId);
@@ -140,22 +149,26 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       Array.isArray(v) && v.length > 0 && v.length <= 16 && v.every((u) => typeof u === "string");
 
     /** Finish a start/reconnect: register the connection and route its traffic to the page. */
-    const open = async (wcId: number, connectionId: string, opening: Promise<PresentationConnectionHandle>) => {
+    const open = async (wcId: number, connectionId: string, opening: () => Promise<PresentationConnectionHandle>) => {
+      if (connections.has(connectionId)) return invalid("connectionId in use");
+      const slot: { conn: PresentationConnectionHandle | null; wcId: number } = { conn: null, wcId };
+      connections.set(connectionId, slot);  // reserved while the picker or join is pending
       let conn: PresentationConnectionHandle;
       try {
-        conn = await opening;
+        conn = await opening();
       } catch (err) {
+        if (connections.get(connectionId) === slot) connections.delete(connectionId);
         const e = err as { name?: unknown; message?: unknown } | null;
         const name = typeof e?.name === "string" && e.name !== "" && e.name !== "Error" ? e.name : "OperationError";
         return { ok: false, code: name, description: typeof e?.message === "string" ? e.message : String(err) };
       }
-      if (!contents.has(wcId)) {
+      if (!contents.has(wcId) || connections.get(connectionId) !== slot) {
         conn.close();
         return { ok: false, code: "AbortError", description: "The page went away" };
       }
-      connections.set(connectionId, { conn, wcId });
+      slot.conn = conn;
       conn.onclose = (state) => {
-        connections.delete(connectionId);
+        if (connections.get(connectionId) === slot) connections.delete(connectionId);
         sendTo(wcId, { type: "statechange", connectionId, state });
       };
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
@@ -177,6 +190,12 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             const old = watches.get(watchId);
             if (old !== undefined && old.wcId !== wcId) return invalid("watchId in use");
             old?.ac.abort();
+            watches.delete(watchId);
+            const mine = [...watches].filter(([, w]) => w.wcId === wcId);
+            for (const [id, w] of mine.slice(0, Math.max(0, mine.length - (MAX_WATCHES_PER_PAGE - 1)))) {
+              w.ac.abort();
+              watches.delete(id);
+            }
             const ac = new AbortController();
             watches.set(watchId, { ac, wcId });
             const available = await h.getAvailability({
@@ -198,19 +217,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           }
           case "start":
             if (!isId(p.connectionId) || !isUrls(p.urls)) return invalid("start expects { connectionId, urls }");
-            if (connections.has(p.connectionId)) return invalid("connectionId in use");
-            return await open(wcId, p.connectionId, h.startPresentation({ urls: p.urls, origin, senderId: wcId }));
+            {
+              const urls = p.urls;
+              return await open(wcId, p.connectionId, () => h.startPresentation({ urls, origin, senderId: wcId }));
+            }
           case "reconnect":
             if (!isId(p.connectionId) || !isUrls(p.urls) || !isId(p.presentationId)) {
               return invalid("reconnect expects { connectionId, urls, presentationId }");
             }
-            if (connections.has(p.connectionId)) return invalid("connectionId in use");
-            return await open(wcId, p.connectionId,
-              h.reconnectPresentation({ urls: p.urls, origin, senderId: wcId, presentationId: p.presentationId }));
+            {
+              const { urls, presentationId } = p;
+              return await open(wcId, p.connectionId,
+                () => h.reconnectPresentation({ urls, origin, senderId: wcId, presentationId }));
+            }
           case "close":
           case "terminate": {
             const c = isId(p.connectionId) ? connections.get(p.connectionId) : undefined;
-            if (c !== undefined && c.wcId === wcId) {
+            if (c !== undefined && c.wcId === wcId && c.conn !== null) {
               if (method === "close") c.conn.close();
               else c.conn.terminate();
             }
@@ -227,7 +250,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     const onSend = (event: IpcMainEventLike, connectionId: unknown, data: unknown): void => {
       if (typeof connectionId !== "string" || typeof data !== "string") return;
       const c = connections.get(connectionId);
-      if (c === undefined || c.wcId !== event.sender.id) return;
+      if (c === undefined || c.wcId !== event.sender.id || c.conn === null) return;
+      if (data.length > MAX_MESSAGE_CHARS) return;
       c.conn.send(data);
     };
     on(`${channel}:presentation:send`, onSend);
