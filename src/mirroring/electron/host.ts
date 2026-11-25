@@ -193,14 +193,17 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           switch (m.type) {
             case "send": channel.send(m.namespace, m.json); break;
             case "did-start": observer.didStart?.(); break;
-            case "did-stop": observer.didStop?.(); break;
-            case "error": observer.onError?.(m.error as never, m.message); break;
+            // MirroringActivity::OnError and ::DidStop both end in StopMirroring, which stops this service; ending it
+            // here too keeps the window and the process from outliving a session whose owner did not.
+            case "did-stop": observer.didStop?.(); teardown(); break;
+            case "error": observer.onError?.(m.error as never, m.message); teardown(); break;
             case "log": observer.logInfo?.(m.message); break;
           }
         });
         proc.on("exit", (code) => {
           if (!ended) {
             observer.onError?.("CAST_TRANSPORT_ERROR", `the mirroring engine exited (${code})`);
+            teardown();
           }
         });
         proc.postMessage({ type: "start", params, source: capture, softwareCodecs, env: options.env }, [channelMain.port2]);

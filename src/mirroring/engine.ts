@@ -21,7 +21,6 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
   return (params, observer, channel) => {
     const environment = new UdpEnvironment(params.receiverAddress);
     const router = new SenderPacketRouter(environment);
-    environment.setPacketHandler((arrival, packet) => router.onReceivedPacket(arrival, packet));
     const backend = options.createBackend();
     let host: OpenscreenSessionHost | undefined;
     let closed = false;
@@ -57,7 +56,12 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
         });
         host.start();
       },
-      (err: Error) => observer.onError?.("CAST_TRANSPORT_ERROR", err.message),
+      (err: Error) => {
+        // No socket, so no session: release the capture that was prepared for it.
+        backend.stopAll?.();
+        close();
+        observer.onError?.("CAST_TRANSPORT_ERROR", err.message);
+      },
     );
     return {
       onMessage: (namespace, json) => host?.onMessage(params.destinationId, namespace, json),
