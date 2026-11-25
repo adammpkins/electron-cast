@@ -4,6 +4,16 @@ import { CastDiscovery } from "../discovery/index.ts";
 import { CastClient } from "../client/index.ts";
 import { CastPresentationHandler, type PresentationConnectionHandle } from "./presentation-handler.ts";
 import { createManagerApi, createSinksObservers, type CastManagerApi, type DevicePickerContext } from "./manager-api.ts";
+import type { BridgeMethod } from "../polyfill/bridge-types.ts";
+
+/**
+ * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
+ * (joinRunningSession, from the presentation handler), which a page must not reach directly.
+ */
+const PAGE_METHODS: ReadonlySet<string> = new Set<BridgeMethod>([
+  "initialize", "requestSession", "joinSession", "sendMessage", "stopSession",
+  "leaveSession", "setReceiverVolume", "setReceiverMuted",
+]);
 
 export type { CastRequestInfo, DeviceChoice } from "./session-service.ts";
 export type { CastDevice } from "../discovery/index.ts";
@@ -253,6 +263,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     // mode "chromecast" is main-frame only; iframes are served in presentation mode, as in Chrome
     if (!isMainFrame(event.senderFrame)) {
       return Promise.resolve({ ok: false, code: "extension_missing", description: "chrome.cast is not available in iframes; use presentation mode" });
+    }
+    if (typeof method !== "string" || !PAGE_METHODS.has(method)) {
+      return Promise.resolve({ ok: false, code: "invalid_parameter", description: `unknown method: ${String(method)}` });
     }
     const id = registerSender(event.sender, event.senderFrame)!;
     return service.handle({ id, origin }, method, params);

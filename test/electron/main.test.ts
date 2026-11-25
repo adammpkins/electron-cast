@@ -139,6 +139,17 @@ test("a call without a sender frame is refused", async () => {
   assert.equal((r as { ok: boolean; code?: string }).code, "extension_missing");
 });
 
+test("a page cannot call a method only main uses (joinRunningSession), or an unknown one", async () => {
+  const { call, clients } = setup();
+  const wc = new FakeWebContents(4);
+  await call(wc, "initialize", INIT);
+  const r = (await call(wc, "requestSession", REQ)) as { ok: true; value: { sessionId: string } };
+  const joined = await call(new FakeWebContents(5), "joinRunningSession", { sessionId: r.value.sessionId, appId: YT });
+  assert.deepEqual(joined, { ok: false, code: "invalid_parameter", description: "unknown method: joinRunningSession" });
+  assert.deepEqual(await call(wc, "nope", {}), { ok: false, code: "invalid_parameter", description: "unknown method: nope" });
+  assert.equal(clients.length, 1);
+});
+
 test("service events are sent to that webContents on <channel>:event", async () => {
   const { call, clients } = setup();
   const wc = new FakeWebContents(3);
