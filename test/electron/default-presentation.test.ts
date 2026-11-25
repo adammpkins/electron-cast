@@ -364,24 +364,32 @@ test("an unavailable answer stands for a minute, then the device is asked again 
 });
 
 test("an availability answer that was in flight when the device's channel was replaced is dropped", async () => {
-  // the first channel's answer ("unavailable") arrives only after the channel failed and a new one opened
+  // the first channel's answer ("unavailable") arrives only after the channel failed and a new one opened; the test
+  // holds it back itself, so no timing decides the order
   let stale = true;
+  let asked!: () => void;
+  const wasAsked = new Promise<void>((r) => { asked = r; });
+  let answer: (() => void) | undefined;
   const { manager, setDefault, clients } = setup({}, (c) => {
     if (c.device.id !== TV.id || !stale) return;
     c.getAppAvailability = async (ids: string[]) => {
       c.calls.push(`availability ${ids.join(",")}`);
-      await new Promise((r) => setTimeout(r, 40));
+      asked();
+      await new Promise<void>((r) => { answer = r; });
       return Object.fromEntries(ids.map((id) => [id, false]));
     };
   });
   await setDefault(new FakeWebContents(5), [URL1]);
-  const first = manager.startCasting(TV.id, { webContentsId: 5 });
-  await new Promise((r) => setTimeout(r, 10));
+  // its rejection is handled from the start: it comes as soon as the held answer is let through
+  const first = codeOf(manager.startCasting(TV.id, { webContentsId: 5 }));
+  await wasAsked;
   stale = false;
   clients.find((c) => c.device.id === TV.id)!.fail();
   await manager.settled();
   assert.equal(clients.filter((c) => c.device.id === TV.id).length, 2, "the channel was reopened");
-  assert.equal(await codeOf(first), "unable_to_cast");
+  assert.ok(answer !== undefined);
+  answer();
+  assert.equal(await first, "unable_to_cast");
   // had the stale "unavailable" been remembered, this would stay refused for a minute
   assert.equal((await manager.startCasting(TV.id, { webContentsId: 5 })).sinkId, TV.id);
 });
