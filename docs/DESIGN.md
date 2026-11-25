@@ -435,8 +435,9 @@ is), so the first ordinary one is served. Blink drops URLs of unknown protocol i
 (`PresentationRequest::Create`, `IsKnownProtocolForPresentationUrl`: http family, `cast`, `cast-dial`), which the stand-in
 repeats. A streaming URL is served as site-initiated mirroring for the allowlisted origins (docs, meet, music.youtube.com) when
 the `mirroring` option is on (see [Site-initiated mirroring](#site-initiated-mirroring-and-mirroring-to-flinging)), and
-reported unavailable otherwise. A plain https URL (Chrome's one-UA tab mirroring) is still rejected as
-`NotSupportedError`, not `NotFoundError`. A `cast-dial:` URL is the DIAL kind (`MediaSource::IsDialSource`): with DIAL on,
+reported unavailable otherwise. A plain https URL (Chrome's 1-UA mode) is rendered in an offscreen tab and mirrored
+when `mirroring` is on (see [Presentation URLs on a Cast device](#presentation-urls-on-a-cast-device)); without it, and
+without a wired display, nothing serves it. A `cast-dial:` URL is the DIAL kind (`MediaSource::IsDialSource`): with DIAL on,
 `chooseSource` returns it next to the first Cast app URL and the sink the user picks decides which is used (see
 [DIAL](#dial-srcdial)); with DIAL off it is a URL nothing here serves.
 ### Site-initiated mirroring and mirroring to flinging
@@ -522,6 +523,89 @@ joined is itself desktop mirroring; auto-join, and a presentation id that names 
 URLs of an unknown scheme), so this only guards what reaches `reconnectPresentation` from the main process or a page
 that bypasses the stand-in. Chrome's message for a join with no route at all is "Route not found"; electron-cast's is
 "No matching route" (both `NotFoundError`).
+
+### Presentation URLs on a Cast device
+
+Source: `src/mirroring/routing.ts` (`isOffscreenTabSource`, `offscreenTabSourceFor`), `src/mirroring/offscreen-tab.ts`
+(the capture size and the capture watchdog, pure), `src/mirroring/mirroring-manager.ts` (`startOffscreenPresentation`),
+`src/electron/offscreen-presentation.ts` (the tab and the page's connection to it),
+`src/electron/wired-display/electron-windows.ts` (`createReceiverHost`, `openOffscreenTab`), `presentation-handler.ts`
+(`startOffscreenTab`).
+
+Chrome calls this 1-UA mode: one user agent renders both sides. A page starts a `PresentationRequest` for an ordinary
+URL, Chrome renders that URL in a tab nobody sees and mirrors the tab to the Cast device. The chain, as read from
+Chromium:
+
+1. `CastMediaSource::FromMediaSource` turns an http or https URL that is not a Cast URL into
+   `CastMediaSourceForTabMirroring(source.id())`: the two streaming apps, with the URL kept as the source id ("Arbitrary
+   https URLs are supported via 1-UA mode which uses tab mirroring"). A URL over `kMaxCastPresentationUrlLength` (64 KB)
+   is no source. Which URLs a page may give at all is `IsValidPresentationUrl`: https, or http on localhost.
+2. `CastMediaRouteProvider::GetOrigins` restricts only site-initiated mirroring sources (a streaming app id written in
+   a Cast URL) to the allowlist, so an https source is open to every origin, and every sink that has a streaming app is
+   reported for it.
+3. `CreateRoute` goes to `CastActivityManager::LaunchSession` and `DoLaunchSession`, which adds a `MirroringActivity`
+   because the source contains a streaming app. `MirroringActivity::GetMirroringType` is `kOffscreenTab` for a source
+   that is neither a tab nor a desktop source, and `GetRouteDescription` is `Presenting (<host>)`.
+4. `MirroringActivity::CreateMirroringServiceHost` asks `CastMirroringServiceHostFactory::GetForOffscreenTab`, and
+   `CastMirroringServiceHost::OpenOffscreenTab` starts an `OffscreenTab` with the URL, the presentation id and the size
+   from `GetCaptureResolutionConstraint` (the primary display's size in pixels, cut to 16:9 and to `kMaxResolution`
+   1920x1080 in steps of 160x90 by `GetClampedResolution`).
+5. `OffscreenTab::Start` makes the tab: its own off-the-record profile, `kPresentationReceiverSandboxFlags`, muted,
+   `ReceiverPresentationServiceDelegateImpl` so the page has `navigator.presentation.receiver`, navigation held to the
+   presentation (`PresentationNavigationPolicy`), no input, no downloads, no popups, `RequestMediaAccessPermission`
+   answered NOT_SUPPORTED, `CloseContents` (the page's `window.close()`) destroying it.
+   `DieIfContentCaptureEnded` polls every `kPollInterval` (1 s): the tab is destroyed when capture has stopped, or
+   when it has not started within `kMaxWaitForCapture` (1 minute).
+6. The page that started it is a controller of a local presentation
+   (`ControllerPresentationServiceDelegateImpl::ConnectToPresentation`, `RegisterLocalPresentationController`): its
+   `PresentationConnection` talks to the tab's receiver through `LocalPresentationManager`, not to the Cast device.
+7. `CastMirroringServiceHost::WebContentsDestroyed` stops the mirroring session when the tab goes, and a route that ends
+   closes the tab.
+
+No feature flag gates this (only the media router itself). electron-cast does the same whenever the `mirroring` option
+and presentation mode are both on; there is no option for it, as Chrome has no switch.
+
+| Chrome | electron-cast |
+|---|---|
+| `FromMediaSource`, `kMaxCastPresentationUrlLength`, `IsValidPresentationUrl` | `isOffscreenTabSource`, `offscreenTabSourceFor`: the source id is the URL, the apps are `0F5096E8` and `85CDB22F`, audio capture is on. `chooseSource` takes the first such URL of a request in URL order |
+| Sinks for the source | The Cast sinks whose device has a streaming app (the same app availability query mirroring uses). Audio-only sinks get the audio-only app, as in Chrome |
+| `LaunchSession`, `DoLaunchSession`, `GetRouteDescription` | `MirroringManager.startOffscreenPresentation`: a local route `Presenting (<host>)`, cast mode `presentation`, whose member is the page that started it; a route already on the device is ended first |
+| `OpenOffscreenTab`, `GetCaptureResolutionConstraint`, `GetClampedResolution` | `captureResolutionConstraint`, `clampedResolution` in `offscreen-tab.ts`; the tab's content size is set to it. Without `screen` in `mirroring.electron` the size is 1920x1080 |
+| `OffscreenTab::Start` | A `BrowserWindow` that is never shown (`show: false`, no frame, not focusable, not in the taskbar), in a new in-memory session partition, muted before it loads, with the receiver preload and the receiver sandbox as a `Content-Security-Policy: sandbox` header on every document, navigation held to the first main-frame load, popups and downloads refused, keyboard input dropped |
+| `RequestMediaAccessPermission` NOT_SUPPORTED | The tab's session refuses every permission but `fullscreen` and one `display-capture` request (see below) |
+| `DieIfContentCaptureEnded` | `watchCapture` with `webContents.isBeingCaptured()`, 1 s and 1 minute |
+| `ConnectToPresentation`, `LocalPresentationManager` | `OffscreenPresentations` shares `LocalControllers` and `LocalPresentationManager` with wired displays, so `send`, `close`, `terminate` and `reconnect` behave as they do there |
+| `WebContentsDestroyed`, route end | The tab's destruction stops the activity; the route's end destroys the tab and terminates the presentation |
+
+**Capture permission.** In Chrome the browser captures the offscreen tab and the page's own media requests are a
+separate question. In Electron they are one: when another page captures a tab, Electron asks the permission request
+handler of the *captured* page's session for `display-capture`, and it asks the same handler when the page itself calls
+`getUserMedia` with `chromeMediaSource: "desktop"` (measured on Electron 45; a session that simply grants
+`display-capture` lets the presented page capture the user's screen). The two requests differ in `securityOrigin`: it is
+the capturing page's origin. The mirroring host's capture page is a file page, and a presented page is always http or
+https and cannot navigate to or frame a file page, so the tab's session grants `display-capture` only to the origin
+`file:///`, only for a session that holds an offscreen tab, and refuses the rest. `smoke/one-ua.mjs` checks both: frames
+of the tab reach the receiver, and the page in the tab is refused `NotAllowedError`. A receiver window on a wired display
+never grants it.
+
+Different from Chrome, or not ported:
+
+- `display-mode: fullscreen` is not reported to the page in the tab, and a page that enters fullscreen does not resize
+  the tab (`OffscreenTab::EnterFullscreenModeForTab`); the tab keeps the size it was opened with.
+- The sandbox flags are a response header, as for wired displays, so a document that is not loaded from the network
+  (`about:blank`, `data:`) does not carry them; the first-navigation rule keeps the main frame from becoming one.
+- `CastActivityManager::JoinSession` relaunches for an auto-join when the frame has a mirroring activity
+  (`GetSinkForMirroringActivity`). That path is ported for Cast app sources only (mirroring to flinging), not for an
+  https source: `reconnect` to an unknown presentation is `NotFoundError`.
+- With several URLs in one request Chrome asks each provider per source and the dialog picks per sink; electron-cast
+  serves the first URL something here can serve, in URL order.
+- The capture permission above is a rule this library adds to make Electron's one handler answer as Chrome's two paths
+  do.
+- Run on Windows only, against the fake receiver (`npm run smoke:one-ua`, silent). A real device is checked by hand with
+  `npm run live:checks -- parity --test one-ua` (see `examples/live-checks/README.md`).
+
+Tested: `test/mirroring/offscreen-tab.test.ts`, `test/electron/offscreen-presentation.test.ts`,
+`test/electron/offscreen-tab-window.test.ts`, `smoke/one-ua.mjs`.
 
 ## DIAL (`src/dial/`)
 
