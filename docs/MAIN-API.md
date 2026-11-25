@@ -276,10 +276,10 @@ Differences from Chrome:
   answers follow `CastAppDiscoveryServiceImpl::ShouldRefreshAppAvailability` (`cast_app_discovery_service.cc`): an
   available app is kept until the device goes away and comes back, an unavailable one is asked again after
   `kRefreshThreshold` (1 minute), and a device that cannot be reached or does not answer is unknown (always asked again
-  by `startCasting`; a sinks observer retries it at most once a minute, not at every change). Chrome also refreshes on
-  `DiscoverSinksNow`; there is no refresh here. This costs a
-  connection per device asked, closed again when idle (Chrome keeps its sockets open). The page's own
-  `getAvailability()` and `requestSession` still check capabilities only, as before.
+  by `startCasting`; a sinks observer retries it at most once a minute, not at every change). `discoverSinksNow()`
+  asks again too, by the same rules (`CastAppDiscoveryServiceImpl::Refresh`). The question goes over the channel the
+  device already has open; nothing else is connected. The page's own `getAvailability()` and `start()` use the same
+  answers (see [API.md](API.md#app-availability)).
 - Launching: `CastMediaRouteProvider::CreateRoute` ignores the `timeout` it is given (the dialog's
   `GetRouteRequestTimeout(PRESENTATION)`, 20 s, `media_router_ui_helper.cc`). `CastActivityManager::DoLaunchSession`
   gives the receiver the source's own `launch_timeout()`: `__castLaunchTimeout__` from the URL when it is a positive

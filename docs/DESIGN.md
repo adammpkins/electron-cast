@@ -314,10 +314,18 @@ electron-cast:
   `LaunchSession` launches even on a sink with a route and `DoLaunchSession` stops the frame's earlier route
   (`routes_by_frame_`); the launch timeout is the source's `__castLaunchTimeout__` or 60 s, not the dialog's 20 s
   (`GetRouteRequestTimeout`), which the provider ignores; a sink is offered for a source only when the device answered
-  `GET_APP_AVAILABILITY` with the app and has the capabilities (`GetAvailableSinks`). `CastSessionService.checkAppAvailability`
-  asks and caches per device and app: an available answer is kept, an unavailable one is asked again after 60 s
-  (`kRefreshThreshold`, `ShouldRefreshAppAvailability`), an error is not cached (`kUnknown`), and an answer that was in flight
-  when the device went away and came back is dropped (a generation counter per device).
+  `GET_APP_AVAILABILITY` with the app and has the capabilities (`GetAvailableSinks`). The answers are kept in one place,
+  `CastAppDiscovery` (`src/electron/app-discovery.ts`, Chrome's `CastAppDiscoveryServiceImpl` with its
+  `CastAppAvailabilityTracker`), asked over the sinks' open channels: an available answer is kept, an unavailable one is
+  asked again after 60 s (`kRefreshThreshold`, `ShouldRefreshAppAvailability`), an error is kept as `kUnknown` and always
+  asked again, and an answer that was in flight when the sink's channel was replaced or the sink went is dropped (a
+  generation counter per sink). `checkAppAvailability` asks one sink about one app; the page path observes sources.
+- A page's `PresentationRequest` (`getAvailability()`, `start()`) is served by the same discovery: the handler observes
+  the request's source (`StartObservingMediaSinks`: cached sinks at once, the source's new apps asked on every sink,
+  `OnSinkAddedOrUpdated` asking the registered apps of a sink whose channel opened, `OnSinkRemoved` dropping a sink's
+  answers), observers are told only when an app becomes or stops being available (`UpdateAppAvailability`), and the
+  page only when its answer changes (`PresentationMediaSinksObserver::OnSinksReceived`). `start()` offers the sinks of
+  the source. `discoverSinksNow()` refreshes (`Refresh`).
 - `startCasting` follows `CreateRouteParameters` (a source for the sink, else `unable_to_cast`), launches through the
   session service's `requestSessionOnDevice` (the same code as `requestSession` with the picker's answer already
   known, reachable from main only), registers the connection like a page's `start()`, and announces it with a

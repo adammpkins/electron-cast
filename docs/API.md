@@ -116,6 +116,27 @@ The third argument, a `DevicePickerContext` (`{ signal: AbortSignal; registerMed
 streams devices that appear while the picker is open (mDNS often needs seconds). `signal` aborts when the request no
 longer waits for a choice. See [MAIN-API.md](MAIN-API.md#a-live-device-picker).
 
+#### App availability
+
+In the default (Presentation API) mode a device counts for a page's request only once it has said, over its open
+channel, that it has the request's receiver app, as in Chrome, where a `PresentationRequest`'s availability and the
+sinks its `start()` offers come from `CastAppDiscoveryServiceImpl` (`cast_app_discovery_service.cc`). When a page asks
+(`getAvailability()`) or starts (`start()`), every device with an open channel is asked `GET_APP_AVAILABILITY` for the
+app, unless an answer stands; a device whose channel opens later is asked then. The answers follow Chrome's rules
+(`ShouldRefreshAppAvailability`): "available" stands until the device goes away, "unavailable" for a minute
+(`APP_AVAILABILITY_REFRESH_MS`), and no answer (a timeout, an error) is asked again each time.
+
+- `getAvailability()` resolves at once from answers that stand; otherwise as soon as one device says yes, or when every
+  device asked has answered. Its `change` events follow each answer that makes a device available or not, and each
+  device that comes or goes, without waiting for the device list's 3 s report. So a page that asks at load, before the
+  channels are open, gets `false` and then a `change` to `true` a moment later.
+- `start()` offers the picker the devices that have the app (and the capabilities the URL names), waiting for the
+  answers when none stands yet; with none, it rejects with `NotFoundError`. The picker's live list follows the answers.
+- `mode: "chromecast"` is unchanged: `chrome.cast` availability and `requestSession` go by capabilities only.
+
+Chrome's first answer waits for a device's result with no bound of its own; here it is bounded by the asks in flight
+(each has the client's request timeout).
+
 #### Errors the page sees
 
 In `mode: "chromecast"`, `chrome.cast.ErrorCode` values: `cancel`, `timeout`, `receiver_unavailable`,
@@ -402,8 +423,13 @@ Error codes: `invalid_parameter`, `extension_missing` (origin not allowed), `rec
 | `CastRequestInfo`, `DeviceChoice` | As above. |
 | `APP_AVAILABILITY_REFRESH_MS` | `60000`: how long a device's "unavailable" answer to `GET_APP_AVAILABILITY` stands before it is asked again (Chrome's `kRefreshThreshold` in `cast_app_discovery_service.cc`). |
 
-The service also has `mediaRoutes()`, `observeSessions(listener)`, `terminateSession(id)`, `setSessionVolume(id, volume)`
-and `detachSession(id)`, the hooks the manager's [main-process API](MAIN-API.md) is built on.
+The service also has `mediaRoutes()`, `observeSessions(listener)`, `terminateSession(id)`, `setSessionVolume(id, volume)`,
+`detachSession(id)`, `sendSessionMessage(id, namespace, message)`, `sessionVolume(id)`,
+`observeSessionStatus(listener)` and `observeMediaStatus(listener)`, the hooks the manager's
+[main-process API](MAIN-API.md) is built on (the last four serve the media controller, for local and non-local routes
+alike), and the [app availability](#app-availability) the presentation handler and `startCasting` use:
+`observeAppAvailability(sender, { appIds, capabilities }, onchange)` (`{ available: Promise<boolean>; close() }`),
+`checkAppAvailability(device, appId)` and `cachedAppAvailability(device, appId)`.
 
 ### `CastClient`
 

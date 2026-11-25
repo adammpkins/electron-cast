@@ -58,6 +58,11 @@
   are unavailable (`getAvailability()` is `false`) and `start()` rejects with `NotFoundError` ("No screens found.").
   Of several URLs the first ordinary Cast app one is served. The stand-in's `PresentationRequest` drops URLs of unknown
   protocol like Blink and throws `NotSupportedError` when none is left.
+- **App availability for pages, as in Chrome.** In the default mode a page's `getAvailability()` and the devices its
+  `start()` offers now come from the devices' own answer to `GET_APP_AVAILABILITY` for the request's app, asked over
+  the channels already open (Chrome's `CastAppDiscoveryServiceImpl`): a device that does not have the app is not
+  offered, availability turns true as soon as a device says it has the app, and `change` events follow each answer.
+  `mode: "chromecast"` is unchanged.
 - **Media control from the main process.** `manager.getMediaController(routeId, observer?)` is Chrome's
   `MediaController` and `MediaStatusObserver` for a route: `play`, `pause`, `seek`, `nextTrack`, `previousTrack`,
   `setVolume`, `setMute`, and the media status (title, play state, position, duration, volume, what the media can do,

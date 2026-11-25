@@ -7,6 +7,8 @@ import {
 } from "./manager-api.ts";
 import { CastSinkService, type ChannelParams, type CastSinkOptions } from "./sink-service.ts";
 import { CastSessionTracker, type TrackedSession } from "./session-tracker.ts";
+import { CastAppDiscovery, type CastAppSource } from "./app-discovery.ts";
+import { EventEmitter } from "node:events";
 
 /** Capability bit names in bit order: 1 video_out, 2 video_in, 4 audio_out, 8 audio_in, 32 multizone_group. */
 export function capabilityNames(bits: number): string[] {
@@ -19,8 +21,7 @@ export function capabilityNames(bits: number): string[] {
   return names;
 }
 
-/** CastAppDiscoveryServiceImpl kRefreshThreshold: how long an "unavailable" answer stands. */
-export const APP_AVAILABILITY_REFRESH_MS = 60_000;
+export { APP_AVAILABILITY_REFRESH_MS } from "./app-discovery.ts";
 
 /** A source of known Cast devices and their change events. */
 export interface DeviceSource {
@@ -174,13 +175,13 @@ function parseInitialize(params: unknown): { appId: string; capabilities: string
   return { appId, capabilities, autoJoinPolicy };
 }
 
-function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number } | null {
+function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean } | null {
   if (!isRecord(params)) return null;
   const { appId, capabilities, timeoutMs } = params;
   if (typeof appId !== "string" || !isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, capabilities, timeoutMs: timeout };
+  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
 }
 
 function parseSessionId(params: unknown): { sessionId: string } | null {
@@ -261,11 +262,8 @@ export class CastSessionService {
   private readonly launching = new Map<string, number>();
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
-  /** device id -> app id -> the answer and when it came (Chrome's CastAppAvailabilityTracker keeps the time too) */
-  private readonly appAvailability = new Map<string, Map<string, { available: boolean; at: number }>>();
-  /** Bumped when a device goes or comes back, so an answer that was in flight across it is dropped. */
-  private readonly appAvailabilityGeneration = new Map<string, number>();
-  private readonly appAvailabilityPending = new Map<string, Promise<boolean>>();
+  /** Which sinks have which apps, asked over their open channels (Chrome: CastAppDiscoveryServiceImpl). */
+  private readonly appDiscovery: CastAppDiscovery;
   private disposed = false;
 
   constructor(options: CastSessionServiceOptions) {
@@ -277,6 +275,7 @@ export class CastSessionService {
       isClientInUse: (client) => [...this.sessions.values()].some((rec) => rec.client === client),
     });
     this.sinks = createSinksObservers(this.sinkService);
+    this.appDiscovery = new CastAppDiscovery(this.sinkService);
     this.sinkService.on("deviceUp", this.deviceListener);
     this.sinkService.on("deviceDown", this.deviceListener);
     this.sinkService.on("deviceChanged", this.deviceListener);
@@ -285,10 +284,11 @@ export class CastSessionService {
       this.tracker.attach(device.id, client);
       this.bindClient(client, device);
     });
-    this.sinkService.on("channelOpened", ({ device }) => this.onSinkAddedOrUpdated(device));
+    // MediaSinkServiceBase::AddOrUpdateSink tells CastAppDiscoveryServiceImpl at once, not after the 3 s report
+    this.sinkService.on("channelOpened", ({ device }) => this.appDiscovery.onSinkAddedOrUpdated(device));
     this.sinkService.on("sinkRemoved", (device) => {
       this.tracker.removeSink(device.id);
-      this.onSinkRemoved(device);
+      this.appDiscovery.onSinkRemoved(device);
     });
     this.tracker.on("sessionAddedOrUpdated", () => this.onTrackerChanged());
     this.tracker.on("sessionRemoved", () => this.onTrackerChanged());
@@ -304,9 +304,14 @@ export class CastSessionService {
     return this.sinkService;
   }
 
-  /** Open channels to the discovered devices that have none now, without Chrome's random delay. */
+  /**
+   * Open channels to the discovered devices that have none now, without Chrome's random delay, and ask the sinks again
+   * about the apps being observed, by the refresh rules (`CastMediaRouteProvider::DiscoverSinksNow` ->
+   * `CastAppDiscoveryServiceImpl::Refresh`).
+   */
   discoverSinksNow(): void {
     this.sinkService.discoverSinksNow();
+    this.appDiscovery.refresh();
   }
 
   /** Resolves when no channel is being opened and none is scheduled to be; for tests. */
@@ -393,23 +398,10 @@ export class CastSessionService {
     for (const pending of this.pendingRequests.values()) pending.picker?.close();
     this.sessions.clear();
     this.tracker.dispose();
+    this.appDiscovery.dispose();
     this.sinkService.dispose();
     this.senders.clear();
     this.pendingRequests.clear();
-  }
-
-  /**
-   * `CastAppDiscoveryServiceImpl::OnSinkAddedOrUpdated`, which `MediaSinkServiceBase::AddOrUpdateSink` calls as soon as
-   * the channel opens (not after the 3 s report): answers in flight about an earlier channel are dropped.
-   */
-  private onSinkAddedOrUpdated(device: CastDevice): void {
-    this.appAvailabilityGeneration.set(device.id, (this.appAvailabilityGeneration.get(device.id) ?? 0) + 1);
-  }
-
-  /** `CastAppDiscoveryServiceImpl::OnSinkRemoved` -> `CastAppAvailabilityTracker::RemoveResultsForSink`. */
-  private onSinkRemoved(device: CastDevice): void {
-    this.appAvailability.delete(device.id);
-    this.appAvailabilityGeneration.set(device.id, (this.appAvailabilityGeneration.get(device.id) ?? 0) + 1);
   }
 
   /**
@@ -419,10 +411,7 @@ export class CastSessionService {
    * kRefreshThreshold, kUnknown always.
    */
   cachedAppAvailability(device: CastDevice, appId: string): boolean | undefined {
-    const entry = this.appAvailability.get(device.id)?.get(appId);
-    if (entry === undefined) return undefined;
-    if (!entry.available && Date.now() - entry.at > APP_AVAILABILITY_REFRESH_MS) return undefined;
-    return entry.available;
+    return this.appDiscovery.cached(device.id, appId);
   }
 
   /**
@@ -430,35 +419,76 @@ export class CastSessionService {
    * no answer is not cached (Chrome's kUnknown): this resolves false, and the next call asks again. Callers that ask on
    * every change (sinks observers) must pace themselves; see createSinksObservers.
    */
-  checkAppAvailability(device: CastDevice, appId: string): Promise<boolean> {
-    const known = this.cachedAppAvailability(device, appId);
-    if (known !== undefined) return Promise.resolve(known);
-    const generation = this.appAvailabilityGeneration.get(device.id) ?? 0;
-    const key = `${device.id}\n${generation}\n${appId}`;
-    const inFlight = this.appAvailabilityPending.get(key);
-    if (inFlight !== undefined) return inFlight;
-    const run = (async (): Promise<boolean> => {
-      // Asked over the device's kept-open channel (Chrome: the sink's CastSocket); no channel now is kUnknown
-      const client = this.sinkService.clientOf(device.id);
-      try {
-        if (client === undefined) return false;
-        const ask = client.getAppAvailability;
-        const available = ask === undefined ? true : (await ask.call(client, [appId]))[appId] === true;
-        // the device's channel was replaced or the sink went while it was being asked: this answer is about the old one
-        if ((this.appAvailabilityGeneration.get(device.id) ?? 0) === generation) {
-          let apps = this.appAvailability.get(device.id);
-          if (apps === undefined) this.appAvailability.set(device.id, (apps = new Map()));
-          apps.set(appId, { available, at: Date.now() });
-        }
-        return available;
-      } catch {
-        return false;
-      } finally {
-        this.appAvailabilityPending.delete(key);
-      }
-    })();
-    this.appAvailabilityPending.set(key, run);
-    return run;
+  async checkAppAvailability(device: CastDevice, appId: string): Promise<boolean> {
+    // Asked over the device's kept-open channel (Chrome: the sink's CastSocket); no channel now is kUnknown. An answer
+    // about a channel that was replaced while it was asked is dropped, so it is unknown too.
+    await this.appDiscovery.request(device.id, appId);
+    return this.appDiscovery.availability(device.id, appId).result === "available";
+  }
+
+  /**
+   * A page's `PresentationRequest` availability for a Cast app (`getAvailability()`), as Chrome serves it: a
+   * `PresentationMediaSinksObserver` on the source, fed by `CastAppDiscoveryServiceImpl::StartObservingMediaSinks`, so
+   * a sink counts once it has said over its open channel that it has the app (`GET_APP_AVAILABILITY`). `available` is
+   * the first answer: at once from the answers that stand, else once the sinks asked have answered (a sink that says
+   * yes answers it at once). `onchange` is called after that only when the answer changes, as
+   * `PresentationMediaSinksObserver::OnSinksReceived` skips a repeated one. `close()` stops the observation
+   * (`StopObservingMediaSinks`). A disallowed origin is never available.
+   */
+  observeAppAvailability(sender: SenderInfo, source: CastAppSource, onchange: (available: boolean) => void): { available: Promise<boolean>; close(): void } {
+    const allow = this.options.allowOrigin;
+    if (this.disposed || (allow !== undefined && !allow(sender.origin))) return { available: Promise.resolve(false), close: () => {} };
+    let last: boolean | undefined;
+    let closed = false;
+    let first!: (value: boolean) => void;
+    const available = new Promise<boolean>((resolve) => (first = resolve));
+    const report = (value: boolean): void => {
+      if (closed || value === last) return;
+      const answered = last !== undefined;
+      last = value;
+      if (answered) onchange(value);
+      else first(value);
+    };
+    const stop = this.appDiscovery.startObserving(source, (sinks) => report(sinks.length > 0));
+    if (last === undefined) {
+      void this.appDiscovery.settled(source).then(() => {
+        if (last === undefined) report(this.appDiscovery.availableSinks(source).length > 0);
+      });
+    }
+    return {
+      available,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        stop();
+        if (last === undefined) first(false);
+      },
+    };
+  }
+
+  /**
+   * The sinks a request for an app is offered, as Chrome's dialog and `StartPresentation` offer the sinks of the
+   * source: those that have the app. Observes the source until `close()`, so the picker sees the list change; the
+   * first list is waited for when no answer stands yet.
+   */
+  private async appSinks(source: CastAppSource): Promise<{ devices(): CastDevice[]; observers: ReturnType<typeof createSinksObservers>; close(): void }> {
+    const events = new EventEmitter();
+    const devices = (): CastDevice[] => this.appDiscovery.availableSinks(source);
+    const stop = this.appDiscovery.startObserving(source, () => events.emit("deviceChanged"));
+    const observers = createSinksObservers({
+      devices,
+      on: (e, l) => events.on(e, l),
+      off: (e, l) => events.off(e, l),
+    });
+    if (devices().length === 0) await this.appDiscovery.settled(source);
+    return {
+      devices,
+      observers,
+      close: () => {
+        observers.dispose();
+        stop();
+      },
+    };
   }
 
   private handleInitialize(sender: SenderInfo, params: unknown): BridgeResult {
@@ -490,8 +520,12 @@ export class CastSessionService {
     const cancelled = { value: false };
     const pending: PendingRequest = { discard, cancelled };
     this.pendingRequests.set(sender.id, pending);
+    let appSinks: Awaited<ReturnType<CastSessionService["appSinks"]>> | undefined;
     try {
-      const eligible = this.sinkService.devices().filter((d) => deviceMatches(d, p.capabilities));
+      // A page's presentation request is offered the sinks that have the app; chrome.cast's requestSession is unchanged
+      if (p.appAvailability) appSinks = await this.appSinks({ appIds: [p.appId], capabilities: p.capabilities });
+      if (cancelled.value || this.disposed) return bad("cancel");
+      const eligible = (appSinks?.devices() ?? this.sinkService.devices()).filter((d) => deviceMatches(d, p.capabilities));
       if (eligible.length === 0) {
         // Say why the devices found are not offered, when they failed to open (Chrome shows no sink and logs the error)
         const why = this.sinkService.openErrors();
@@ -513,7 +547,7 @@ export class CastSessionService {
         if (choice === null) return bad("receiver_unavailable");
       } else {
         // The picker gets live device updates until it answers; closing aborts its signal.
-        const pick = createPickerContext(this.sinks, (d) => deviceMatches(d, p.capabilities));
+        const pick = createPickerContext(appSinks?.observers ?? this.sinks, (d) => deviceMatches(d, p.capabilities));
         pending.picker = pick;
         try {
           choice = await this.options.selectDevice(eligible, request, pick.context);
@@ -557,6 +591,7 @@ export class CastSessionService {
         if (timer !== undefined) clearTimeout(timer);
       }
     } finally {
+      appSinks?.close();
       this.pendingRequests.delete(sender.id);
     }
   }

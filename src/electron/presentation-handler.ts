@@ -48,7 +48,7 @@ export class PresentationError extends Error {
 }
 
 /** A live getAvailability watch of one sender. */
-interface Watch { onchange: (value: boolean) => void }
+interface Watch { close(): void }
 
 /** Per-sender handler state: its connections keyed by clientId, and its availability watches. */
 interface SenderState {
@@ -149,42 +149,43 @@ class Conn implements PresentationConnectionHandle {
 
 /** Drives CastSessionService on behalf of pages speaking the presentation envelope. */
 export class CastPresentationHandler {
-  private readonly service: Pick<CastSessionService, "handle">;
+  private readonly service: Pick<CastSessionService, "handle" | "observeAppAvailability">;
   private readonly token: string;
   private readonly senders = new Map<number, SenderState>();
   private nextRequestId: number;
   private watchSeq = 0;
 
-  constructor(opts: { service: Pick<CastSessionService, "handle">; token?: string }) {
+  constructor(opts: { service: Pick<CastSessionService, "handle" | "observeAppAvailability">; token?: string }) {
     this.service = opts.service;
     this.token = opts.token ?? randomBytes(16).toString("hex");
     this.nextRequestId = 1 + Math.floor(Math.random() * (2 ** 30 - 1));
   }
 
-  /** Is the app available on some receiver? Resolves false for unparseable URLs and failed calls. */
+  /**
+   * Is the app available on some receiver? As in Chrome, a sink counts once it has said over its open channel that it
+   * has the app (`PresentationMediaSinksObserver` on `CastAppDiscoveryServiceImpl`); `onchange` follows each change
+   * until `signal` aborts. Resolves false for unparseable URLs and disallowed origins.
+   */
   async getAvailability(req: PresentationRequestInfo & { onchange(value: boolean): void; signal: AbortSignal }): Promise<boolean> {
     // Mirroring and remote-playback sources have no sink here, so they are unavailable (see presentation-source.ts)
     const choice = chooseSource(req.urls);
     if (choice.kind !== "launch") return false;
     const parsed = choice.parsed;
+    const signal = req.signal;
+    if (signal.aborted) return false;
     const state = this.senderState(req.senderId);
     const watchId = ++this.watchSeq;
-    state.watches.set(watchId, { onchange: req.onchange });
-    const signal = req.signal;
-    if (signal.aborted) {
+    const observation = this.service.observeAppAvailability(
+      this.senderOf(req.senderId, req.origin),
+      { appIds: [parsed.appId], capabilities: parsed.capabilities },
+      (value) => req.onchange(value),
+    );
+    state.watches.set(watchId, observation);
+    signal.addEventListener("abort", () => {
       state.watches.delete(watchId);
-    } else {
-      signal.addEventListener("abort", () => {
-        state.watches.delete(watchId);
-      }, { once: true });
-    }
-    const res = await this.service.handle(this.senderOf(req.senderId, req.origin), "initialize", {
-      appId: parsed.appId,
-      capabilities: parsed.capabilities,
-      autoJoinPolicy: "page_scoped",
-    });
-    if (!res.ok) return false;
-    return (res.value as InitializeResult).available;
+      observation.close();
+    }, { once: true });
+    return observation.available;
   }
 
   /** Launches the app and resolves with a connection carrying receiver_action then new_session. */
@@ -196,9 +197,11 @@ export class CastPresentationHandler {
     const { parsed } = choice;
     const sender = this.senderOf(req.senderId, req.origin);
     // With a deviceId the app's own UI already chose the sink (Chrome's dialog), so there is no picker
+    // The sinks offered are those that have the app (Chrome: the source's sinks from CastAppDiscoveryServiceImpl)
     const res = await this.service.handle(sender, req.deviceId === undefined ? "requestSession" : "requestSessionOnDevice", {
       appId: parsed.appId,
-      capabilities: [],
+      capabilities: parsed.capabilities,
+      appAvailability: true,
       timeoutMs: parsed.launchTimeout ?? 60000,
       ...(req.deviceId === undefined ? {} : { deviceId: req.deviceId }),
     });
@@ -283,10 +286,9 @@ export class CastPresentationHandler {
     const state = this.senders.get(senderId);
     if (state === undefined) return;
     switch (event.type) {
-      case "receiverAvailability": {
-        for (const watch of state.watches.values()) watch.onchange(event.available);
+      case "receiverAvailability":
+        // chrome.cast's availability (initialize); a page's PresentationRequest has its own (observeAppAvailability)
         return;
-      }
       case "sessionUpdated": {
         for (const conn of [...state.conns.values()]) {
           if (conn.closed || conn.sessionId !== event.session.sessionId) continue;
@@ -334,6 +336,7 @@ export class CastPresentationHandler {
     if (state === undefined) return;
     this.senders.delete(senderId);
     for (const conn of state.conns.values()) conn.end("closed");
+    for (const watch of state.watches.values()) watch.close();
     state.watches.clear();
   }
 

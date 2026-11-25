@@ -282,8 +282,9 @@ export class FramedWebContents extends EventEmitter {
 export const FAST_SINKS = { openDelayMaxMs: 0, reportDelayMs: 0 };
 
 /**
- * Make a service's `handle` wait until its channels are open first, so a test that sets up devices and calls at once
- * sees them as sinks, which in production they become a moment after discovery.
+ * Make a service's `handle` (and `observeAppAvailability`, when it has one) wait until its channels are open first, so
+ * a test that sets up devices and calls at once sees them as sinks, which in production they become a moment after
+ * discovery.
  */
 export function waitForSinks<T extends { handle: (...a: any[]) => Promise<any>; settled(): Promise<void> }>(service: T): T {
   const handle = service.handle.bind(service);
@@ -291,6 +292,20 @@ export function waitForSinks<T extends { handle: (...a: any[]) => Promise<any>; 
     await service.settled();
     return handle(...args);
   };
+  const target = service as T & { observeAppAvailability?: (...a: any[]) => { available: Promise<boolean>; close(): void } };
+  const observe = target.observeAppAvailability?.bind(service);
+  if (observe !== undefined) {
+    target.observeAppAvailability = (...args: any[]) => {
+      let inner: { available: Promise<boolean>; close(): void } | undefined;
+      let closed = false;
+      const available = service.settled().then(() => {
+        if (closed) return false;
+        inner = observe(...args);
+        return inner.available;
+      });
+      return { available, close: () => { closed = true; inner?.close(); } };
+    };
+  }
   return service;
 }
 
