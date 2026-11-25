@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { withBase } from "vitepress";
 import { Check, Copy, ExternalLink } from "lucide-vue-next";
 import Button from "./ui/Button.vue";
@@ -16,6 +16,18 @@ async function copy() {
     setTimeout(() => (copied.value = false), 1600);
   } catch {
     /* clipboard blocked: the command is selectable text */
+  }
+}
+const dialCopied = ref(false);
+const canCopyDial = ref(false);
+onMounted(() => { canCopyDial.value = typeof navigator !== "undefined" && !!navigator.clipboard?.writeText; });
+async function copyDial() {
+  try {
+    await navigator.clipboard.writeText("npx electron-cast@next dial-test");
+    dialCopied.value = true;
+    setTimeout(() => (dialCopied.value = false), 1600);
+  } catch {
+    canCopyDial.value = false; /* clipboard blocked: the command stays selectable text */
   }
 }
 const tabs = [
@@ -163,6 +175,32 @@ const tabs = [
                 <td class="no">Not tested</td>
               </tr>
               <tr>
+                <th scope="row">Tab mirroring</th>
+                <td>Tested to a Chromecast Ultra: 1080p30, VP8 and Opus in software, sound only on the TV</td>
+                <td class="no">Not tested</td>
+                <td class="no">Not tested</td>
+              </tr>
+              <tr>
+                <th scope="row">Desktop mirroring</th>
+                <td>Tested to a Chromecast Ultra: picture and system sound; the PC keeps playing its sound, as Chrome does on Windows</td>
+                <td class="no">Not tested</td>
+                <td class="no">Not tested</td>
+              </tr>
+              <tr>
+                <th scope="row">Presenting to a second display</th>
+                <td>Tested on a second monitor</td>
+                <td class="no">Not tested</td>
+                <td class="no">Not tested</td>
+              </tr>
+              <tr>
+                <th scope="row">DIAL TVs</th>
+                <td colspan="3">Unit tests only. No real DIAL TV has been through it yet: see the call below.</td>
+              </tr>
+              <tr>
+                <th scope="row">Casting from the app's own UI, sessions other senders started</th>
+                <td colspan="3">Unit tests and the CI smoke test only so far.</td>
+              </tr>
+              <tr>
                 <th scope="row">Casting from iframes</th>
                 <td colspan="3">Unit tests only. No real device has been through it yet.</td>
               </tr>
@@ -173,20 +211,64 @@ const tabs = [
           <div>
             <h3>Coming</h3>
             <ul>
-              <li>DIAL devices</li>
-              <li>Casting started from the app's own UI</li>
-              <li>Live tracking of sessions started on other devices</li>
-              <li>Mirroring a tab or the desktop</li>
-              <li>Presenting to a second display</li>
+              <li>Mirroring: switching the mirrored tab, pause and resume, session stats</li>
+              <li>Mirroring: a new offer after an encoder failure, hardware encoders</li>
+              <li>Mirroring tested on Linux and macOS</li>
+              <li>DIAL tested on real TVs</li>
             </ul>
           </div>
           <div>
             <h3>Not done</h3>
             <ul>
               <li>The Remote Playback API (needs support inside Electron)</li>
+              <li>Turning an access code into an address (a private Google service; the app supplies the address)</li>
             </ul>
           </div>
         </div>
+        <aside class="call" aria-labelledby="dial-call-h">
+          <div class="slate">
+            <p class="slate-state"><span class="lamp" aria-hidden="true" />Searching for DIAL TVs</p>
+            <p class="slate-count">Tested on real hardware: <b>0</b></p>
+            <div class="scan" aria-hidden="true"><span class="blip" /></div>
+          </div>
+          <div class="call-body">
+            <div class="call-copy">
+              <h3 id="dial-call-h">Testers wanted: DIAL TVs</h3>
+              <p>
+                DIAL support is built and passes its tests, but no real DIAL device has been through it yet. DIAL is the older protocol
+                many smart TVs use to open apps such as YouTube.
+              </p>
+              <p class="makes-k" id="dial-makes">Models without a built-in Chromecast, from</p>
+              <ul class="makes" aria-labelledby="dial-makes">
+                <li>Roku</li><li>Samsung</li><li>LG</li><li>Sony</li><li>Fire TV</li>
+              </ul>
+            </div>
+            <div class="term">
+              <div class="term-bar">
+                <span>Terminal (Node only)</span>
+                <button v-if="canCopyDial" type="button" class="term-copy" aria-label="Copy the dial-test command" @click="copyDial">
+                  <Check v-if="dialCopied" aria-hidden="true" /><Copy v-else aria-hidden="true" />
+                  <span aria-hidden="true">{{ dialCopied ? "Copied" : "Copy" }}</span>
+                </button>
+                <span class="sr" role="status" aria-live="polite">{{ dialCopied ? "Copied" : "" }}</span>
+              </div>
+              <code class="term-cmd"><span aria-hidden="true">$</span> npx electron-cast@next dial-test</code>
+              <p class="term-note">
+                It finds your TV and checks it without changing anything. It asks before opening YouTube on the TV for a few seconds,
+                then prints a report with no names or addresses.
+              </p>
+            </div>
+          </div>
+          <ol class="steps">
+            <li><span class="step-n" aria-hidden="true">1</span><span><b>Run the command</b> in a terminal on the same network as your TV.</span></li>
+            <li><span class="step-n" aria-hidden="true">2</span><span><b>Say yes</b> when it asks to open YouTube on the TV.</span></li>
+            <li><span class="step-n" aria-hidden="true">3</span><span><b>Paste the report</b>, or click the link it prints to open a prefilled GitHub issue.</span></li>
+          </ol>
+          <p class="call-foot">
+            No Node?
+            <a class="plain" href="https://github.com/adammpkins/electron-cast/issues/new?title=DIAL%20tester%3A%20%3CTV%20make%20and%20model%3E&amp;body=%2A%2ATV%20make%20and%20model%3A%2A%2A%0A%0A%2A%2ADoes%20the%20TV%20show%20up%20in%20Chrome%27s%20Cast%20menu%20when%20you%20play%20a%20YouTube%20video%3F%2A%2A%20%28yes%20%2F%20no%29%0A%0A%2A%2AYour%20computer%27s%20OS%3A%2A%2A%0A%0APlease%20leave%20out%20your%20TV%27s%20name%2C%20IP%20address%20and%20serial%20number." rel="noopener">Volunteer instead <ExternalLink aria-hidden="true" /></a>
+          </p>
+        </aside>
       </div>
     </section>
 
@@ -278,6 +360,46 @@ td.no { color: var(--ec-muted); }
 .gaps li { padding: 0.35rem 0 0.35rem 1.5rem; position: relative; }
 .gaps li::before { content: ""; position: absolute; left: 0; top: 0.8rem; width: 9px; height: 9px; background: var(--ec-ink); }
 .gaps div:last-child li::before { background: none; border: 2px solid var(--ec-muted); }
+/* DIAL call: a broadcast slate. Always ink (like the signal-path band), so it reads the same in both themes. */
+.call { --slate: #15130f; --slate-ink: #f4f1ea; --slate-muted: #a29d92; margin-top: 3rem; border: 2px solid var(--ec-ink); max-width: 62rem; background: var(--ec-bg); }
+.slate { position: relative; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.2rem 1.5rem; padding: 0.7rem 1rem 1.05rem; background: var(--slate); color: var(--slate-ink); font-family: var(--ec-mono); font-size: 0.8rem; }
+.slate p { margin: 0; }
+.slate-state { display: flex; align-items: center; gap: 0.6rem; }
+.slate-count { color: var(--slate-muted); }
+.slate-count b { color: var(--slate-ink); font-weight: 400; }
+.lamp { width: 10px; height: 10px; background: var(--ec-tally); animation: tally 1.6s steps(1, end) infinite; }
+@keyframes tally { 0%, 62% { opacity: 1; } 62.01%, 100% { opacity: 0.2; } }
+/* the search: a ruler of ticks (devices answer one by one) with the tally square stepping along it */
+.scan { position: absolute; left: 1rem; right: 1rem; bottom: 0.4rem; height: 6px; background: repeating-linear-gradient(90deg, rgba(244, 241, 234, 0.35) 0 1px, transparent 1px 12px); }
+.blip { position: absolute; top: -1px; left: 0; width: 8px; height: 8px; background: var(--ec-tally); animation: sweep 6s steps(24, end) infinite; }
+@keyframes sweep { from { left: 0; } to { left: calc(100% - 8px); } }
+.call-body { display: grid; gap: 1.6rem 2.5rem; padding: 1.6rem 1rem 1.5rem; }
+@media (min-width: 560px) { .call-body, .slate { padding-left: 1.5rem; padding-right: 1.5rem; } .scan { left: 1.5rem; right: 1.5rem; } }
+@media (min-width: 900px) { .call-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); align-items: start; } }
+.call h3 { font-family: var(--ec-display); font-variation-settings: "wdth" 72; font-weight: 850; font-size: clamp(1.9rem, 4.4vw, 2.6rem); line-height: 1; margin: 0 0 0.9rem; text-wrap: balance; }
+.call-copy p { margin: 0 0 1rem; line-height: 1.6; max-width: 34em; }
+.call-copy .makes-k { margin: 1.3rem 0 0.5rem; font-size: 0.9rem; color: var(--ec-muted); }
+.makes { display: flex; flex-wrap: wrap; gap: 0.4rem; list-style: none; padding: 0; margin: 0; }
+.makes li { margin: 0; font-family: var(--ec-mono); font-size: 0.85rem; line-height: 1; padding: 0.45rem 0.65rem; border: 1px solid var(--ec-ink); }
+.term { border: 2px solid var(--ec-ink); background: var(--slate); color: var(--slate-ink); min-width: 0; }
+.term-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 2.5rem; padding-left: 0.9rem; border-bottom: 1px solid rgba(244, 241, 234, 0.25); font-family: var(--ec-mono); font-size: 0.78rem; color: var(--slate-muted); }
+.term-copy { display: inline-flex; align-items: center; gap: 0.45rem; align-self: stretch; padding: 0 0.9rem; min-width: 5.6rem; justify-content: center; background: none; border: 0; border-left: 1px solid rgba(244, 241, 234, 0.25); color: var(--slate-ink); font: inherit; cursor: pointer; }
+.term-copy:hover { background: var(--ec-tally); color: #15130f; }
+.term-copy svg { width: 14px; height: 14px; }
+.term-cmd { display: block; padding: 1.1rem 0.9rem; background: none; color: var(--slate-ink); font-family: var(--ec-mono); font-size: min(1rem, 3.3vw); white-space: nowrap; overflow-x: auto; user-select: all; }
+.term-cmd span { color: var(--ec-tally); margin-right: 0.35rem; }
+.term-note { margin: 0; padding: 0.8rem 0.9rem 1rem; border-top: 1px solid rgba(244, 241, 234, 0.25); font-size: 0.92rem; line-height: 1.55; color: var(--slate-muted); }
+.steps { list-style: none; margin: 0; padding: 1.4rem 1rem; border-top: 2px solid var(--ec-ink); display: grid; gap: 1.1rem; }
+.steps li { display: flex; gap: 0.8rem; align-items: flex-start; line-height: 1.5; }
+.step-n { flex: none; width: 1.9rem; height: 1.9rem; display: grid; place-items: center; font-family: var(--ec-mono); font-size: 0.95rem; border: 2px solid var(--ec-ink); }
+.steps li:first-child .step-n { background: var(--ec-tally); border-color: var(--ec-tally); color: #15130f; }
+@media (min-width: 560px) { .steps { padding-left: 1.5rem; padding-right: 1.5rem; } }
+@media (min-width: 800px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; } }
+.call-foot { margin: 0; padding: 0.95rem 1rem; border-top: 1px solid var(--ec-line); background: var(--vp-c-bg-soft); display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; align-items: center; }
+@media (min-width: 560px) { .call-foot { padding-left: 1.5rem; padding-right: 1.5rem; } }
+.slate :focus-visible, .term :focus-visible { outline-color: #f4f1ea; }
+.term-copy:focus-visible { outline-offset: -3px; }
+@media (prefers-reduced-motion: reduce) { .lamp { animation: none; } .blip { animation: none; left: 62%; } }
 
 /* next */
 .next { border-bottom: 0; }
