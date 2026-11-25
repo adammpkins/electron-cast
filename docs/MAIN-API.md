@@ -205,9 +205,12 @@ Differences from Chrome:
   with the app available**, as Chrome's `CastAppAvailabilityTracker::GetAvailableSinks` requires
   (`CastAppDiscoveryServiceImpl::StartObservingMediaSinks` asks every sink when a source is first observed). So a
   sinks observer with `presentationUrls` first reports the sinks that were already asked, and the others when the
-  device has answered; `startCasting` asks (once per device and app) before launching, so it works without an observer. A
-  device that cannot be reached counts as not having the app until it next goes away and comes back (the answer is
-  cached per device and app). Chrome refreshes on `DiscoverSinksNow`; there is no refresh here. This costs a
+  device has answered; `startCasting` asks (once per device and app) before launching, so it works without an observer. The
+  answers follow `CastAppDiscoveryServiceImpl::ShouldRefreshAppAvailability` (`cast_app_discovery_service.cc`): an
+  available app is kept until the device goes away and comes back, an unavailable one is asked again after
+  `kRefreshThreshold` (1 minute), and a device that cannot be reached or does not answer is unknown (always asked again
+  by `startCasting`; a sinks observer retries it at most once a minute, not at every change). Chrome also refreshes on
+  `DiscoverSinksNow`; there is no refresh here. This costs a
   connection per device asked, closed again when idle (Chrome keeps its sockets open). The page's own
   `getAvailability()` and `requestSession` still check capabilities only, as before.
 - Launching: `CastMediaRouteProvider::CreateRoute` ignores the `timeout` it is given (the dialog's
@@ -222,4 +225,7 @@ Differences from Chrome:
   route its window's main frame last launched, by `startCasting` or by the page's `start()`, if it is still running.
 - A default request replaced during the launch: `OnPresentationResponse` records the presentation and the route stays
   (`DoLaunchSession` already added it); only the connection is not handed over. The route stays here too, listed by
-  routes observers, until the window launches another, the app terminates it or the receiver ends it.
+  routes observers, until the window launches another, the app terminates it or the receiver ends it. The connection of a
+  declined start is not wired to the page (nothing it sends reaches the page that has the window now). If the request
+  changed, or the page navigated, while the device was still being asked about the app, the start is `cancelled` before
+  anything is launched.

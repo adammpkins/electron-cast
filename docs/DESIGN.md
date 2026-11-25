@@ -299,7 +299,9 @@ electron-cast:
   (`routes_by_frame_`); the launch timeout is the source's `__castLaunchTimeout__` or 60 s, not the dialog's 20 s
   (`GetRouteRequestTimeout`), which the provider ignores; a sink is offered for a source only when the device answered
   `GET_APP_AVAILABILITY` with the app and has the capabilities (`GetAvailableSinks`). `CastSessionService.checkAppAvailability`
-  asks and caches per device and app (cleared when the device goes or comes back).
+  asks and caches per device and app: an available answer is kept, an unavailable one is asked again after 60 s
+  (`kRefreshThreshold`, `ShouldRefreshAppAvailability`), an error is not cached (`kUnknown`), and an answer that was in flight
+  when the device went away and came back is dropped (a generation counter per device).
 - `startCasting` follows `CreateRouteParameters` (a source for the sink, else `unable_to_cast`), launches through the
   session service's `requestSessionOnDevice` (the same code as `requestSession` with the picker's answer already
   known, reachable from main only), registers the connection like a page's `start()`, and announces it with a

@@ -28,6 +28,8 @@ export function samePresentationRequest(a: PresentationRequest, b: PresentationR
 /** Default requests per window, with their observers. */
 export class DefaultPresentationRequests {
   private readonly requests = new Map<number, PresentationRequest>();
+  private readonly serials = new Map<number, number>();
+  private serial = 0;
   private readonly observers = new Map<number, Set<PresentationObserver>>();
 
   has(webContentsId: number): boolean {
@@ -37,6 +39,11 @@ export class DefaultPresentationRequests {
   get(webContentsId: number): PresentationRequest | null {
     const r = this.requests.get(webContentsId);
     return r === undefined ? null : { ...r, presentationUrls: [...r.presentationUrls] };
+  }
+
+  /** Changes with every set that is not a no-op, so a request cleared and set again (a new page) is not the same one. */
+  serialOf(webContentsId: number): number | undefined {
+    return this.serials.get(webContentsId);
   }
 
   /**
@@ -53,12 +60,20 @@ export class DefaultPresentationRequests {
       && current.presentationUrls.every((u, i) => u === urls[i])) return;
     const next: PresentationRequest = { webContentsId, presentationUrls: [...urls], frameOrigin };
     this.requests.set(webContentsId, next);
+    this.serials.set(webContentsId, ++this.serial);
     this.notify(webContentsId, next);
   }
 
   /** `ClearDefaultPresentationRequest`: also what `Reset` does when the frame navigates or goes away. */
   clear(webContentsId: number): void {
+    this.serials.delete(webContentsId);
     if (this.requests.delete(webContentsId)) this.notify(webContentsId, null);
+  }
+
+  /** The window is gone: clear its request (observers hear the final null), then forget its observers. */
+  forget(webContentsId: number): void {
+    this.clear(webContentsId);
+    this.observers.delete(webContentsId);
   }
 
   observe(webContentsId: number, observer: PresentationObserver): () => void {
@@ -73,6 +88,7 @@ export class DefaultPresentationRequests {
 
   dispose(): void {
     this.requests.clear();
+    this.serials.clear();
     this.observers.clear();
   }
 

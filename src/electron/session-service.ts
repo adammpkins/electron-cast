@@ -17,6 +17,9 @@ export function capabilityNames(bits: number): string[] {
   return names;
 }
 
+/** CastAppDiscoveryServiceImpl kRefreshThreshold: how long an "unavailable" answer stands. */
+export const APP_AVAILABILITY_REFRESH_MS = 60_000;
+
 /** A source of known Cast devices and their change events. */
 export interface DeviceSource {
   devices(): CastDevice[];
@@ -254,11 +257,15 @@ export class CastSessionService {
   private readonly clients = new Map<string, ClientEntry>();
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly deviceListener = (): void => this.onDevicesChanged();
-  private readonly appAvailability = new Map<string, Map<string, boolean>>();  // device id -> app id -> available
+  /** device id -> app id -> the answer and when it came (Chrome's CastAppAvailabilityTracker keeps the time too) */
+  private readonly appAvailability = new Map<string, Map<string, { available: boolean; at: number }>>();
+  /** Bumped when a device goes or comes back, so an answer that was in flight across it is dropped. */
+  private readonly appAvailabilityGeneration = new Map<string, number>();
   private readonly appAvailabilityPending = new Map<string, Promise<boolean>>();
   private readonly deviceComingGoingListener = (device: CastDevice): void => {
     // CastAppDiscoveryServiceImpl::OnSinkAddedOrUpdated asks again for a sink that comes back
     this.appAvailability.delete(device.id);
+    this.appAvailabilityGeneration.set(device.id, (this.appAvailabilityGeneration.get(device.id) ?? 0) + 1);
     this.onDevicesChanged();
   };
   private disposed = false;
@@ -360,41 +367,48 @@ export class CastSessionService {
     this.pendingRequests.clear();
   }
 
-  /** What the device last said about the app (`GET_APP_AVAILABILITY`); undefined until asked. */
+  /**
+   * What the device said about the app (`GET_APP_AVAILABILITY`), or undefined when it has to be asked: never asked, no
+   * answer last time, or "unavailable" longer than `APP_AVAILABILITY_REFRESH_MS` ago. This is
+   * CastAppDiscoveryServiceImpl::ShouldRefreshAppAvailability: kAvailable is kept, kUnavailable is asked again after
+   * kRefreshThreshold, kUnknown always.
+   */
   cachedAppAvailability(device: CastDevice, appId: string): boolean | undefined {
-    return this.appAvailability.get(device.id)?.get(appId);
+    const entry = this.appAvailability.get(device.id)?.get(appId);
+    if (entry === undefined) return undefined;
+    if (!entry.available && Date.now() - entry.at > APP_AVAILABILITY_REFRESH_MS) return undefined;
+    return entry.available;
   }
 
   /**
-   * Ask the device whether it has the app (`GET_APP_AVAILABILITY`), once per device and app until the device goes away
-   * and comes back. A device that cannot be reached or does not answer has no app: Chrome's
-   * CastAppAvailabilityTracker leaves such a sink at `kUnknown`, which is not offered.
+   * Ask the device whether it has the app (`GET_APP_AVAILABILITY`) unless a still-valid answer is cached. An error or
+   * no answer is not cached (Chrome's kUnknown): this resolves false, and the next call asks again. Callers that ask on
+   * every change (sinks observers) must pace themselves; see createSinksObservers.
    */
   checkAppAvailability(device: CastDevice, appId: string): Promise<boolean> {
     const known = this.cachedAppAvailability(device, appId);
     if (known !== undefined) return Promise.resolve(known);
-    const key = `${device.id}
-${appId}`;
+    const generation = this.appAvailabilityGeneration.get(device.id) ?? 0;
+    const key = `${device.id}\n${generation}\n${appId}`;
     const inFlight = this.appAvailabilityPending.get(key);
     if (inFlight !== undefined) return inFlight;
     const run = (async (): Promise<boolean> => {
       let entry: ClientEntry | undefined;
-      const remember = (available: boolean): boolean => {
-        let apps = this.appAvailability.get(device.id);
-        if (apps === undefined) this.appAvailability.set(device.id, (apps = new Map()));
-        apps.set(appId, available);
-        return available;
-      };
       try {
         entry = this.clientFor(device);
         entry.opening += 1;
         await entry.ready;
         const ask = entry.client.getAppAvailability;
         const available = ask === undefined ? true : (await ask.call(entry.client, [appId]))[appId] === true;
-        return remember(available);
+        // the device went away and came back while it was being asked: this answer is about the old connection
+        if ((this.appAvailabilityGeneration.get(device.id) ?? 0) === generation) {
+          let apps = this.appAvailability.get(device.id);
+          if (apps === undefined) this.appAvailability.set(device.id, (apps = new Map()));
+          apps.set(appId, { available, at: Date.now() });
+        }
+        return available;
       } catch {
-        // remembered too, until the device next appears, so a silent device is not asked again at every change
-        return remember(false);
+        return false;
       } finally {
         if (entry !== undefined) {
           entry.opening -= 1;

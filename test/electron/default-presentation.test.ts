@@ -1,6 +1,6 @@
 // A page's default presentation request and casting it from the app's own UI (Chrome: WebContentsPresentationManager,
 // MediaRouterUI::StartCasting with MediaCastMode::PRESENTATION). See docs/MAIN-API.md.
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
@@ -12,6 +12,7 @@ import { FakeDevices, FakeClient, SPEAKER, TV } from "./fakes.ts";
 
 const ORIGIN = "https://music.youtube.com";
 const URL1 = "https://google.com/cast#__castAppId__=233637DE/__castClientId__=c1";
+const URL3 = "https://google.com/cast#__castAppId__=ABCD1234/__castClientId__=c4";
 const URL2 = "https://google.com/cast#__castAppId__=CC1AD845/__castClientId__=c2";
 // needs video_out, which the speaker lacks
 const URL_VIDEO = "https://google.com/cast#__castAppId__=233637DE(video_out)/__castClientId__=c3";
@@ -265,17 +266,6 @@ test("a second start while one is pending is a redundant request", async () => {
   await first;
 });
 
-test("when the page replaced its default request during the start, the connection is not announced", async () => {
-  const { manager, setDefault } = setup();
-  const wc = new FakeWebContents(5);
-  await setDefault(wc, [URL1]);
-  const started = manager.startCasting(TV.id, { webContentsId: 5 });
-  await setDefault(wc, [URL2]);
-  const route = await started;
-  assert.ok(route.id);
-  assert.ok(!wc.events().some((e) => e.type === "connectionavailable"), "OnPresentationResponse answers only the request it started");
-});
-
 test("a navigation during the start cancels it", async () => {
   const { manager, setDefault } = setup();
   const wc = new FakeWebContents(5);
@@ -303,18 +293,111 @@ test("a sink is offered for a presentation URL only when the device says it has 
   assert.equal(route.appId, "CC1AD845", "the first URL whose app the sink has");
 });
 
-test("a device that cannot be asked has no app, and is not asked again at every change", async () => {
-  const { manager, setDefault, clients, devices } = setup({}, (c) => { c.connectError = new Error("unreachable"); });
+test("a device that cannot be asked is unknown, not unavailable: not retried at every change, asked again when casting", async () => {
+  let failed = false;
+  const { manager, setDefault, clients, devices } = setup({}, (c) => {
+    if (c.device.id === TV.id && !failed) {
+      failed = true;
+      c.connectError = new Error("unreachable");
+    }
+  });
   let ids: string[] = ["x"];
   manager.registerMediaSinksObserver({ onSinksUpdated: (s) => { ids = s.map((x) => x.id); } }, { presentationUrls: [URL1] });
   await new Promise((r) => setTimeout(r, 50));
-  assert.deepEqual(ids, []);
+  assert.deepEqual(ids.includes(TV.id), false, "no answer, no sink");
   const asked = clients.length;
   devices.emit("deviceChanged", TV);
   await new Promise((r) => setTimeout(r, 30));
-  assert.equal(clients.length, asked);
+  assert.equal(clients.length, asked, "a change of the list does not retry within the refresh threshold (no storm)");
   await setDefault(new FakeWebContents(5), [URL1]);
-  assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "unable_to_cast");
+  // kUnknown is always asked again (ShouldRefreshAppAvailability), and this time the device answers
+  const route = await manager.startCasting(TV.id, { webContentsId: 5 });
+  assert.equal(route.sinkId, TV.id);
+});
+
+test("an unavailable answer stands for a minute, then the device is asked again (kRefreshThreshold)", async () => {
+  mock.timers.enable({ apis: ["Date"] });
+  try {
+    let available: string[] | null = [];
+    const { manager, setDefault } = setup({}, (c) => { c.availableApps = available; });
+    await setDefault(new FakeWebContents(5), [URL1]);
+    assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "unable_to_cast");
+    available = null;
+    mock.timers.tick(59_000);
+    assert.equal(await codeOf(manager.startCasting(TV.id, { webContentsId: 5 })), "unable_to_cast", "still the earlier answer");
+    mock.timers.tick(2_000);
+    assert.equal((await manager.startCasting(TV.id, { webContentsId: 5 })).sinkId, TV.id, "asked again after 60 s");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("an availability answer that was in flight when the device went away and came back is dropped", async () => {
+  let stale = true;
+  const { manager, setDefault, devices } = setup({}, (c) => {
+    if (stale) {
+      c.availableApps = [];
+      c.availabilityDelayMs = 40;
+    }
+  });
+  await setDefault(new FakeWebContents(5), [URL1]);
+  const first = manager.startCasting(TV.id, { webContentsId: 5 });
+  await new Promise((r) => setTimeout(r, 10));
+  devices.down(TV);
+  devices.up(TV);
+  stale = false;
+  assert.equal(await codeOf(first), "unable_to_cast");
+  // had the stale "unavailable" been remembered, this would stay refused for a minute
+  assert.equal((await manager.startCasting(TV.id, { webContentsId: 5 })).sinkId, TV.id);
+});
+
+test("a request replaced or a page navigated while the device is asked cancels the start, and nothing is launched", async () => {
+  const { manager, setDefault, launchers } = setup({}, (c) => { c.availabilityDelayMs = 40; });
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  const replaced = manager.startCasting(TV.id, { webContentsId: 5 });
+  await new Promise((r) => setTimeout(r, 10));
+  await setDefault(wc, [URL2]);
+  assert.equal(await codeOf(replaced), "cancelled");
+  wc.emit("did-navigate");
+  await setDefault(wc, [URL3]);
+  const navigated = manager.startCasting(TV.id, { webContentsId: 5 });
+  await new Promise((r) => setTimeout(r, 10));
+  wc.emit("did-navigate");
+  await setDefault(wc, [URL3]);  // the new page asks for the same URLs
+  assert.equal(await codeOf(navigated), "cancelled", "a request of the new page is not the one that was started");
+  assert.equal(launchers().length, 0);
+  assert.ok(!wc.events().some((e) => e.type === "connectionavailable" || e.type === "message"));
+});
+
+test("a declined connection (request replaced mid-launch) is not wired to the page: no traffic reaches it", async () => {
+  const { manager, setDefault, launchers, pcall } = setup({}, (c) => { c.launchDelayMs = 40; });
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  const started = manager.startCasting(TV.id, { webContentsId: 5 });
+  await new Promise((r) => setTimeout(r, 15));
+  await setDefault(wc, [URL2]);
+  const route = await started;
+  const sent = wc.events().length;
+  launchers()[0]!.pushMessage(`${TV.id}-transport-1`, "urn:x-cast:com.google.youtube.mdx", "late");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(wc.events().length, sent, "no event of the declined connection reaches the page");
+  assert.equal(wc.events().filter((e) => e.type === "connectionavailable" || e.type === "message").length, 0);
+  assert.ok(manager.getRoutes().some((r) => r.id === route.id), "the route stays, as Chrome's does");
+  // and the page cannot drive it: its close is ignored
+  assert.deepEqual(await pcall(wc, "close", { connectionId: "whatever" }), { ok: true, value: undefined });
+});
+
+test("observers of a destroyed window hear the final null and are then forgotten", async () => {
+  const { manager, setDefault } = setup();
+  const wc = new FakeWebContents(5);
+  await setDefault(wc, [URL1]);
+  const seen: unknown[] = [];
+  manager.addPresentationObserver(5, { onDefaultPresentationChanged: (r) => seen.push(r) });
+  wc.destroy();
+  assert.deepEqual(seen, [null]);
+  await setDefault(new FakeWebContents(5), [URL2]);
+  assert.deepEqual(seen, [null], "an observer registered for a window that is gone is not kept for its id");
 });
 
 test("startCasting launches anew on a sink that has a route, and stops the route its window launched before", async () => {
@@ -328,16 +411,6 @@ test("startCasting launches anew on a sink that has a route, and stops the route
   assert.equal(calls.filter((c) => c === "launch 233637DE").length, 2);
   assert.ok(calls.includes(`stop ${first.id}`), "DoLaunchSession stops the frame's earlier route");
   assert.ok(!manager.getRoutes().some((r) => r.id === first.id));
-});
-
-test("a route whose connection was never announced stays a route (OnPresentationResponse records the presentation anyway)", async () => {
-  const { manager, setDefault } = setup();
-  const wc = new FakeWebContents(5);
-  await setDefault(wc, [URL1]);
-  const started = manager.startCasting(TV.id, { webContentsId: 5 });
-  await setDefault(wc, [URL2]);
-  const route = await started;
-  assert.ok(manager.getRoutes().some((r) => r.id === route.id));
 });
 
 test("the launch time limit is the URL's __castLaunchTimeout__ (CastMediaSource), not the dialog's 20 s", async () => {

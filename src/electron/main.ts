@@ -243,6 +243,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       watched.delete(wc.id);
       for (const id of subframes()) dropSubframe(id);
       presentation?.senderGone(wc.id);
+      defaults.forget(wc.id);
       senders.delete(wc.id);
       service.senderGone(wc.id);
     });
@@ -303,8 +304,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       sid: number,
       connectionId: string,
       opening: () => Promise<PresentationConnectionHandle>,
-      /** Runs once the connection exists and before any of its messages reach the page. */
-      opened?: (conn: PresentationConnectionHandle) => void,
+      /** Runs once the connection exists and before any of its messages reach the page; false declines it. */
+      opened?: (conn: PresentationConnectionHandle) => boolean,
     ): Promise<{ ok: false; code: string; description: string } | { ok: true; value: { id: string; url: string } }> => {
       if (connections.has(connectionId)) return invalid("connectionId in use");
       const slot: { conn: PresentationConnectionHandle | null; sid: number } = { conn: null, sid };
@@ -327,7 +328,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
         sendTo(sid, { type: "statechange", connectionId, state });
       };
-      opened?.(conn);
+      if (opened?.(conn) === false) {
+        // Declined (OnPresentationResponse hands a connection only to the request it answers): the session stays, but the
+        // connection belongs to nobody, so nothing of it reaches the page that has the sender id now
+        connections.delete(connectionId);
+        conn.onclose = null;
+        conn.onmessage = () => {};
+        return { ok: true as const, value: { id: conn.id, url: conn.url } };
+      }
       // The stand-in registered this connectionId before calling, so it buffers anything sent before the reply.
       conn.onmessage = (data) => sendTo(sid, { type: "message", connectionId, data });
       return { ok: true, value: { id: conn.id, url: conn.url } };
@@ -448,6 +456,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
        */
       async startDefaultPresentation(webContentsId: number, sinkId: string): Promise<MediaRoute> {
         const request = defaults.get(webContentsId);
+        const serial = defaults.serialOf(webContentsId);
         // No source for the sink (no default request, or its URLs do not suit the sink): CreateRouteParameters is null
         const unable = (why: string) => new MediaRouteError("unable_to_cast", why);
         if (request === null) throw unable("the window has no default presentation request");
@@ -465,7 +474,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         }
         if (url === null) throw unable("the sink cannot run the default presentation request's URLs");
         // the page navigated or cleared its request while the device was asked
-        if (defaults.get(webContentsId) === null) throw new MediaRouteError("cancelled", "the window's default presentation request went away");
+        if (defaults.serialOf(webContentsId) !== serial) {
+          throw new MediaRouteError("cancelled", "the window's default presentation request changed while the device was asked");
+        }
         // CastActivityManager::DoLaunchSession stops the route this frame launched before, then launches
         const earlier = launchedFrom.get(webContentsId);
         if (earlier !== undefined && routes().some((r) => r.id === earlier)) void service.terminateSession(earlier);
@@ -487,8 +498,9 @@ export function createCastManager(options: CastManagerOptions): CastManager {
           (conn) => {
             // OnPresentationResponse hands the connection to the page only while the request it answers is still the default one
             const current = defaults.get(webContentsId);
-            if (current === null || !samePresentationRequest(current, request)) return;
+            if (current === null || !samePresentationRequest(current, request)) return false;
             sendTo(webContentsId, { type: "connectionavailable", connectionId, id: conn.id, url: conn.url });
+            return true;
           },
         );
         if (!result.ok) {

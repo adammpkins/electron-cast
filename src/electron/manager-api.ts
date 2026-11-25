@@ -4,7 +4,7 @@
 // the narrow hooks used here.
 import type { CastDevice } from "../discovery/index.ts";
 import type { BridgeResult } from "../polyfill/bridge-types.ts";
-import type { DeviceSource } from "./session-service.ts";
+import { APP_AVAILABILITY_REFRESH_MS, type DeviceSource } from "./session-service.ts";
 import { parsePresentationUrl } from "./presentation-envelope.ts";
 import type { DefaultPresentationRequests, PresentationObserver, PresentationRequest } from "./default-presentation.ts";
 
@@ -264,13 +264,21 @@ export function createSinksObservers(source: DeviceSource, availability?: AppAva
       let active = true;
       // Chrome offers a sink for a presentation source only once the device has said the app is available: ask for the
       // ones not yet known and look again when the answer arrives
+      // An app that could not be answered is not asked again at every change of the list, only once its refresh threshold
+      // has passed (a device that does not answer would otherwise be retried each time anything changes)
+      const asked = new Map<string, number>();
       const ask = (): void => {
         if (urls === undefined || availability === undefined) return;
+        const now = Date.now();
         for (const d of source.devices()) {
           if ((eligible?.(d) ?? true) === false || (caps !== undefined && !capsMatch(d, caps))) continue;
           for (const url of urls) {
             const parsed = parsePresentationUrl(url);
             if (parsed === null || !capsMatch(d, parsed.capabilities) || availability.cached(d, parsed.appId) !== undefined) continue;
+            const key = `${d.id}\n${parsed.appId}`;
+            const before = asked.get(key);
+            if (before !== undefined && now - before <= APP_AVAILABILITY_REFRESH_MS) continue;
+            asked.set(key, now);
             void availability.check(d, parsed.appId).then(() => { if (active) check(); });
           }
         }
