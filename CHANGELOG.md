@@ -11,6 +11,11 @@
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
   tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
   pause and resume, hardware codecs.
+- **Mirroring adapts to encoder load as Chrome does.** Each encoded frame now carries Chrome's encoder utilization
+  (smoothed, clamped) and lossiness, estimated from the frame's pixels because WebCodecs reports no quantizer (a port of
+  `FrameComplexityEstimator`). `VideoSender` feeds the larger of the two back, and for a tab the capture size follows it
+  like Chrome's `VideoCaptureOracle`: it steps down when the encoder or the link is overloaded and back up when there is
+  room, within the limits of the resolution change policy. Screens are captured at the full size, as in Chrome.
 
 ## 0.4.0
 
