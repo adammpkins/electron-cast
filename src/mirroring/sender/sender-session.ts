@@ -31,7 +31,7 @@ export interface ConfiguredSenders {
 /** `SenderSession::Client`. */
 export interface SenderSessionClient {
   onNegotiated(session: SenderSession, senders: ConfiguredSenders, recommendations: Recommendations): void;
-  onCapabilitiesDetermined?(session: SenderSession, capabilities: ReceiverCapability): void;
+  onCapabilitiesDetermined?(session: SenderSession, capabilities: RemotingCapabilities): void;
   onError(session: SenderSession, error: SessionError): void;
 }
 
@@ -46,6 +46,39 @@ export interface SenderSessionConfig {
   timers: MessengerTimers;
   /** `use_android_rtp_hack`; true by default as in `SenderSession::Configuration`. */
   useAndroidRtpHack?: boolean;
+}
+
+/** openscreen `RemotingCapabilities`: `AudioCapability` and `VideoCapability` names as `ToCapabilities` produces them. */
+export interface RemotingCapabilities {
+  audio: ("baseline" | "aac" | "opus")[];
+  video: ("4k" | "h264" | "vp8" | "vp9" | "hevc" | "av1")[];
+}
+
+/** sender_session.cc `ToCapabilities`: the plain "video" capability is ignored (Chrome remoting does not use it). */
+export function toCapabilities(capability: ReceiverCapability): RemotingCapabilities {
+  const out: RemotingCapabilities = { audio: [], video: [] };
+  for (const c of capability.mediaCapabilities) {
+    switch (c) {
+      case "audio":
+        out.audio.push("baseline");
+        break;
+      case "aac":
+      case "opus":
+        out.audio.push(c);
+        break;
+      case "4k":
+      case "h264":
+      case "vp8":
+      case "vp9":
+      case "hevc":
+      case "av1":
+        out.video.push(c);
+        break;
+      case "video":
+        break;
+    }
+  }
+  return out;
 }
 
 /** `kSupportedRemotingVersion`. */
@@ -185,7 +218,7 @@ export class SenderSession {
       this.config.client.onError(this, new SessionError(ErrorCode.RemotingNotSupported, `Receiver is using too new of a version for remoting (${version} > ${SUPPORTED_REMOTING_VERSION})`));
       return;
     }
-    this.config.client.onCapabilitiesDetermined?.(this, caps);
+    this.config.client.onCapabilitiesDetermined?.(this, toCapabilities(caps));
   }
 
   /**

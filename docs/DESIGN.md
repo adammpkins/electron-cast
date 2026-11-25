@@ -739,7 +739,7 @@ sender policy, plus the session host, plus the routing.
 | `protocol/offer.ts` | openscreen `public/offer_messages.cc` (`Offer::ToJson`, `Stream::ToJson`, `AudioStream`, `VideoStream`), `public/sender_session.cc` (`CreateStream`) |
 | `protocol/answer.ts` | openscreen `public/answer_messages.cc` (`Answer::TryParse`, constraints, display), `public/resolution.cc`, `public/receiver_message.cc` (`ReceiverMessage::Parse`, `ReceiverCapability`) |
 | `protocol/recommendations.ts` | openscreen `public/capture_recommendations.cc` (`GetRecommendations`) |
-| `protocol/messenger.ts` | openscreen `public/session_messenger.cc` (namespaces, 4 s reply timeout, `*` destination), `sender_session.cc` (`Negotiate`, `OnAnswer`, `RequestCapabilities`) |
+| `protocol/messenger.ts` | openscreen `public/session_messenger.cc` (namespaces, 4 s reply timeout, `*` destination), `sender_session.cc` (`Negotiate`, `OnAnswer`, `RequestCapabilities`, `OnCapabilitiesResponse`, `ToCapabilities`) |
 | `rtp/packetizer.ts` | openscreen `impl/rtp_packetizer.cc` |
 | `rtp/frame-crypto.ts` | openscreen `impl/frame_crypto.cc` |
 | `rtcp/ntp.ts`, `rtcp/sender-report.ts` | openscreen `impl/ntp_time.cc`, `impl/sender_report_builder.cc`, `impl/rtcp_common.cc` |
@@ -817,6 +817,60 @@ Chrome offers H.264 only through hardware encoders and its HEVC and AV1 features
 cannot tell us whether an encoder is hardware. The order of offered codecs is `kSupportedVideoCodecs` (HEVC, AV1, VP9,
 H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bundled.
 
+### Media remoting: capabilities only, the renderer side is not reachable
+
+Chrome's remoting is started by the renderer, not by the Mirroring Service. In a mirrored tab, `media::remoting::RendererController`
+(created in `content/renderer/media/media_factory.cc`, `MediaFactory::CreateRendererFactorySelector`, under
+`BUILDFLAG(ENABLE_MEDIA_REMOTING)`) calls `GetRemoterFactory()->Create(RemotingSource, Remoter)`, a request on the
+frame's browser interface broker. The embedder answers it through
+`ContentBrowserClient::CreateMediaRemoter(RenderFrameHost*, PendingRemote<RemotingSource>, PendingReceiver<Remoter>)`
+(`content/public/browser/content_browser_client.h`); Chrome implements it in
+`ChromeContentBrowserClient::CreateMediaRemoter` (`chrome/browser/chrome_content_browser_client.cc`), which hands the
+pipes to `CastRemotingConnector::Get(web_contents)` (`chrome/browser/media/cast_remoting_connector.cc`) through
+`RemotingBridge`. The connector reaches the Mirroring Service's `MediaRemoter`, which uses `OpenscreenSessionHost`
+(`StartRemoting`, `NegotiateRemoting`, `CreateRemotingDataStreamSender`, `StopRemoting`).
+
+Status in Electron (checked 2026-11-25 against `electron/electron@main`):
+
+- The renderer half is built in: `enable_media_remoting = !is_cast_media_device && !is_ios` in `media/media_options.gni`,
+  and Electron's `build/args/*.gn` do not turn it off. So an Electron renderer does create a `RendererController` and
+  asks for a `RemoterFactory`.
+- The browser half is missing. `ElectronBrowserClient` (`shell/browser/electron_browser_client.{h,cc}`) does not
+  override `CreateMediaRemoter`; the content default is an empty function, so the request is dropped and the
+  `RendererController` never sees `OnSinkAvailable`. Electron's only `CastRemotingConnector` reference is in the
+  exclusive-access patch (`patches/chromium/fix_adapt_exclusive_access_for_electron_needs.patch`), which turns the `DidAcquireFullscreen` calls into `#if 0`.
+- There is no JavaScript API for any of it: `RemoterFactory`, `Remoter`, `RemotingSource` and
+  `RemotingDataStreamSender` (`media/mojo/mojom/remoting.mojom`) are Mojo interfaces bound inside the browser process,
+  and the data path is a Mojo data pipe carrying demuxed `DecoderBuffer`s. The sender runs in a utility process here
+  and nothing exposes these to Node.
+
+So remoting cannot be built in this library without a change in Electron, and it is not faked. What is ported is
+the part that does not need the renderer: after the first negotiated OFFER the host sends `GET_CAPABILITIES` once
+(`OpenscreenSessionHost::OnNegotiated`, "We should only request capabilities once"), parses the
+`CAPABILITIES_RESPONSE`, rejects a receiver whose `remoting` version is above 2 (`kSupportedRemotingVersion`; absent
+means 1), maps the media capabilities as `ToCapabilities` does (`audio` is `baseline`, `video` is ignored) and keeps
+the result in `OpenscreenSessionHost.receiverCapabilities`. A missing, errored or too-new response is logged ("Remoting
+is disabled for this session") and the session continues, as in `OnError` for `kRemotingNotSupported`. In Chrome the
+result feeds `ToRemotingSinkMetadata` and then the `MediaRemoter`; here nothing reads it yet. (Earlier text said Chrome
+sends `GET_CAPABILITIES` only for remoting; it sends it for every non-Remote-Playback mirroring session, so a real
+receiver now gets one extra request.)
+
+What Electron would need, for the remoting RFC:
+
+1. An embedder hook that forwards `ContentBrowserClient::CreateMediaRemoter` (render frame host, `RemotingSource`
+   remote, `Remoter` receiver) to the application, per frame, honouring the `IsActive()` and fenced-frame checks of
+   Chrome's implementation, and a way to tie it to an existing cast route for that `WebContents`.
+2. A JS-visible binding of the four interfaces, or a narrower message API: `RemotingSource.OnSinkAvailable(metadata)`
+   / `OnSinkGone`, `OnStarted` / `OnStartFailed(reason)` / `OnStopped(reason)`, `OnMessageFromSink(bytes)`;
+   `Remoter.Start`, `Stop(reason)`, `SendMessageToSink(bytes)`, `StartDataStreams(audio_pipe, video_pipe, ...)`; and
+   `RemotingDataStreamSender.SendFrame(DecoderBuffer)` / `CancelInFlightData`. The serialized RPC messages are the
+   protobufs in `media/remoting/proto`, and the pipes carry encoded frames, so a binding must expose the data pipe
+   consumer (for example as a `ReadableStream`) to the utility process that owns the RTP senders.
+3. Once those exist, the library side is: a remoting OFFER (`castMode: "remoting"`, `CreateRemotingOffer`), the RPC
+   dispatcher on `urn:x-cast:com.google.cast.remoting` (`messenger.ts` already routes that namespace and
+   `SenderSessionMessenger.sendRpcMessage` exists), a `RemotingSender` that pumps pipe data into the frame senders,
+   and the return to mirroring (`StopRemoting`, `StopRemotingAndMaybeResumeMirroring`).
+
 ### Not checked, or different from Chromium
 
 - The fake receiver in `test/mirroring/` is ours: it implements what openscreen's receiver does for the parts we send
@@ -824,9 +878,9 @@ H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bun
   with the live harness in `examples/live-mirroring/`) tab mirroring ran at 1080p30 with Opus and VP8 in software, the
   picture smooth and the audio in sync and only on the TV; desktop mirroring sent picture and system audio, with local
   audio kept on Windows as Chrome keeps it there. Linux and macOS have not been tried.
-- Not ported: Remoting (RPC playback), tab switching (`DidGetTabSourceId`), pause and resume, the stats analyzer and
-  UMA, the GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
-  letterboxing, `GET_CAPABILITIES` (Chrome sends it only for remoting).
+- Not ported: Remoting (RPC playback; see "Media remoting" below), tab switching (`DidGetTabSourceId`), pause and
+  resume, the stats analyzer and UMA, the GPU/hardware encoder denylist and re-offer after an encoder failure (an
+  encoder failure stops the session), letterboxing.
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the
   session's, which reads as swapped for a message from the receiver; `MirroringActivity` here takes the transport as
   the source and the sender's id (or `*`) as the destination.

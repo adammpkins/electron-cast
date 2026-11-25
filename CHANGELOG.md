@@ -120,8 +120,11 @@ is frozen and behaves as before for pages; it shares the device list.
   desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,
   and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
   software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
-  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting, tab switching and
-  the pause and resume UI, re-offering when the encoder changes, session stats, hardware codecs.
+  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
+  for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)), tab
+  switching and the pause and resume UI, re-offering when the encoder changes, session stats, hardware codecs. Like
+  Chrome, a mirroring session sends `GET_CAPABILITIES` once after the first negotiation and keeps the receiver's
+  remoting capabilities.
 - **Devices can be added by address, as Chrome's access code casting adds the device a code resolves to.**
   `manager.addSinkByAddress({ id, name, capabilities, ipV4Address, port })` opens a channel to a device the app knows the
   address of, lists it like a discovered one (the picker, availability for pages, the sinks observers) and remembers it,

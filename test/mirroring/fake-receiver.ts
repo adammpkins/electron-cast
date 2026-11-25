@@ -27,6 +27,8 @@ export interface FakeReceiverOptions {
   verifyBody?: boolean;
   /** Stop answering feedback (to test the sender with a silent receiver). */
   silent?: boolean;
+  /** Build the CAPABILITIES_RESPONSE body instead of the default, or send no reply when `null`. */
+  capabilitiesResponse?: ((seqNum: unknown) => Record<string, unknown>) | null;
   /** Run on a virtual clock and in-memory network instead of the wall clock and a UDP socket (virtual-time.ts). */
   net?: ReceiverNet;
 }
@@ -118,6 +120,7 @@ export class FakeReceiver {
   /** Decrypted video frames, in completion order (kept only if `keepFrames`). */
   readonly decodedVideo: { frameId: number; data: Buffer }[] = [];
   keepFrames = false;
+  capabilityRequests = 0;
   /** Called with every control message (JSON text) the receiver sends back. */
   sendControl: (json: string) => void = () => {};
   private readonly opts: Required<Pick<FakeReceiverOptions, "lossRate" | "playoutDelayMs">> & FakeReceiverOptions;
@@ -190,7 +193,9 @@ export class FakeReceiver {
         this.onOffer(message);
         break;
       case "GET_CAPABILITIES":
-        this.sendControl(JSON.stringify({ type: "CAPABILITIES_RESPONSE", seqNum: message.seqNum, result: "ok", capabilities: { remoting: 2, mediaCaps: ["audio", "opus", "video", "vp8"] } }));
+        this.capabilityRequests++;
+        if (this.opts.capabilitiesResponse === null) break;
+        this.sendControl(JSON.stringify((this.opts.capabilitiesResponse?.(message.seqNum) ?? { type: "CAPABILITIES_RESPONSE", seqNum: message.seqNum, result: "ok", capabilities: { remoting: 2, mediaCaps: ["audio", "opus", "video", "vp8"] } })));
         break;
       default:
         break;

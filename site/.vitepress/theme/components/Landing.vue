@@ -221,6 +221,7 @@ const tabs = [
             <h3>Not done</h3>
             <ul>
               <li>The Remote Playback API (needs support inside Electron)</li>
+              <li>Remoting while mirroring (needs a hook inside Electron)</li>
               <li>Turning an access code into an address (a private Google service; the app supplies the address)</li>
             </ul>
           </div>

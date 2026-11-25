@@ -18,7 +18,7 @@ import type { Recommendations } from "./protocol/recommendations.ts";
 import { AudioSender } from "./sender/audio-sender.ts";
 import { FrameSender } from "./sender/frame-sender.ts";
 import { type SenderPacketRouter } from "./sender/packet-router.ts";
-import { SenderSession, type ConfiguredSenders, type SenderSessionClient, type SessionEnvironment } from "./sender/sender-session.ts";
+import { SenderSession, type ConfiguredSenders, type SenderSessionClient, type RemotingCapabilities, type SessionEnvironment } from "./sender/sender-session.ts";
 import type { Sender } from "./sender/sender.ts";
 import { VideoSender, type VideoEncoderPort } from "./sender/video-sender.ts";
 
@@ -115,6 +115,8 @@ export class OpenscreenSessionHost implements SenderSessionClient {
   private cancelRefreshTimer: (() => void) | undefined;
   private expectingARefreshFrame = false;
   private videoCaptureStarted = false;
+  private initiallyStarted = false;
+  private capabilities: RemotingCapabilities | undefined;
 
   constructor(params: SessionParameters, deps: SessionHostDeps) {
     this.params = params;
@@ -238,7 +240,12 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       this.videoSenderCore = senders.videoSender;
       this.createVideoPipeline(senders.videoSender, videoConfig);
     }
-    this.deps.observer.didStart?.();
+    if (!this.initiallyStarted) {
+      this.initiallyStarted = true;
+      // Requested once, as in Chrome: a receiver does not change its remoting capabilities during a session.
+      this.session.requestCapabilities();
+      this.deps.observer.didStart?.();
+    }
     this.deps.observer.logInfo?.(
       `negotiated a new mirroring session. audio codec=${audioConfig?.audioCodec ?? "none"}, video codec=${videoConfig?.videoCodec ?? "none"} (${videoConfig ? (videoConfig.useHardwareEncoder ? "hardware" : "software") : "n/a"})`,
     );
@@ -306,6 +313,20 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     if (!this.tryResumeCapturingVideo()) this.startCapturingVideo();
   }
 
+  /**
+   * `OnCapabilitiesDetermined`. Chrome builds its MediaRemoter from these; this library has no remoter (see DESIGN.md),
+   * so they are kept for `receiverCapabilities`.
+   */
+  onCapabilitiesDetermined(_session: SenderSession, capabilities: RemotingCapabilities): void {
+    if (this.state === "stopped") return;
+    this.capabilities = capabilities;
+  }
+
+  /** What the receiver reported in CAPABILITIES_RESPONSE; undefined until then, or when it sent none or an error. */
+  get receiverCapabilities(): RemotingCapabilities | undefined {
+    return this.capabilities;
+  }
+
   /** `OnError`. */
   onError(_session: SenderSession, error: SessionError): void {
     switch (error.code) {
@@ -319,7 +340,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
         this.reportAndLogError("ANSWER_NO_AUDIO_OR_VIDEO", error.message);
         return;
       case ErrorCode.RemotingNotSupported:
-        // Only meaningful for remoting, which is not offered: the session continues.
+        // The session continues without a media remoter (a failed remoting OFFER is not possible here).
         this.deps.observer.logInfo?.(`Remoting is disabled for this session. error=${error.message}`);
         return;
       default:
