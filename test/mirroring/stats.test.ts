@@ -278,6 +278,44 @@ test("the dispatcher does nothing without a collector and otherwise logs enqueue
   assert.deepEqual([packets[0]!.type, packets[0]!.packetId, packets[0]!.timestamp, packets[0]!.receivedTimestamp], ["packetReceived", 2, 7, env.now()]);
 });
 
+test("E2E latency joins the dispatcher's capture begin time to the receiver's FRAME_PLAYOUT", () => {
+  const { analyzer, client, setNow, collector } = analyzerSetup(10_000);
+  let now = 10_000;
+  const dispatcher = new StatisticsDispatcher({ now: () => now, statisticsCollector: collector });
+  const at = (t: number) => { now = t; setNow(t); };
+  // The receiver clock is 1000 ms ahead and the network takes 10 ms each way, as in addFrame. The frame is captured at
+  // `t` and enqueued 15 ms later, so E2E is counted from its captureBeginTimeMs, not from the enqueue.
+  const send = (rtp: number, t: number) => {
+    at(t + 15);
+    dispatcher.dispatchEnqueueEvents("video", {
+      rtpTimestamp: rtp, frameId: 1, data: new Uint8Array(1000), dependency: "key", captureBeginTimeMs: t, captureEndTimeMs: t + 5,
+    } as never);
+    collector.collectPacketEvent(packetEvent("packetSentToNetwork", rtp, t + 20, { size: 1200 }));
+    at(t + 50);
+    dispatcher.dispatchAckEvent("video", rtp, 1);
+    dispatcher.dispatchFrameLogMessages("video", [{
+      rtpTimestamp: rtp,
+      messages: [
+        { type: "packetReceived", timestamp: t + 1030, packetId: 0, delay: 0 },
+        { type: "frameAckSent", timestamp: t + 1040, packetId: 0, delay: 0 },
+        { type: "framePlayedOut", timestamp: t + 1100, packetId: 0, delay: 0 },
+      ],
+    }]);
+  };
+
+  // The first frame gives the clock offset estimator its two bounds; the second is placed on the sender clock.
+  send(1000, 10_100);
+  analyzer.analyzeStatistics();
+  assert.deepEqual(client.getStats().video!.E2E_LATENCY_MS_HISTO, []);
+  send(2000, 10_600);
+  analyzer.analyzeStatistics();
+  const video = client.getStats().video!;
+  assert.equal(video.AVG_CAPTURE_LATENCY_MS, 5);
+  assert.equal(video.AVG_E2E_LATENCY_MS, 100);
+  assert.deepEqual(video.E2E_LATENCY_MS_HISTO, [{ "100-119": 1 }]);
+  analyzer.dispose();
+});
+
 test("the RTCP parser reads the receiver's event log: base time from the session start, signed delays, unknown types skipped", () => {
   const ntp = new NtpTimeConverter(1000, 1_700_000_000);
   const logs: RtcpReceiverFrameLogMessage[][] = [];

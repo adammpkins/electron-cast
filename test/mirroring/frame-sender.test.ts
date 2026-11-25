@@ -273,3 +273,30 @@ test("AudioSender sets the max frame rate from samples per frame, counts partial
   assert.equal(as.framesDropped, 1);
   assert.deepEqual([...as.dropReasons], [["kTooManyFramesInFlight", 1]]);
 });
+
+test("a dropped frame is described once a second with the figures behind the decision", () => {
+  const sender = new FakeSender();
+  sender.inFlightFrameCount = 120;
+  let now = 0;
+  const lines: string[] = [];
+  const fs = new FrameSender({ maxFrameRate: 30, isAudio: false, minPlayoutDelayMs: 200, maxPlayoutDelayMs: 400 }, sender, client(), 200, () => now);
+  fs.onDropLog = (m) => lines.push(m);
+  assert.equal(fs.shouldDropNextFrame(33, 3000), "kTooManyFramesInFlight");
+  now = 400;
+  assert.equal(fs.shouldDropNextFrame(33, 6000), "kTooManyFramesInFlight");
+  assert.equal(lines.length, 1, "rate limited");
+  now = 1500;
+  fs.shouldDropNextFrame(33, 9000);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0]!, /^video frame dropped \(kTooManyFramesInFlight\):.*limit 100 ms.*unacked 120/);
+  assert.match(lines[1]!, /1 more drops since the last line/);
+});
+
+test("the capture begin and end times travel with the frame into the sender", () => {
+  const { sender, fs } = make();
+  fs.enqueueFrame(frame(0, { captureBeginTimeMs: 100, captureEndTimeMs: 104 }));
+  fs.enqueueFrame(frame(1));
+  assert.equal(sender.enqueued[0]!.captureBeginTimeMs, 100);
+  assert.equal(sender.enqueued[0]!.captureEndTimeMs, 104);
+  assert.equal("captureBeginTimeMs" in sender.enqueued[1]!, false);
+});

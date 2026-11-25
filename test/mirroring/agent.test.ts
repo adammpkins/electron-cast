@@ -12,11 +12,15 @@ import type { AgentPort, AgentToEngine, EngineToAgent } from "../../src/mirrorin
  */
 
 interface FakeFrame {
+  metadata?: () => { captureTime?: number };
   timestamp: number; displayWidth: number; displayHeight: number; closed: boolean; close(): void; clone(): FakeFrame;
   format?: string; visibleRect?: { width: number; height: number }; duration?: number | null;
   allocationSize?(): number; copyTo?(destination: Uint8Array): Promise<{ offset: number; stride: number }[]>;
 }
-interface FrameOptions { width?: number; height?: number; format?: string; duration?: number | null; luma?: (x: number, y: number) => number }
+interface FrameOptions {
+  /** How long after the previous capture this one arrives (default 33 ms); `captureTime` is its metadata capture time. */
+  gapMs?: number; captureTime?: number;
+  width?: number; height?: number; format?: string; duration?: number | null; luma?: (x: number, y: number) => number }
 const frame = (timestamp: number, o: FrameOptions = {}): FakeFrame => {
   const width = o.width ?? 640, height = o.height ?? 360;
   const f: FakeFrame = {
@@ -98,9 +102,10 @@ function startAgent() {
     sent, encoders, settle, tracks, requests, refuse, supportChecks, userMedia, control,
     advance: (ms: number) => { now += ms; },
     command: async (m: EngineToAgent) => { await (port.onmessage as (e: { data: unknown }) => Promise<void>)({ data: m }); await settle(); },
-    capture: async (ts: number, options?: FrameOptions) => {
-      now += 33;
+    capture: async (ts: number, options: FrameOptions = {}) => {
+      now += options.gapMs ?? 33;
       const f = frame(ts, options);
+      if (options.captureTime !== undefined) { const captureTime = options.captureTime; f.metadata = () => ({ captureTime }); }
       const track = tracks.at(-1)!;
       const w = track.waiters.shift();
       if (w) w({ value: f, done: false }); else track.queued.push(f);
@@ -519,7 +524,9 @@ test("agent: the frame complexity estimate is the entropy of luma differences ov
 
 test("agent: a uniform frame has no complexity, an unexaminable format reports none, and the frame duration follows GetFrameDuration", async () => {
   const a = startAgent();
-  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  // 120 fps, so that the capture limiter (SmoothEventSampler) keeps a frame 10 ms after the last; the duration's clamp
+  // does not depend on the rate.
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 120, resolutionChangePolicy: "fixed_resolution" as const } });
   await a.capture(0, { luma: () => 77, duration: 20_000 });        // own duration 20 ms
   await a.capture(500_000, { format: "BGRA" });                    // RGB frames are not examined; no duration: clamped to 1/24 s
   await a.capture(510_000, { format: "NV12", luma: () => 5 });     // 10 ms since the last, clamped up to 1/60 s
@@ -553,4 +560,76 @@ test("agent: the engine's capture size sets the size the encoder is configured f
   await a.capture(99_000, { width: 1280, height: 720 });
   await a.command({ t: "encode", rtp: a.rtps()[3]! });
   assert.deepEqual(sizes(), ["1280x720", "640x360", "720x1280", "1280x720"]);
+});
+
+test("agent: the rate limit goes by capture time, so frames that arrive bunched after a stall are kept", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  await a.capture(0);
+  await a.capture(33_333, { gapMs: 5 }); // delivered 5 ms after the first, captured 33 ms after it
+  await a.capture(66_667, { gapMs: 5 });
+  await a.capture(70_000, { gapMs: 33 }); // a 3 ms capture interval: too soon, dropped
+  const frames = a.sent.filter((m) => m.t === "frame") as { rtp: number; refMs: number }[];
+  assert.equal(frames.length, 3);
+  assert.deepEqual(frames.map((x) => x.rtp), [90_000, 93_000, 96_000]);
+  assert.ok(frames[1]!.refMs > frames[0]!.refMs && frames[2]!.refMs > frames[1]!.refMs, "reference times increase");
+});
+
+test("agent: capture statistics are reported every five seconds", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  for (let i = 0; i < 40; i++) await a.capture(i * 133_333, { gapMs: 133 });
+  const logs = a.sent.filter((m) => m.t === "log") as { message: string }[];
+  assert.ok(logs.length >= 1);
+  assert.match(logs[0]!.message, /^capture: [\d.]+ fps delivered, [\d.]+ fps kept, 0 dropped by the rate limit; capture interval p50 133\.3 ms/);
+});
+
+test("agent: frames are stamped with the capture time from the frame metadata when the source gives one", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  await a.capture(0, { gapMs: 33, captureTime: 1000 }); // read at 1033, captured at 1000
+  await a.capture(33_333, { gapMs: 33, captureTime: 1033.3 });
+  const frames = a.sent.filter((m) => m.t === "frame") as { refMs: number }[];
+  assert.equal(frames[0]!.refMs, 1000);
+  assert.ok(Math.abs(frames[1]!.refMs - 1033.3) < 1e-6);
+});
+
+test("port backend: the capture begin and end times of a frame reach the encoded frame (FRAME_CAPTURE_BEGIN / FRAME_CAPTURE_END)", () => {
+  const port = new FakePort();
+  const backend = new PortBackend(port, { kind: "tab", mediaSourceId: "x" });
+  const base = performance.timeOrigin;
+  const seen: { begin: number | undefined; end: number | undefined }[] = [];
+  const encoder = backend.createVideoEncoder(
+    { maxFrameRate: 30, startBitrate: 1e6, codecParameter: "vp8", videoCodec: "vp8" } as never,
+    { onEncoded: (_ref, f) => seen.push({ begin: f?.captureBeginTimeMs, end: f?.captureEndTimeMs }), onStatus() {} },
+  );
+  backend.startVideoCapture({} as never, {
+    insertVideoFrame: (f) => { encoder.encodeVideoFrame(f, f.referenceTimeMs!); },
+    onCaptureError() {},
+  });
+  port.emit({ t: "frame", rtp: 90_000, refMs: base + 1000, width: 640, height: 360, captureBeginMs: base + 1000, captureEndMs: base + 1004 });
+  port.emit({ t: "video-chunk", rtp: 90_000, key: true, data: new ArrayBuffer(3), encodeMs: 1 });
+  port.emit({ t: "frame", rtp: 93_000, refMs: base + 1033, width: 640, height: 360 });
+  port.emit({ t: "video-chunk", rtp: 93_000, key: false, data: new ArrayBuffer(3), encodeMs: 1 });
+  assert.deepEqual(seen, [{ begin: 1000, end: 1004 }, { begin: undefined, end: undefined }]);
+});
+
+test("agent: a source that paints at 60 Hz is thinned to the target rate", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  for (let i = 0; i < 120; i++) await a.capture(Math.round(i * 16_667));
+  const kept = a.sent.filter((m) => m.t === "frame").length;
+  assert.ok(kept >= 59 && kept <= 62, `kept ${kept} of 120 frames at 60 Hz`);
+});
+
+test("agent: pairs of frames 17 ms apart with 90 ms gaps are all kept (Chrome's SmoothEventSampler token bucket)", async () => {
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 640, height: 360, frameRate: 30, resolutionChangePolicy: "fixed_resolution" as const } });
+  let t = 0;
+  for (let burst = 0; burst < 40; burst++) {
+    await a.capture(Math.round(t * 1000));
+    await a.capture(Math.round((t + 16.7) * 1000));
+    t += 16.7 + 90;
+  }
+  assert.equal(a.sent.filter((m) => m.t === "frame").length, 80);
 });

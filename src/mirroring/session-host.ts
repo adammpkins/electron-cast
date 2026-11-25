@@ -189,6 +189,10 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     return this.videoSender?.encoderBitrate ?? 0;
   }
 
+  get audio(): AudioSender | undefined {
+    return this.audioSender;
+  }
+
   get video(): VideoSender | undefined {
     return this.videoSender;
   }
@@ -279,10 +283,12 @@ export class OpenscreenSessionHost implements SenderSessionClient {
 
     if (senders.audioSender !== undefined && audioConfig !== undefined) {
       this.audioSenderCore = senders.audioSender;
+      senders.audioSender.debugLog = (message) => this.deps.observer.logInfo?.(message);
       this.createAudioPipeline(senders.audioSender, audioConfig);
     }
     if (senders.videoSender !== undefined && videoConfig !== undefined) {
       this.videoSenderCore = senders.videoSender;
+      senders.videoSender.debugLog = (message) => this.deps.observer.logInfo?.(message);
       this.createVideoPipeline(senders.videoSender, videoConfig);
     }
     if (!this.initiallyStarted) {
@@ -311,6 +317,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       () => this.deps.environment.now(),
     );
     audioSender = new AudioSender(frameSender, config.rtpTimebase, encoder.samplesPerFrame);
+    frameSender.onDropLog = (message) => this.deps.observer.logInfo?.(message);
     this.audioFrameSender = frameSender;
     this.audioSender = audioSender;
     // StartCapturingAudio: the capture asks the sender whether a buffer may be encoded.
@@ -347,6 +354,7 @@ export class OpenscreenSessionHost implements SenderSessionClient {
       (delay) => this.setTargetPlayoutDelay(delay),
       (utilization) => this.deps.backend.processFeedback(utilization),
     );
+    frameSender.onDropLog = (message) => this.deps.observer.logInfo?.(message);
     this.videoFrameSender = frameSender;
     this.videoSender = videoSender;
     this.activeVideoConfig = config;

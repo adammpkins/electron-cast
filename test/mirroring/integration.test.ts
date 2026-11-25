@@ -101,3 +101,54 @@ test("an audio-only session offers just Opus", async () => {
     h.close();
   }
 });
+
+// A receiver that answers every 20 ms or so over a 30 ms and an 80 ms round trip: the in-flight limits (sender.cc
+// GetMaxInFlightMediaDuration: 2 x RTT between 81.7 ms and two thirds of the target delay for video, the whole target
+// delay for audio) must never trigger on a lossless link.
+for (const oneWayDelayMs of [15, 40]) {
+  test(`no frame is dropped on a lossless link with a ${oneWayDelayMs * 2} ms round trip`, async () => {
+    const h = await startVirtualHarness({ oneWayDelayMs });
+    try {
+      await h.clock.advance(20_000);
+      assert.deepEqual(h.errors, []);
+      assert.ok(h.host.video!.framesInserted >= 590);
+      assert.deepEqual([...h.host.video!.dropReasons], []);
+      assert.deepEqual([...h.host.audio!.dropReasons], []);
+    } finally {
+      h.close();
+    }
+  });
+}
+
+test("2% packet loss on a 30 ms link costs a few video frames to the in-flight limit, as in Chrome, and no audio", async () => {
+  // A lost packet keeps its frame unacknowledged for a NACK round (receiver cadence plus a round trip), long enough
+  // for the next frame to find more than the 81.7 ms floor in flight. The limit and its arithmetic are Chromium's.
+  let seed = 12345;
+  const random = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296;
+  const h = await startVirtualHarness({ oneWayDelayMs: 15, receiver: { lossRate: 0.02, random } });
+  try {
+    await h.clock.advance(20_000);
+    const v = h.host.video!;
+    assert.deepEqual(h.errors, []);
+    const dropped = v.framesDroppedBeforeEncoding + v.framesDroppedAfterEncoding;
+    assert.ok(dropped > 0 && dropped < 0.1 * v.framesInserted, `dropped ${dropped} of ${v.framesInserted}`);
+    assert.deepEqual([...v.dropReasons.keys()], ["kInFlightDurationTooHigh"]);
+    assert.equal(h.host.audio!.framesDropped, 0);
+  } finally {
+    h.close();
+  }
+});
+
+test("each stream logs how its feedback arrives every five seconds", async () => {
+  const h = await startVirtualHarness({ oneWayDelayMs: 15 });
+  try {
+    await h.clock.advance(12_000);
+    for (const kind of ["audio", "video"]) {
+      const lines = h.logs.filter((l) => l.startsWith(`${kind} feedback:`));
+      assert.ok(lines.length >= 2, `${kind}: ${lines.length} lines`);
+      assert.match(lines[0]!, /packets\/s \(mean gap [\d.]+ ms, max [\d.]+ ms\), [\d.]+ frames acked\/s \(capture to enqueue: mean [\d.]+ ms, max [\d.]+ ms; capture to ack: mean [\d.]+ ms, max [\d.]+ ms; enqueue to first packet out: mean [\d.]+ ms, max [\d.]+ ms; enqueue to ack: mean [\d.]+ ms, max [\d.]+ ms\), rtt 3\d(\.\d)? ms/);
+    }
+  } finally {
+    h.close();
+  }
+});

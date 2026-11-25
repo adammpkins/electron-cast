@@ -57,8 +57,11 @@ export type EngineToAgent =
 export type AgentToEngine =
   | { t: "ready" }
   | { t: "error"; where: "video" | "audio" | "encoder"; message: string }
-  /** `refresh` is set for a frame that repeats the last one (`RequestRefreshFrame`), which is no new content. */
-  | { t: "frame"; rtp: number; refMs: number; width: number; height: number; refresh?: boolean }
+  /**
+   * `refresh` is set for a frame that repeats the last one (`RequestRefreshFrame`), which is no new content.
+   * `captureBeginMs` / `captureEndMs` are epoch times: when capture began (frame metadata) and when the frame was read.
+   */
+  | { t: "frame"; rtp: number; refMs: number; width: number; height: number; refresh?: boolean; captureBeginMs?: number; captureEndMs?: number }
   /**
    * `complexity` is the frame complexity estimate in [0, 1] (absent when the frame could not be examined) and
    * `durationMs` the frame's duration, which lossiness is measured over.
@@ -67,6 +70,8 @@ export type AgentToEngine =
   /** The frame never produced a chunk (encoder queue full, evicted, unsupported, or swallowed by the encoder). */
   | { t: "video-drop"; rtp: number }
   | { t: "audio-drop"; seq: number }
+  /** A line for the engine's log (capture statistics). */
+  | { t: "log"; message: string }
   | { t: "audio-buffer"; seq: number; frames: number; recMs: number }
   | { t: "audio-chunk"; seq: number; data: ArrayBuffer }
   | { t: "encoder-status"; kind: "video" | "audio"; status: "initialized" | "unsupported_codec" | "codec_init_failed" | "codec_runtime_error"; message?: string };

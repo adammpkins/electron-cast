@@ -52,7 +52,7 @@ export interface SenderEncodedFrame {
   /** -1 when not computed. */
   encoderUtilization: number;
   lossiness?: number;
-  /** `capture_begin_time` / `capture_end_time`: absent when the capture source does not provide them. */
+  /** `SenderEncodedFrame::capture_begin_time` / `capture_end_time`: absent when the capture source does not provide them. */
   captureBeginTimeMs?: number;
   captureEndTimeMs?: number;
 }
@@ -63,6 +63,8 @@ export interface SenderView {
   readonly nextFrameId: number;
   readonly needsKeyFrame: boolean;
   readonly currentRoundTripTimeMs: number;
+  /** Highest frame id the receiver acknowledged in order (`checkpoint_frame_id_`); for the drop log only. */
+  readonly checkpoint?: number;
   getInFlightMediaDuration(nextFrameRtpTimestamp: number): number;
   getMaxInFlightMediaDuration(): number;
   /** Absent on a read-only snapshot used before encoding. */
@@ -105,6 +107,10 @@ export class FrameSender implements SenderObserver {
   /** `frame_rtp_timestamps_`: indexed by the low 8 bits of the frame id. */
   private readonly frameRtpTimestamps = new Array<number | undefined>(256).fill(undefined);
   private readonly now: () => number;
+  /** Receives a description of a dropped frame, at most one per second per sender (the rest are counted). */
+  onDropLog: ((message: string) => void) | undefined;
+  private lastDropLogAt = Number.NEGATIVE_INFINITY;
+  private suppressedDropLogs = 0;
 
   constructor(config: FrameSenderConfig, sender: SenderView, client: FrameSenderClient, targetPlayoutDelayMs: number, now: () => number) {
     this.isAudio = config.isAudio;
@@ -215,7 +221,9 @@ export class FrameSender implements SenderObserver {
       this.sendTargetPlayoutDelay = false;
       this.frameRtpTimestamps[frame.frameId & 0xff] = frame.rtpTimestamp;
     }
-    return toFrameDropReason(result);
+    const reason = toFrameDropReason(result);
+    if (reason !== "kNotDropped") this.logDrop(reason, undefined);
+    return reason;
   }
 
   /** `ReportFrameDroppedByEncoder`: the dropped frame had no id, so the one it would have been given is reported. */
@@ -230,20 +238,56 @@ export class FrameSender implements SenderObserver {
     return undefined;
   }
 
+  /** Debug aid, not in Chromium: what the in-flight limits looked like when a frame was dropped. */
+  private logDrop(reason: FrameDropReason, wouldBeInFlightMs: number | undefined): void {
+    if (this.onDropLog === undefined) return;
+    const t = this.now();
+    if (t - this.lastDropLogAt < 1000) {
+      this.suppressedDropLogs++;
+      return;
+    }
+    const skipped = this.suppressedDropLogs;
+    this.suppressedDropLogs = 0;
+    this.lastDropLogAt = t;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    this.onDropLog(
+      `${this.isAudio ? "audio" : "video"} frame dropped (${reason}): ` +
+        `would-be in flight ${wouldBeInFlightMs === undefined ? "n/a" : r(wouldBeInFlightMs)} ms, limit ${r(this.sender.getMaxInFlightMediaDuration())} ms, ` +
+        `encoder backlog ${r(this.client.getEncoderBacklogDuration())} ms (${this.client.getNumberOfFramesInEncoder()} frames), ` +
+        `unacked ${this.unacknowledgedFrameCount}, rtt ${r(this.sender.currentRoundTripTimeMs)} ms, target delay ${this.targetPlayoutDelayMs} ms, ` +
+        `oldest unacked ${(this.sender.checkpoint ?? this.lastAckedFrameId) + 1}, last enqueued ${this.lastEnqueuedFrameId}, last acked ${this.lastAckedFrameId}, ` +
+        `checkpoint ${this.sender.checkpoint ?? "n/a"}${skipped > 0 ? `, ${skipped} more drops since the last line` : ""}`,
+    );
+  }
+
   /** `ShouldDropNextFrame`. */
   shouldDropNextFrame(frameDurationMs: number, nextFrameRtpTimestamp: number | undefined): FrameDropReason {
+    const reason = this.decideDrop(frameDurationMs, nextFrameRtpTimestamp);
+    return reason;
+  }
+
+  private decideDrop(frameDurationMs: number, nextFrameRtpTimestamp: number | undefined): FrameDropReason {
     const countFramesInFlight = this.unacknowledgedFrameCount + this.client.getNumberOfFramesInEncoder();
-    if (countFramesInFlight >= MAX_UNACKED_FRAMES) return "kTooManyFramesInFlight";
+    if (countFramesInFlight >= MAX_UNACKED_FRAMES) {
+      this.logDrop("kTooManyFramesInFlight", undefined);
+      return "kTooManyFramesInFlight";
+    }
 
     const durationInFlight = this.getInFlightMediaDuration();
     const maxFramesInFlight = (this.maxFrameRate * durationInFlight) / 1000;
-    if (countFramesInFlight >= maxFramesInFlight + MAX_FRAME_BURST) return "kBurstThresholdExceeded";
+    if (countFramesInFlight >= maxFramesInFlight + MAX_FRAME_BURST) {
+      this.logDrop("kBurstThresholdExceeded", durationInFlight);
+      return "kBurstThresholdExceeded";
+    }
 
     // Frames still in the encoder are unknown to the sender, which caps each step and would undercount them.
     const useSenderDuration =
       nextFrameRtpTimestamp !== undefined && this.unacknowledgedFrameCount > 0 && this.client.getNumberOfFramesInEncoder() === 0;
     const durationWouldBeInFlight = useSenderDuration ? this.sender.getInFlightMediaDuration(nextFrameRtpTimestamp) : durationInFlight + frameDurationMs;
-    if (durationWouldBeInFlight > this.sender.getMaxInFlightMediaDuration()) return "kInFlightDurationTooHigh";
+    if (durationWouldBeInFlight > this.sender.getMaxInFlightMediaDuration()) {
+      this.logDrop("kInFlightDurationTooHigh", durationWouldBeInFlight);
+      return "kInFlightDurationTooHigh";
+    }
     return "kNotDropped";
   }
 }

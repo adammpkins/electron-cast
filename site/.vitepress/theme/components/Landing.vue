@@ -180,13 +180,13 @@ const tabs = [
               </tr>
               <tr>
                 <th scope="row">Tab mirroring</th>
-                <td>Works on a Chromecast Ultra: 1080p30, VP8 and Opus in software, sound in sync and only on the TV. The video lags more than it should and some frames are dropped on Wi-Fi; a fix is in progress</td>
+                <td>Tested on a Chromecast Ultra (1080p) and a Nest Hub Max (720p): VP8 and Opus in software, sound in sync and only on the TV. At 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p is under investigation</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
               <tr>
                 <th scope="row">Desktop mirroring</th>
-                <td>Works on a Chromecast Ultra: picture and system sound in sync; the PC keeps playing its sound, as Chrome does on Windows. The same lag and dropped frames on Wi-Fi; a fix is in progress</td>
+                <td>Tested on a Chromecast Ultra (1080p) and a Nest Hub Max (720p): picture and system sound in sync; the PC keeps playing its sound, as Chrome does on Windows. At 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p is under investigation</td>
                 <td class="no">Not tested</td>
                 <td class="no">Not tested</td>
               </tr>
@@ -216,7 +216,7 @@ const tabs = [
             <h3>Coming</h3>
             <ul>
               <li>Mirroring tried on a real device: switching the mirrored tab, freezing, the statistics, hardware encoders, the new offer after an encoder failure, letterboxing, the capture size following encoder load</li>
-              <li>Mirroring without the lag and the dropped frames on Wi-Fi (a fix is in progress)</li>
+              <li>Mirroring at 1080p without the video lag on a Chromecast Ultra (under investigation)</li>
               <li>Mirroring tested on Linux and macOS</li>
               <li>Launching an app over DIAL, tested on a DIAL-only TV</li>
             </ul>

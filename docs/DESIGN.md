@@ -799,6 +799,15 @@ closes the oldest, so a dropped frame costs nothing. A `VideoFrame` goes from th
 processor into the encoder; the only pixel read is one copy of the frame per encoded frame for the complexity estimate (see "Encoder feedback"). Encoded chunks are copied once, through the port (Electron cannot transfer an
 `ArrayBuffer` over a `MessagePortMain`).
 
+The agent keeps at most the session's frame rate with Chrome's `SmoothEventSampler`
+(`media/capture/content/smooth_event_sampler.cc`): a token bucket that fills with the time between frames, holds at most
+1.5 frame periods and pays one period for each frame kept. Chrome runs it in the capturer on compositor updates; the
+agent runs it on the capture timestamps of the frames the track delivers, so frames that arrive bunched after a stall
+are kept, and it allows 0.01 ms for timestamps rounded to microseconds. A frame's reference time is its capture time from
+the frame metadata when the source has one, else its capture timestamp moved onto the wall clock by the smallest delay
+seen; it never goes backwards, so a refresh frame cannot overtake the next real one. A tab switch learns the new
+track's clock offset again.
+
 ### Encoder feedback: lossiness, utilization and the capture size
 
 What Chrome does. `MediaVideoEncoderWrapper::OnFrameEncodeDone` gives every encoded frame an `encoder_utilization`
@@ -852,8 +861,8 @@ Differences:
   (`useHardwareEncoder`, from the WebCodecs hardware query), not what the encoder reports, since WebCodecs does not say
   which implementation it picked under `prefer-hardware`.
 - The estimator runs on the agent's main thread, not on a thread-pool task.
-- The oracle's samplers (`SmoothEventSampler`, `AnimatedContentSampler`) are not ported, and neither is the max frame
-  rate and max pixels feedback, which `VideoSender` never sends.
+- `SmoothEventSampler` is ported as the agent's frame-rate limit (above); `AnimatedContentSampler` is not, and
+  neither is the max frame rate and max pixels feedback, which `VideoSender` never sends.
 
 ### Local audio while mirroring
 
@@ -1114,9 +1123,9 @@ pins; the files are identical on main) unless noted:
   and end-to-end latencies, the late-frame count and the first and last event times.
 - **Deviations.** (1) Chrome's debugger is a single global one holding the most recent push of any session (its own
   TODO says multiple sessions are not handled); `getMirroringStats` takes the route id and each route keeps its own.
-  (2) Electron's capture gives one time per frame, so the capture begin and end of a video frame are both that time
-  (Chrome has `capture_begin_time` and `capture_end_time` from the renderer's frame metadata); the capture latency is
-  therefore 0 and the encode time starts at capture. Audio is the same as in Chrome (one time for both). (3) The stats
+  (2) A video frame's capture begin is its capture time from the frame metadata (or the agent's estimate, see
+  "Process split") and its capture end is when the agent read it from the track; Chrome has `capture_begin_time`
+  and `capture_end_time` from the capturer, so the capture latency here also counts the delivery to the agent. Audio is the same as in Chrome (one time for both). (3) The stats
   are fetched from the utility process over its message port (`get-stats`/`stats`), where Chrome calls the Mirroring
   Service over mojo. (4) Not ported: UMA (`RecordCastStreamingSenderUma` and the other histograms Chrome uploads): they
   need Chrome's metrics pipeline and send usage data to Google, and this library has no backend or consent to

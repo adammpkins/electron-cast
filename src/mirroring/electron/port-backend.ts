@@ -15,6 +15,34 @@ import type { AgentPort, AgentToEngine, CaptureSource } from "./agent-protocol.t
 
 const toLocalMs = (epochMs: number): number => epochMs - performance.timeOrigin;
 
+/** Debug aid, not in Chrome: mean and maximum of each pipeline stage, written to the log every five seconds. */
+export class StageStats {
+  private readonly stages = new Map<string, { n: number; sum: number; max: number }>();
+  private since = Number.NEGATIVE_INFINITY;
+  private readonly now: () => number;
+  private readonly log: () => ((message: string) => void) | undefined;
+
+  constructor(now: () => number, log: () => ((message: string) => void) | undefined) {
+    this.now = now;
+    this.log = log;
+  }
+
+  add(stage: string, ms: number): void {
+    const t = this.now();
+    if (this.since === Number.NEGATIVE_INFINITY) this.since = t;
+    const s = this.stages.get(stage) ?? { n: 0, sum: 0, max: 0 };
+    s.n++;
+    s.sum += ms;
+    s.max = Math.max(s.max, ms);
+    this.stages.set(stage, s);
+    if (t - this.since < 5000) return;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    this.log()?.(`latency stages (mean / max ms): ${[...this.stages].map(([k, v]) => `${k} ${r(v.sum / v.n)} / ${r(v.max)}`).join("; ")}`);
+    this.stages.clear();
+    this.since = t;
+  }
+}
+
 /** media/cast/encoding/audio_encoder.cc `kUnderrunSkipThreshold`. */
 export const UNDERRUN_SKIP_THRESHOLD = 3;
 
@@ -41,7 +69,7 @@ export class PortBackend implements MirroringBackend {
   private videoCallbacks: VideoEncoderCallbacks | undefined;
   private audioCallbacks: AudioEncoderCallbacks | undefined;
   private lastVideoParams: string | undefined;
-  private pendingVideo = new Map<number, number>();
+  private pendingVideo = new Map<number, { ref: number; captureBegin: number | undefined; captureEnd: number | undefined }>();
   private nextVideoFrameId = 0;
   private lastVideoFrameId = -1;
   private nextAudioFrameId = 0;
@@ -62,6 +90,8 @@ export class PortBackend implements MirroringBackend {
   private audioConfig: { sampleRate: number; channels: number } | undefined;
   private audioSenderConfig: FrameSenderConfig | undefined;
   private stopped = false;
+  log: ((message: string) => void) | undefined;
+  private readonly stages = new StageStats(() => performance.now(), () => this.log);
 
   constructor(port: AgentPort, source: CaptureSource) {
     this.port = port;
@@ -81,14 +111,25 @@ export class PortBackend implements MirroringBackend {
         break;
       case "frame":
         this.observeCapturedFrame(m.rtp, toLocalMs(m.refMs), m.width, m.height, m.refresh === true);
-        this.videoSink?.insertVideoFrame({ rtpTimestamp: m.rtp, referenceTimeMs: toLocalMs(m.refMs), visibleRectEmpty: false });
+        this.stages.add("video capture to engine", performance.now() - toLocalMs(m.refMs));
+        this.videoSink?.insertVideoFrame({
+          rtpTimestamp: m.rtp,
+          referenceTimeMs: toLocalMs(m.refMs),
+          visibleRectEmpty: false,
+          ...(typeof m.captureBeginMs === "number" ? { captureBeginTimeMs: toLocalMs(m.captureBeginMs) } : {}),
+          ...(typeof m.captureEndMs === "number" ? { captureEndTimeMs: toLocalMs(m.captureEndMs) } : {}),
+        });
         break;
       case "video-chunk": {
-        const ref = this.pendingVideo.get(m.rtp);
+        const pending = this.pendingVideo.get(m.rtp);
         // The frame still counts in the backlog while its own output is processed (`recent_metadata_` is popped last).
         const backlog = this.pendingVideo.size;
         this.pendingVideo.delete(m.rtp);
-        if (ref === undefined) return;
+        if (pending === undefined) return;
+        const ref = pending.ref;
+        this.stages.add("video encode (agent)", m.encodeMs);
+        this.stages.add("video capture to encoded", performance.now() - ref);
+        this.stages.add(m.key ? "video key frame bytes" : "video delta frame bytes", m.data.byteLength);
         const frameId = this.nextVideoFrameId++;
         const referenced = m.key ? frameId : this.lastVideoFrameId;
         this.lastVideoFrameId = frameId;
@@ -108,9 +149,8 @@ export class PortBackend implements MirroringBackend {
           referenceTimeMs: ref,
           newPlayoutDelayMs: 0,
           data,
-          // Electron's capture reports one time per frame, so it stands for the begin and the end of the capture.
-          captureBeginTimeMs: ref,
-          captureEndTimeMs: ref,
+          ...(pending.captureBegin !== undefined ? { captureBeginTimeMs: pending.captureBegin } : {}),
+          ...(pending.captureEnd !== undefined ? { captureEndTimeMs: pending.captureEnd } : {}),
           // ComputeAndRecordUtilization: how much of the frame interval the encoder needed, smoothed.
           encoderUtilization: this.utilizationAverage.record(
             calculateEncoderUtilization(this.isHardwareEncoder, backlog, m.encodeMs, this.frameInterval),
@@ -123,7 +163,7 @@ export class PortBackend implements MirroringBackend {
       case "video-drop": {
         // The agent could not produce a chunk. Chrome's encoder reports that as a frame with no data
         // (VideoSender::OnFrameDroppedByEncoder), which also frees the frame's slot in `framesInEncoder`.
-        const ref = this.pendingVideo.get(m.rtp);
+        const ref = this.pendingVideo.get(m.rtp)?.ref;
         if (ref === undefined) return;
         this.pendingVideo.delete(m.rtp);
         this.feedbackFrame = this.oracleFrames.get(m.rtp);
@@ -151,6 +191,7 @@ export class PortBackend implements MirroringBackend {
       }
       case "audio-buffer": {
         this.currentAudioSeq = m.seq;
+        this.stages.add("audio capture to engine", performance.now() - toLocalMs(m.recMs));
         const accepted = this.audioSink?.insertAudio(m.frames, toLocalMs(m.recMs)) ?? false;
         if (!accepted) this.port.postMessage({ t: "drop-audio", seq: m.seq });
         break;
@@ -179,6 +220,9 @@ export class PortBackend implements MirroringBackend {
         );
         break;
       }
+      case "log":
+        if (typeof m.message === "string") this.log?.(m.message);
+        break;
       case "encoder-status":
         if (m.kind === "video") this.videoCallbacks?.onStatus(m.status, m.message);
         else this.audioCallbacks?.onStatus(m.status);
@@ -212,7 +256,7 @@ export class PortBackend implements MirroringBackend {
         this.frameInterval = 1000 / rate;
       },
       encodeVideoFrame: (frame: RawVideoFrame, referenceTimeMs: number) => {
-        this.pendingVideo.set(frame.rtpTimestamp, referenceTimeMs);
+        this.pendingVideo.set(frame.rtpTimestamp, { ref: referenceTimeMs, captureBegin: frame.captureBeginTimeMs, captureEnd: frame.captureEndTimeMs });
         // Frames the agent never hears about again are closed by its own bounded queue; forget stale references too.
         if (this.pendingVideo.size > 64) this.pendingVideo.delete(this.pendingVideo.keys().next().value!);
         this.port.postMessage({ t: "encode", rtp: frame.rtpTimestamp });

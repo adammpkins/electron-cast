@@ -94,6 +94,7 @@ export interface VirtualHarness {
   receiver: FakeReceiver;
   backend: FakeBackend;
   errors: Harness["errors"];
+  logs: string[];
   close(): void;
 }
 
@@ -102,9 +103,9 @@ export interface VirtualHarness {
  * run is a function of the code and the options only. `Date.now` (the sender's wall-clock origin for its NTP
  * timestamps) is pinned for the length of the run.
  */
-export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType } = {}): Promise<VirtualHarness> {
+export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions; type?: SessionType; oneWayDelayMs?: number } = {}): Promise<VirtualHarness> {
   const clock = new VirtualClock();
-  const env = new VirtualEnvironment(clock);
+  const env = new VirtualEnvironment(clock, opts.oneWayDelayMs);
   const realNow = Date.now;
   Date.now = () => 1_700_000_000_000 + clock.now();
   const receiver = await FakeReceiver.create({
@@ -116,6 +117,7 @@ export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions
   const router = new SenderPacketRouter(env);
   const backend = new FakeBackend(clock.now, { setTimeout: clock.setTimeout, setInterval: clock.setInterval });
   const errors: Harness["errors"] = [];
+  const logs: string[] = [];
   const host = new OpenscreenSessionHost(
     { type: opts.type ?? "audio_video", receiverAddress: "127.0.0.1", sourceId: "sender-0", destinationId: "receiver-0" },
     {
@@ -125,7 +127,7 @@ export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions
       encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(["vp8"]) }),
       env: {},
       messagePort: { postMessage: (_dest, ns, message) => void clock.schedule(clock.now(), () => receiver.onControlMessage(ns, message)) },
-      observer: { onError: (error, message) => errors.push({ error, message }), logInfo: () => {} },
+      observer: { onError: (error, message) => errors.push({ error, message }), logInfo: (m) => void logs.push(m) },
     },
   );
   receiver.sendControl = (json) => void clock.schedule(clock.now(), () => host.onMessage("receiver-0", CAST_WEBRTC_NAMESPACE, json));
@@ -136,6 +138,7 @@ export async function startVirtualHarness(opts: { receiver?: FakeReceiverOptions
     receiver,
     backend,
     errors,
+    logs,
     close() {
       host.stopSession();
       backend.stopAll();

@@ -60,6 +60,9 @@ interface PendingFrameSlot {
   sendFlags: boolean[];
   packetSentTimes: number[];
   mediaDurationMs: number;
+  /** For the feedback log: when the frame was enqueued and when its first packet left. */
+  enqueuedAtMs: number;
+  firstSentAtMs: number;
 }
 
 interface ChosenPacket {
@@ -197,6 +200,8 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
       sendFlags: new Array<boolean>(packetCount).fill(true),
       packetSentTimes: new Array<number>(packetCount).fill(NEVER),
       mediaDurationMs: 0,
+      enqueuedAtMs: this.env.now(),
+      firstSentAtMs: NEVER,
     };
     this.slots.set(frame.frameId, slot);
 
@@ -246,10 +251,37 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
 
   /** `OnReceivedRtcpPacket`. */
   onReceivedRtcpPacket(arrivalTimeMs: number, packet: Buffer): void {
+    this.noteFeedback(arrivalTimeMs);
     this.rtcpPacketArrivalTime = arrivalTimeMs;
     if (this.rtcpParser.parse(packet, this.lastEnqueuedFrameId)) {
       this.router.onRtcpReceived(arrivalTimeMs, this.roundTripTimeMs);
     }
+  }
+
+  /** Where to write the feedback statistics (a debug aid, not in openscreen). */
+  debugLog: ((message: string) => void) | undefined;
+  private feedbackStats = { since: NEVER, last: NEVER, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
+
+  /** Every five seconds: how often the receiver's feedback arrives, how many frames it acknowledged, and the round trip. */
+  private noteFeedback(arrivalTimeMs: number): void {
+    const s = this.feedbackStats;
+    if (this.debugLog === undefined) return;
+    if (s.since === NEVER) s.since = arrivalTimeMs;
+    if (s.last !== NEVER) s.maxGapMs = Math.max(s.maxGapMs, arrivalTimeMs - s.last);
+    s.last = arrivalTimeMs;
+    s.packets++;
+    if (this.roundTripTimeMs > 0) {
+      s.rttMin = Math.min(s.rttMin, this.roundTripTimeMs);
+      s.rttMax = Math.max(s.rttMax, this.roundTripTimeMs);
+    }
+    if (arrivalTimeMs - s.since < 5000) return;
+    const seconds = (arrivalTimeMs - s.since) / 1000;
+    const r = (n: number) => Math.round(n * 10) / 10;
+    this.debugLog(
+      `${this.streamType} feedback: ${r(s.packets / seconds)} packets/s (mean gap ${r((seconds * 1000) / s.packets)} ms, max ${r(s.maxGapMs)} ms), ` +
+        `${r(s.acked / seconds)} frames acked/s (capture to enqueue: mean ${r(s.captureToEnqueueSum / Math.max(1, s.acked))} ms, max ${r(s.captureToEnqueueMax)} ms; capture to ack: mean ${r(s.captureToAckSum / Math.max(1, s.acked))} ms, max ${r(s.captureToAckMax)} ms; enqueue to first packet out: mean ${r(s.sendDelaySum / Math.max(1, s.acked))} ms, max ${r(s.sendDelayMax)} ms; enqueue to ack: mean ${r(s.ackLatencySum / Math.max(1, s.acked))} ms, max ${r(s.ackLatencyMax)} ms), rtt ${r(this.roundTripTimeMs)} ms (range ${r(s.rttMin === Infinity ? 0 : s.rttMin)}-${r(s.rttMax)}), unacked ${this.numFramesInFlight}, checkpoint ${this.checkpointFrameId}`,
+    );
+    this.feedbackStats = { since: arrivalTimeMs, last: arrivalTimeMs, packets: 0, maxGapMs: 0, acked: 0, rttMin: Infinity, rttMax: 0, ackLatencySum: 0, ackLatencyMax: 0, sendDelaySum: 0, sendDelayMax: 0, captureToEnqueueSum: 0, captureToEnqueueMax: 0, captureToAckSum: 0, captureToAckMax: 0 };
   }
 
   /** `GetRtcpPacketForImmediateSend`: a sender report, once a frame has been enqueued. */
@@ -281,6 +313,7 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
     const packet = this.packetizer.generatePacket(slot.frame, packetId);
     slot.sendFlags[packetId] = false;
     slot.packetSentTimes[packetId] = sendTimeMs;
+    if (slot.firstSentAtMs === NEVER) slot.firstSentAtMs = sendTimeMs;
     this.pendingReport.sendPacketCount++;
     // Approximate octet count: packet size minus the base RTP header (sender_impl.cc).
     this.pendingReport.sendOctetCount += packet.length - BASE_RTP_HEADER_SIZE;
@@ -425,6 +458,20 @@ export class Sender implements RoutedSender, CompoundRtcpClient {
   private cancelPendingFrame(frameId: number, wasAcked: boolean): void {
     const slot = this.activeSlot(frameId);
     if (slot === undefined) return;
+    if (wasAcked) {
+      const s = this.feedbackStats;
+      s.acked++;
+      s.captureToEnqueueSum += slot.enqueuedAtMs - slot.frame.referenceTimeMs;
+      s.captureToEnqueueMax = Math.max(s.captureToEnqueueMax, slot.enqueuedAtMs - slot.frame.referenceTimeMs);
+      s.captureToAckSum += this.rtcpPacketArrivalTime - slot.frame.referenceTimeMs;
+      s.captureToAckMax = Math.max(s.captureToAckMax, this.rtcpPacketArrivalTime - slot.frame.referenceTimeMs);
+      s.ackLatencySum += this.rtcpPacketArrivalTime - slot.enqueuedAtMs;
+      s.ackLatencyMax = Math.max(s.ackLatencyMax, this.rtcpPacketArrivalTime - slot.enqueuedAtMs);
+      if (slot.firstSentAtMs !== NEVER) {
+        s.sendDelaySum += slot.firstSentAtMs - slot.enqueuedAtMs;
+        s.sendDelayMax = Math.max(s.sendDelayMax, slot.firstSentAtMs - slot.enqueuedAtMs);
+      }
+    }
     if (wasAcked) this.router.onPayloadReceived(slot.frame.data.length, this.rtcpPacketArrivalTime, this.roundTripTimeMs);
     this.inFlightMediaDurationMs -= slot.mediaDurationMs;
     if (this.inFlightMediaDurationMs < 0) this.inFlightMediaDurationMs = 0;

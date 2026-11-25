@@ -25,9 +25,10 @@ is frozen and behaves as before for pages; it shares the device list.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route; the session
   runs on the device's one kept-open channel. A mirrored tab is muted locally while it is cast (Chrome's muter);
   desktop audio follows Chrome per platform (local playback keeps going on Windows, `kCastDesktopMirroringKeepLocalAudio`,
-  and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra: tab mirroring (Opus and VP8 in
-  software, 1080p30, smooth picture, audio in sync, audio only on the TV) and desktop mirroring (picture and system
-  audio on the TV, local audio kept on Windows); not tested on Linux or macOS. Not ported: remoting (Electron has no hook
+  and is muted elsewhere). No new dependencies. Tested on Windows to a Chromecast Ultra (1080p, tab and desktop) and a
+  Nest Hub Max (720p): at 720p frames reach the device in about 30 ms with none late; on the Ultra, video lag at 1080p
+  is under investigation. Tab mirroring sends Opus and VP8 in software, with the audio in sync and only on the TV;
+  desktop mirroring sends the picture and system audio and keeps local audio on Windows. Not tested on Linux or macOS. Not ported: remoting (Electron has no hook
   for it, see [DESIGN.md](docs/DESIGN.md#media-remoting-capabilities-only-the-renderer-side-is-not-reachable)). Like Chrome, a mirroring session sends `GET_CAPABILITIES`
   once after the first negotiation and keeps the receiver's remoting capabilities.
 - **Wired displays, as Chrome's `WiredDisplayMediaRouteProvider` has them, tested on a second monitor** (Windows, a
@@ -187,6 +188,15 @@ senders started. Both are covered by unit tests with fakes.
   room, within the limits of the resolution change policy. Screens are captured at the full size, as in Chrome.
   Switching the tab starts the size over, as a new capture device does in Chrome. The `LOSSINESS` statistic now reads
   each frame's value; it is -100, as in Chrome, until a frame has reported one. Not yet tried on a real device.
+- **Mirrored frames carry their capture time, and the capture rate is limited as Chrome limits it.** A frame's
+  reference time is its capture time from the frame metadata when the source gives one (else the capture timestamp
+  moved onto the wall clock by the smallest delay seen), so uneven delivery no longer skews the receiver's playout.
+  Each frame carries its capture begin and end times to the sender, which logs them as `FRAME_CAPTURE_BEGIN` and
+  `FRAME_CAPTURE_END`, so the capture, encode and end-to-end latency statistics start at capture. The capture is thinned
+  to the session's frame rate by a port of Chrome's `SmoothEventSampler` (a token bucket of 1.5 frame periods, judged
+  on capture timestamps), so a burst after a stall is kept whole. The sender logs its pipeline stages, the router's
+  bursts and the frame sizes, and `smoke/perf.mjs` mirrors a 1080p page to the fake receiver to measure them. Checked
+  on a Nest Hub Max: a steady 30 fps, 1.1% of the video frames dropped, no audio dropped.
 - **The manager follows network changes by itself, as Chrome's `DiscoveryNetworkMonitor` tells its media router.** It
   computes Chrome's network id from the connected interfaces and, when it changes, does what Chrome's two observers do:
   DIAL devices given up on as non-Cast are tried again, the sinks of the network being left are remembered and reopened
