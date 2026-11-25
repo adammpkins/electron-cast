@@ -44,7 +44,7 @@ async function main() {
     presentation: false,
     selectDevice: async () => null,
     mirroring: {
-      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents, app },
+      electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app },
       log: (level, message) => console[level === "error" ? "error" : "log"](message),
     },
   });

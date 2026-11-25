@@ -2,7 +2,7 @@
 // the sender's own stage logging (latency stages, router bursts, feedback) print, to see what a heavy capture costs.
 //   electron smoke/perf.mjs [--codec vp8|vp9] [--secs 20] [--width 1920] [--height 1080]
 // No real device is involved.
-import { app, BrowserWindow, MessageChannelMain, desktopCapturer, ipcMain, utilityProcess, webContents } from "electron";
+import { app, BrowserWindow, MessageChannelMain, ipcMain, utilityProcess, webContents } from "electron";
 import { EventEmitter } from "node:events";
 import { createCastManager } from "electron-cast/main";
 // test/mirroring/fake-receiver.ts, bundled by build-preloads.mjs (run `npm run smoke` once, or `node smoke/build-preloads.mjs`).
@@ -54,7 +54,7 @@ const discovery = Object.assign(new EventEmitter(), { devices: () => [{ ...TV }]
 const cast = createCastManager({
   ipcMain, discovery, createClient: () => client, selectDevice: async () => null, presentation: false, channel: "electron-cast-perf",
   mirroring: {
-    electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents },
+    electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents },
     extraVideoCodecs: codec === "vp9" ? ["vp9"] : [],
     log: (l, m) => console.log(`perf[${codec}]: ${l}: ${m}`),
   },

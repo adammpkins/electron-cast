@@ -140,8 +140,8 @@ export interface CastManagerOptions {
   accessCode?: AccessCodeOptions;
   /**
    * Enables tab and desktop mirroring (`startCasting` with `castMode: "tab_mirror"` or `"desktop_mirror"`). Pass the
-   * Electron classes it needs (`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`,
-   * `webContents`); off by default. `createService` replaces the Electron engine (tests, or a different one).
+   * Electron classes it needs (`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`,
+   * and optionally `app`); off by default. `createService` replaces the Electron engine (tests, or a different one).
    */
   mirroring?: ElectronMirroringOptions | { createService: MirroringServiceFactory };
   /**

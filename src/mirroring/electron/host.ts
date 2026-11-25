@@ -63,7 +63,6 @@ export interface ElectronMirroringApi {
   BrowserWindow: new (options: Record<string, unknown>) => BrowserWindowLike;
   utilityProcess: { fork(modulePath: string, args?: string[], options?: Record<string, unknown>): UtilityProcessLike };
   MessageChannelMain: new () => { port1: PortMainLike; port2: PortMainLike };
-  desktopCapturer: { getSources(options: { types: string[] }): Promise<{ id: string; name: string }[]> };
   webContents: { fromId(id: number): WebContentsMirrorLike | undefined };
   /**
    * `app`: its `commandLine` is where Chrome's `--cast-streaming-force-{enable,disable}-hardware-<codec>`,

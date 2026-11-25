@@ -133,7 +133,7 @@ async function runScenario({ pass, fail, engineModulePath, mode, hardware, conte
     // the fake receiver is on loopback, which Chrome's address rule refuses unless all addresses are allowed
     sinks: { openDelayMaxMs: 0, reportDelayMs: 0, allowAllIps: true },
     mirroring: {
-      electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents, app },
+      electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app },
       engineModulePath,
       log: (l, m) => { if (m.startsWith("encoders:")) encodersLine = m; console.log(`smoke: [${name}] mirroring ${l}: ${m}`); },
     },

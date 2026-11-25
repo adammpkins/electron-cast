@@ -431,12 +431,12 @@ the app chooses what to send. They are off unless you pass `mirroring` to `creat
 
 <!-- no-check -->
 ```ts
-import { app, BrowserWindow, MessageChannelMain, desktopCapturer, utilityProcess, webContents } from "electron";
+import { app, BrowserWindow, MessageChannelMain, utilityProcess, webContents } from "electron";
 
 const manager = createCastManager({
   ipcMain,
   selectDevice,
-  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, desktopCapturer, webContents } },
+  mirroring: { electron: { BrowserWindow, utilityProcess, MessageChannelMain, webContents, app } },
 });
 await manager.start();
 
@@ -511,7 +511,7 @@ finite is the string `"null"`. As in Chrome the structure is for logs, not a con
 id because several routes can run (Chrome's debugger keeps one global copy).
 
 `mirroring` options (`ElectronMirroringOptions`): `electron` (the Electron objects to use, an `ElectronMirroringApi`:
-`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `desktopCapturer`, `webContents`, and `app` so that Chrome's
+`BrowserWindow`, `utilityProcess`, `MessageChannelMain`, `webContents`, and `app` so that Chrome's
 switches are seen), `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio is always offered. Video is
 chosen as Chrome chooses it: H.264, VP8 and VP9 in hardware when the machine has an encoder for them
 (`VideoEncoder.isConfigSupported` with `prefer-hardware`), VP8 and VP9 in software when it has none; Chrome's own

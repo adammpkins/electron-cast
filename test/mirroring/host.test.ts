@@ -66,7 +66,6 @@ function fakeElectron() {
       },
     },
     MessageChannelMain: class { port1 = { postMessage() {}, start() {}, close() {} }; port2 = { postMessage() {}, start() {}, close() {} }; },
-    desktopCapturer: { getSources: async () => [{ id: "screen:1:0", name: "Screen 1" }] },
     webContents: { fromId: () => page },
   } as unknown as ElectronMirroringApi;
   return { electron, state, page };
