@@ -282,7 +282,7 @@ async function main() {
     assert.equal(cast.hasDefaultPresentationRequest(id), false);
     const changes = [];
     cast.addPresentationObserver(id, { onDefaultPresentationChanged: (r) => changes.push(r) });
-    const before = clients.length;
+    const launchesBefore = clients[0].calls.filter((c) => c === `launch ${APP_ID}`).length;
     const set = await runInPage(win, DEFAULT_REQUEST_PAGE, false);
     assert.equal(set.set, true);
     for (let i = 0; i < 200 && !cast.hasDefaultPresentationRequest(id); i++) await new Promise((r) => setTimeout(r, 25));
@@ -300,10 +300,11 @@ async function main() {
     const requestsBefore = requests.length;
     const route = await cast.startCasting(TV.id, { webContentsId: id });
     assert.equal(requests.length, requestsBefore, "the app's own start must not open the page's picker");
-    // one client only asked the device whether it has the app (Chrome's GET_APP_AVAILABILITY), the next launched it
-    const launcher = clients.slice(before).find((c) => c.calls.includes(`launch ${APP_ID}`));
-    assert.ok(launcher, "no client launched the app");
-    assert.ok(clients.slice(before).some((c) => c.calls.includes(`availability ${APP_ID}`)), "the app's availability was not asked");
+    // The device's one kept-open channel answered whether it has the app (Chrome's GET_APP_AVAILABILITY; an
+    // "available" answer from earlier stands, so it need not be asked again) and launched it
+    assert.equal(clients.length, 1, "the device's one channel is kept open and reused, as Chrome does");
+    assert.ok(clients[0].calls.includes(`availability ${APP_ID}`), "the app's availability was not asked");
+    assert.equal(clients[0].calls.filter((c) => c === `launch ${APP_ID}`).length, launchesBefore + 1, "startCasting() did not launch on the open channel");
     assert.equal(route.appId, APP_ID);
     assert.deepEqual(route.members, [id]);
     assert.ok(routeLists.at(-1).some((r) => r.id === route.id), "the route is in the routes observers");
