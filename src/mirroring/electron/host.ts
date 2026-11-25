@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import type { VideoCodec } from "../protocol/constants.ts";
 import type { MirroringStats } from "../stats/statistics.ts";
 import type { MirroringServiceFactory, MirroringService } from "../mirroring-activity.ts";
+import { castDesktopMirroringKeepLocalAudio } from "../../electron/switches.ts";
 import { encodingPolicyFromCommandLine, hardwareCodecsToProbe, softwareCodecsToProbe, type CommandLineLike } from "../encoding-support.ts";
 import { getCodecParameterString } from "../mirror-settings.ts";
 import { desktopStreamId, isDesktopSourceWithAudio } from "../routing.ts";
@@ -71,6 +72,12 @@ export interface ElectronMirroringApi {
    * Chrome's defaults apply.
    */
   app?: { commandLine: CommandLineLike };
+  /**
+   * `systemPreferences`: `getMediaAccessStatus("screen")` is how macOS's Screen Recording permission is read, which Chrome
+   * checks before it casts the screen (`MediaRouterUI::CreateRoute`, `ui::IsScreenCaptureAllowed`). Without it the
+   * permission is not checked.
+   */
+  systemPreferences?: { getMediaAccessStatus(mediaType: "screen"): string };
 }
 
 export interface ElectronMirroringOptions {
@@ -222,9 +229,10 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           const chosen = { id, name: id };
           const withAudio = isDesktopSourceWithAudio(source.id);
           // CastMirroringServiceHost::GetDesktopAudioLoopbackDeviceId: Windows keeps local playback
-          // (kLoopbackInputDeviceId, kCastDesktopMirroringKeepLocalAudio is on by default there, as muting the endpoint
-          // silences the loopback on some drivers); every other platform mutes it (kLoopbackWithMuteDeviceId).
-          const audioMode = platform === "win32" ? "loopback" : "loopbackWithMute";
+          // (kLoopbackInputDeviceId; kCastDesktopMirroringKeepLocalAudio is on by default there, as muting the endpoint
+          // silences the loopback on some drivers, and --disable-features=CastDesktopMirroringKeepLocalAudio turns it off);
+          // every other platform mutes it (kLoopbackWithMuteDeviceId).
+          const audioMode = platform === "win32" && castDesktopMirroringKeepLocalAudio(e.app?.commandLine) ? "loopback" : "loopbackWithMute";
           wc.session.setDisplayMediaRequestHandler((_request, callback) => callback(withAudio ? { video: chosen, audio: audioMode } : { video: chosen }));
           capture = { kind: "desktop", sourceId: id, audio: audioMode };
         }

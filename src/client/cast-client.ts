@@ -56,6 +56,18 @@ interface LaunchWaiter {
   timer: NodeJS.Timeout;
   resolve: (app: ReceiverApplication) => void;
   reject: (err: unknown) => void;
+  onStatus?: (status: LaunchStatus) => void;
+}
+
+/**
+ * A `LAUNCH_STATUS` message, which a receiver sends while its user decides on a cast request
+ * (`GetLaunchSessionResponse`: `USER_PENDING_AUTHORIZATION`, `USER_ALLOWED`). Anything else it says is not reported.
+ */
+export type LaunchStatus = "user_pending_authorization" | "user_allowed";
+
+export interface LaunchOptions {
+  /** Called for each `LAUNCH_STATUS` of this launch. The launch carries on; the final answer is still the promise's. */
+  onStatus?(status: LaunchStatus): void;
 }
 
 type ClientState = "idle" | "connecting" | "connected" | "closed";
@@ -256,7 +268,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
   }
 
   /** Launch an app and wait until it appears in a RECEIVER_STATUS. */
-  launch(appId: string): Promise<ReceiverApplication> {
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication> {
     if (this.state !== "connected") {
       return Promise.reject(new CastConnectionError("not connected"));
     }
@@ -272,6 +284,7 @@ export class CastClient extends EventEmitter<CastClientEvents> {
         }, timeoutMs),
         resolve,
         reject,
+        ...(options?.onStatus !== undefined ? { onStatus: options.onStatus } : {}),
       };
       this.launchWaiters.push(waiter);
       this.write(buildMessage(this.senderId, NS.RECEIVER, PLATFORM_RECEIVER_ID, { type: "LAUNCH", appId, requestId }));
@@ -423,6 +436,19 @@ export class CastClient extends EventEmitter<CastClientEvents> {
       this.settleLaunches(status);
     } else if (type === "LAUNCH_ERROR" || type === "INVALID_REQUEST") {
       this.rejectLaunches(reply);
+    } else if (type === "LAUNCH_STATUS") {
+      this.reportLaunchStatus(reply);
+    }
+  }
+
+  /** `GetLaunchSessionResponse` for `LAUNCH_STATUS`: only the two user-approval statuses are told apart; the launch goes on. */
+  private reportLaunchStatus(reply: Record<string, unknown>): void {
+    const status = reply.status === "USER_PENDING_AUTHORIZATION" ? "user_pending_authorization"
+      : reply.status === "USER_ALLOWED" ? "user_allowed"
+      : undefined;
+    if (status === undefined || typeof reply.requestId !== "number") return;
+    for (const waiter of [...this.launchWaiters]) {
+      if (waiter.requestId === reply.requestId) waiter.onStatus?.(status);
     }
   }
 

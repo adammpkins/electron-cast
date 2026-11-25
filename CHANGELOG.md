@@ -25,6 +25,17 @@
 
 ### Added
 
+- **Issues, like Chrome's Cast dialog shows.** `registerIssuesObserver`, `clearIssue` and `clearTopIssueForSink` on the manager:
+  per-sink issues (a failed launch, a request waiting for the user on the TV, a declined one, a route timeout, "Use remote to
+  stop casting" for DIAL, "unable to cast", the macOS screen-capture permission), deduplicated, going away after 1 minute
+  (notifications) or 5 minutes (warnings), as Chrome's `IssueManager`. Not yet tried on a real device.
+- **Chrome's switches and features** read from `app.commandLine` (new `commandLine` option): `--disable-features=MediaRouter`,
+  `CastAllowAllIPs`, `ShowCastPermissionRejectedError`, `CastDesktopMirroringKeepLocalAudio`, `--cast-device-ips`,
+  `--cast-developer-certificate-path`, `--cast-mirroring-target-playout-delay`. The mapping of Chrome's enterprise policies
+  is in [docs/DESIGN.md](docs/DESIGN.md). Not yet tried on a real device.
+- **Diagnostics:** `getLogs` and `registerLogObserver` (Chrome's media router log) and `getCastProviderState`.
+- `mirroring.electron.systemPreferences`: the macOS Screen Recording permission is checked before a desktop mirroring route.
+
 - `npm run live:checks` ([examples/live-checks](examples/live-checks)): unattended live checks for DIAL dedup (read-only) and
   for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, and the
   app's own UI. The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.

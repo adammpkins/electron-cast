@@ -31,6 +31,11 @@ export interface DeviceAuthOptions {
   now?: number;
   /** Trust anchors (DER) replacing the Cast Root CA and Eureka Root CA. For tests and private Cast deployments. */
   roots?: Uint8Array[];
+  /**
+   * Trust anchors (DER) added to the Cast Root CA and Eureka Root CA, as Chrome adds the certificates of
+   * `--cast-developer-certificate-path` (`CastTrustStore::AddDefaultCertificates`). Ignored when `roots` is given.
+   */
+  extraRoots?: Uint8Array[];
   /** CRL trust anchors (DER) replacing the Cast CRL Root CA. */
   crlRoots?: Uint8Array[];
   /** Replacement fallback CRL (a serialized CrlBundle), or `null` for none. */
@@ -68,7 +73,7 @@ const parseAll = (ders: Uint8Array[]): ParsedCertificate[] => ders.map((d) => pa
 function anchorsFor(options: DeviceAuthOptions): ParsedCertificate[] {
   if (options.roots !== undefined) return parseAll(options.roots);
   defaultAnchors ??= parseAll([Buffer.from(CAST_ROOT_CA_B64, "base64"), Buffer.from(EUREKA_ROOT_CA_B64, "base64")]);
-  return defaultAnchors;
+  return options.extraRoots === undefined || options.extraRoots.length === 0 ? defaultAnchors : [...defaultAnchors, ...parseAll(options.extraRoots)];
 }
 
 function crlAnchorsFor(options: DeviceAuthOptions): ParsedCertificate[] {

@@ -14,7 +14,7 @@ import type { CastSinkOptions, ChannelParams } from "./sink-service.ts";
 import { MAX_MESSAGE_SIZE, asBytes, messageFields } from "./wired-display/local-presentation.ts";
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import { createWiredDisplay, isWiredDisplaySource, type LocalConnectionHandle, type WiredDisplayApi, type WiredDisplayOptions } from "./wired-display/index.ts";
-import type { AccessCodeDevice, AccessCodeOptions, AccessCodeRememberedSink, AddSinkResult } from "./access-code.ts";
+import { AccessCodeCastDisabledError, type AccessCodeDevice, type AccessCodeOptions, type AccessCodeRememberedSink, type AddSinkResult } from "./access-code.ts";
 import { DiscoveryNetworkMonitor, NETWORK_ID_DISCONNECTED, type NetworkMonitor } from "./network-monitor.ts";
 import { MirroringManager, MirroringRouteError, type MirroringRoute } from "../mirroring/mirroring-manager.ts";
 import { createElectronMirroringServiceFactory, type ElectronMirroringOptions } from "../mirroring/electron/host.ts";
@@ -22,6 +22,12 @@ import type { MirroringClient, MirroringServiceFactory } from "../mirroring/mirr
 import type { BridgeMethod } from "../polyfill/bridge-types.ts";
 import { DialService, type DialHttp, type DialHttpOptions, type DialRegistryOptions } from "../dial/index.ts";
 import { appNameFromDialSource, isDialSource, processDeviceUuid } from "../dial/parse.ts";
+import { IssueManager, RouterIssues, originNameForDisplay } from "./issues.ts";
+import { MediaRouterLogger } from "./logger.ts";
+import {
+  castAllowAllIpsFeature, castMirroringPlayoutDelayMs, developerCertificates, fixedCastDevices, mediaRouterFeatureEnabled,
+  showCastPermissionRejectedError, type CommandLineLike,
+} from "./switches.ts";
 
 /**
  * The methods a page may call over IPC: the bridge's own. The service also handles methods that only main calls
@@ -43,6 +49,7 @@ export {
   type ReceiverWindows, type ReceiverWindowsOptions, type ScreenLike, type DisplayLike, type WindowLike, type PresentationMessage,
 } from "./wired-display/index.ts";
 export { AccessCodeCastDisabledError, createAccessCodeSink } from "./access-code.ts";
+export type { CommandLineLike } from "./switches.ts";
 export type { NetworkMonitor } from "./network-monitor.ts";
 export type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
 export type { ElectronMirroringApi, ElectronMirroringOptions } from "../mirroring/electron/host.ts";
@@ -54,7 +61,8 @@ export type {
   MediaController, MediaImage, MediaPlayState, MediaStatus, MediaStatusObserver,
 } from "./media-controller.ts";
 export type {
-  CastManagerApi, DevicePickerContext, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
+  CastManagerApi, CastProviderState, CastSessionState, DevicePickerContext, Issue, IssueInfo, IssueSeverity, IssuesObserver,
+  LogCategory, LogEntry, LogObserver, LogSeverity, MediaCastMode, StartCastingOptions, MediaRoute, MediaRouteController, MediaRoutesObserver, MediaSink,
   MediaSinksObserver, MediaSinksQuery, PresentationObserver, PresentationRequest, SinkIconType,
 } from "./manager-api.ts";
 
@@ -152,6 +160,15 @@ export interface CastManagerOptions {
    * {@link NetworkMonitor} drives it in tests.
    */
   networkMonitor?: NetworkMonitor | false;
+  /**
+   * The app's command line (`app.commandLine`; Chrome's `base::CommandLine::ForCurrentProcess()`), where the Chrome switches
+   * that change the media router are read: `--disable-features=MediaRouter` (the router is off: no discovery, no sinks),
+   * `--enable-features=CastAllowAllIPs` (as `sinks.allowAllIps`, which wins when given, as the policy does),
+   * `--disable-features=ShowCastPermissionRejectedError`, `--cast-device-ips` (channels are opened to these addresses at
+   * start), `--cast-developer-certificate-path` (more trusted Cast root certificates, PEM) and
+   * `--cast-mirroring-target-playout-delay` (1 to 1000 ms). Defaults to `mirroring.electron.app.commandLine`.
+   */
+  commandLine?: CommandLineLike;
 }
 /** The main-process cast manager; the observers, routes and route control come from {@link CastManagerApi}. */
 export interface CastManager extends CastManagerApi {
@@ -235,7 +252,7 @@ function sharedChannelClient(deviceId: string, channel: CastClientLike | undefin
     send: (namespace, destinationId, payload) => {
       if (attached) need().send(namespace, destinationId, payload);
     },
-    launch: (appId) => need().launch(appId),
+    launch: (appId, launchOptions) => need().launch(appId, launchOptions),
     stop: (sessionId) => need().stop(sessionId),
     connectTransport: (transportId) => need().connectTransport(transportId),
     closeTransport: (transportId) => need().closeTransport(transportId),
@@ -286,7 +303,23 @@ export function createCastManager(options: CastManagerOptions): CastManager {
   if (options.presentation !== false && (typeof options.ipcMain.on !== "function" || typeof options.ipcMain.removeListener !== "function")) {
     throw new TypeError("presentation mode needs ipcMain.on and ipcMain.removeListener");
   }
+  const commandLine: CommandLineLike | undefined = options.commandLine
+    ?? (options.mirroring !== undefined && "electron" in options.mirroring ? options.mirroring.electron.app?.commandLine : undefined);
+  // media_router::MediaRouterEnabled: the router "does not support dynamic enabling/disabling"; it is read once
+  const routerEnabled = mediaRouterFeatureEnabled(commandLine);
+  const logger = new MediaRouterLogger();
+  const issues = new RouterIssues(new IssueManager(), { showPermissionRejectedError: showCastPermissionRejectedError(commandLine), logger });
+  // GetCastAllowAllIPsPref: the policy (here `sinks.allowAllIps`) when set, else the CastAllowAllIPs feature
+  const sinkOptions: CastSinkOptions = { ...options.sinks, allowAllIps: options.sinks?.allowAllIps ?? castAllowAllIpsFeature(commandLine) };
+  // CastTrustStore::AddDefaultCertificates: the developer certificates are trusted besides Google's
+  const developerRoots = developerCertificates(commandLine, (message) => console.warn(`electron-cast: ${message}`));
   const discovery = options.discovery ?? new CastDiscovery();
+  // DnsSdRegistry::ServicesPermissionRejected -> MediaRouterDesktop::OnLocalDiscoveryPermissionRejected. Node cannot tell
+  // that the OS refused local network access (docs/DESIGN.md, "Local discovery permission"), so only a discovery source that
+  // knows says it, with a `permissionRejected` event.
+  const permissionSource = discovery as unknown as { on?(event: string, listener: () => void): unknown; off?(event: string, listener: () => void): unknown };
+  const onPermissionRejected = (): void => issues.localDiscoveryPermissionRejected();
+  permissionSource.on?.("permissionRejected", onPermissionRejected);
   const networkMonitor = options.networkMonitor === false ? undefined
     : options.networkMonitor ?? (options.discovery === undefined ? new DiscoveryNetworkMonitor() : undefined);
   const createClient = options.createClient ?? ((d: CastDevice, params: ChannelParams) =>
@@ -294,6 +327,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       host: d.host,
       port: d.port,
       verifyDevice: options.verifyDevices !== false,
+      ...(developerRoots.length > 0 ? { deviceAuth: { extraRoots: developerRoots } } : {}),
       connectTimeoutMs: params.connectTimeoutMs,
       heartbeatTimeoutMs: params.livenessTimeoutMs,
       heartbeatIntervalMs: params.pingIntervalMs,
@@ -310,7 +344,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     hashToken,
     isCastDevice: (uuid) => castSinks().some((d) => processDeviceUuid(d.id) === uuid),
     ...(typeof dialOption === "object" ? dialOption : {}),
+    log: (message) => {
+      logger.info("Discovery", "DialMediaSinkServiceImpl", message);
+      if (typeof dialOption === "object") dialOption.log?.(message);
+    },
   });
+  // DialMediaRouteProvider::HandleStopAppResult -> media_router_->OnIssue
+  dial?.provider.on("issue", (sinkId) => issues.cannotTerminate(sinkId));
   const routeListeners = new Set<() => void>();
   const notifyRoutes = (): void => {
     for (const l of [...routeListeners]) l();
@@ -435,6 +475,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     async selectDevice(devices, request, picker) {
       const mixed = mixedStarts.get(request.senderId);
       const choice = await options.selectDevice(devices, mixed === undefined ? request : { ...request, displays: mixed.displays }, picker);
+      // MediaRouterUI::CreateRoute: the dialog's earlier issues go once a sink is chosen
+      if (choice !== null && choice !== "stop" && !("display" in choice)) issues.routeRequested();
       if (typeof choice === "object" && choice !== null && "display" in choice) {
         if (mixed !== undefined && mixed.displays.some((d) => d.id === choice.display)) mixed.chosen = choice.display;
         return null;
@@ -442,7 +484,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       return choice;
     },
     allowOrigin: options.allowOrigin,
-    sinks: options.sinks,
+    sinks: sinkOptions,
+    issues,
     ...(dial !== undefined && dialSource !== undefined ? {
       dial: {
         source: dialSource,
@@ -450,7 +493,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         monitor: (app: string, origin: string) => dial.monitorApp(app, origin),
       },
     } : {}),
-    accessCode: options.accessCode,
+    accessCode: options.accessCode === undefined ? undefined : {
+      ...options.accessCode,
+      log: (level, message, sinkId) => {
+        logger[level === "info" ? "info" : level === "warning" ? "warning" : "error"]("Discovery", "AccessCodeCastSinkService", message, { sinkId });
+        options.accessCode?.log?.(level, message, sinkId);
+      },
+    },
     ...(networkMonitor !== undefined ? { networkMonitor } : {}),
     // The same one-route-per-frame rule (`routes_by_frame_`) from the other side: a page's Cast SDK or Presentation API
     // session ends a mirroring route of that page. Subframe sender ids never match a tab, as only the main frame is one.
@@ -829,6 +878,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
         const earlier = launchedFrom.get(webContentsId);
         if (earlier !== undefined && routes().some((r) => r.id === earlier)) void service.terminateSession(earlier);
         if (!senders.has(webContentsId)) throw unable("the window is gone");
+        // MediaRouterUI::CreateRoute: past the checks, "GetIssueManager()->ClearAllIssues()"
+        issues.routeRequested();
         const connectionId = randomUUID();
         let failure: unknown;
         const result = await open(
@@ -860,6 +911,8 @@ export function createCastManager(options: CastManagerOptions): CastManager {
             : bridge === "extension_missing" ? "invalid_origin"
             : bridge === "invalid_parameter" ? "redundant_request"
             : "unknown_error";
+          // MediaRouterUI::OnRouteResponseReceived; a Cast launch raised its own at the launch (session-service)
+          if (code === "timed_out" && device.dial !== undefined) issues.uiRouteTimeout("presentation", device.id, originNameForDisplay(request.frameOrigin));
           throw new MediaRouteError(code, result.description);
         }
         if (device.dial !== undefined) {
@@ -909,8 +962,13 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       terminateRoutesOfPage: (wcId) => {
         for (const id of service.sessionsLaunchedBy(wcId)) void service.terminateSession(id);
       },
-      commandLine: "electron" in m ? m.electron.app?.commandLine : undefined,
-      log: (level, message) => (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`),
+      commandLine,
+      issues,
+      ...(castMirroringPlayoutDelayMs(commandLine) !== undefined ? { defaultTargetPlayoutDelayMs: castMirroringPlayoutDelayMs(commandLine)! } : {}),
+      log: (level, message) => {
+        logger[level]("Mirroring", "MirroringActivity", message);
+        (level === "error" ? console.error : console.debug)(`electron-cast mirroring: ${message}`);
+      },
     });
   }
   const dialRoutes = (): MediaRoute[] =>
@@ -1045,6 +1103,14 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (presentation === undefined) return Promise.reject(new MediaRouteError("unable_to_cast", "presentation mode is off"));
       return presentation.startDefaultPresentation(webContentsId, sinkId);
     },
+  }, {
+    issues,
+    logger,
+    enabled: routerEnabled,
+    // MediaRouteStarter::GetScreenCapturePermission asks on macOS only; Electron cannot prompt, so a refusal is the answer
+    ...(options.mirroring !== undefined && "electron" in options.mirroring && options.mirroring.electron.systemPreferences !== undefined && process.platform === "darwin"
+      ? { screenCapturePermission: () => options.mirroring !== undefined && "electron" in options.mirroring && options.mirroring.electron.systemPreferences?.getMediaAccessStatus("screen") === "granted" }
+      : {}),
   });
   // Cast sinks coming and going decide which DIAL sinks are shown; the DIAL sinks are looked up again.
   castSinks = () => service.devices();
@@ -1055,20 +1121,30 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     ...api,
     ...(wired !== undefined ? { wiredDisplay: wired.api } : {}),
     async start() {
+      // MediaRouterEnabled false: Chrome makes no media router, so nothing is discovered and there are no sinks
+      if (!routerEnabled) {
+        logger.info("Discovery", "MediaRouter", "The media router is disabled (--disable-features=MediaRouter): no discovery is started.");
+        return;
+      }
       networkMonitor?.start();
       await discovery.start();
       dial?.start({ online: networkMonitor === undefined || networkMonitor.networkId() !== NETWORK_ID_DISCONNECTED });
+      // CastMediaSinkServiceImpl::Start: the devices of --cast-device-ips
+      service.openFixedSinks(fixedCastDevices(commandLine));
     },
     devices: () => service.devices(),
     discoverSinksNow: () => service.discoverSinksNow(),
     settled: (options) => service.settled(options),
-    addSinkByAddress: (device) => service.addSinkByAddress(device),
+    addSinkByAddress: (device) => (routerEnabled ? service.addSinkByAddress(device) : Promise.reject(new AccessCodeCastDisabledError())),
     configureAccessCode: (settings) => service.configureAccessCode(settings),
     rememberedSinks: () => service.rememberedSinks(),
     async dispose() {
       if (disposed) return;
       disposed = true;
       api.dispose();
+      permissionSource.off?.("permissionRejected", onPermissionRejected);
+      issues.manager.dispose();
+      logger.dispose();
       defaults.dispose();
       mirroring?.dispose();
       disposeMirroring?.();

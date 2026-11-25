@@ -5,7 +5,7 @@ import {
   createCastManager, MediaRouteError, type IpcMainLike, type CastManagerOptions, type MediaRoute, type MediaSink,
 } from "../../src/electron/main.ts";
 import type { BridgeEvent } from "../../src/polyfill/bridge-types.ts";
-import { FakeDevices, FakeClient, TV, device, tick, FAST_SINKS } from "./fakes.ts";
+import { FakeDevices, FakeClient, TV, device, tick, FAST_SINKS, launchError } from "./fakes.ts";
 
 const YT = "233637DE";
 const ORIGIN = "https://music.youtube.com";
@@ -296,4 +296,35 @@ test("sink icons follow Chrome's GetCastSinkIconType: video_out first, then mult
   assert.equal(icon("g-video"), "cast", "a group that can show video is a plain Cast sink in Chrome");
   assert.equal(icon("plain-audio"), "cast_audio");
   assert.equal(icon("dev-group"), "cast_audio_group");
+});
+
+test("a failed Cast launch raises Failed to cast for the sink, a declined one raises the declined warning, and a pending one a notice", async () => {
+  const { manager, clients, call } = setup();
+  await manager.settled();
+  const titles: string[] = [];
+  manager.registerIssuesObserver({ onIssue: (i) => titles.push(`${i.info.severity}:${i.info.title}`), onIssuesCleared: () => titles.push("cleared") });
+  const wc = new FakeWebContents(7);
+  await call(wc, "initialize", INIT);
+  const tv = clients.find((c) => c.device.id === TV.id)!;
+  tv.launchError = new Error("boom");
+  const r = (await call(wc, "requestSession", REQ)) as { ok: boolean };
+  assert.equal(r.ok, false);
+  assert.ok(titles.includes("warning:Failed to cast. Please try again."), titles.join("|"));
+  // an access-denied launch: the receiver says the user declined
+  titles.length = 0;
+  manager.clearTopIssueForSink(TV.id);
+  const declined = launchError("CANCELLED");
+  (declined.response as { extendedError?: string }).extendedError = "USER_NOT_ALLOWED";
+  tv.launchError = declined;
+  await call(wc, "requestSession", REQ);
+  assert.ok(titles.some((t) => t.startsWith("warning:") && t.includes(TV.name)), titles.join("|"));
+  assert.ok(!titles.includes("warning:Failed to cast. Please try again."), titles.join("|"));
+  // a pending authorization raises a notice that "user allowed" takes away again
+  titles.length = 0;
+  tv.launchError = null;
+  tv.launchStatuses = ["user_pending_authorization", "user_allowed"];
+  const ok = (await call(wc, "requestSession", REQ)) as { ok: boolean };
+  assert.equal(ok.ok, true);
+  assert.ok(titles.some((t) => t.startsWith("notification:")), titles.join("|"));
+  assert.equal(manager.getCastProviderState()?.sessionState.length, 1);
 });

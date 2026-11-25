@@ -12,7 +12,12 @@ import type { MirroringCastMode } from "../mirroring/mirroring-manager.ts";
 import type { MirroringStats } from "../mirroring/stats/statistics.ts";
 import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource } from "../mirroring/routing.ts";
 
+import type { IssuesObserver, RouterIssues } from "./issues.ts";
+import type { LogEntry, LogObserver } from "./logger.ts";
+
 export type { PresentationObserver, PresentationRequest } from "./default-presentation.ts";
+export type { Issue, IssueInfo, IssueSeverity, IssuesObserver } from "./issues.ts";
+export type { LogCategory, LogEntry, LogObserver, LogSeverity } from "./logger.ts";
 import { createMediaControllers, type MediaController, type MediaControllerHost, type MediaStatusObserver } from "./media-controller.ts";
 
 /** Chrome's `SinkIconType` values that apply to Cast and DIAL devices (a DIAL sink is `generic`). */
@@ -153,6 +158,21 @@ export interface MediaRouteController {
   setVolume(level: number): Promise<void>;
 }
 
+/** `mojom::CastSessionState` (`CastMediaRouteProvider::GetState`): one session a Cast sink runs. */
+export interface CastSessionState {
+  sinkId: string;
+  appId: string;
+  /** The Cast session id; for a mirroring route, which this library lists under its route id, that id. */
+  sessionId: string;
+  /** `CastSession::GetRouteDescription`. */
+  routeDescription: string;
+}
+
+/** `mojom::CastProviderState`. */
+export interface CastProviderState {
+  sessionState: CastSessionState[];
+}
+
 /** What a failed route call rejects with; `code` is a bridge code or `"route_not_found"`. */
 export class MediaRouteError extends Error {
   readonly code: string;
@@ -169,6 +189,28 @@ export interface CastManagerApi {
   registerMediaSinksObserver(observer: MediaSinksObserver, query?: MediaSinksQuery): () => void;
   /** `MediaRouter::RegisterMediaRoutesObserver`. Returns the unregister function. */
   registerMediaRoutesObserver(observer: MediaRoutesObserver): () => void;
+  /**
+   * `IssueManager::RegisterObserver`: told of the top issue (the oldest one still up) now, if there is one, and each time it
+   * changes: `onIssue` for a new one, `onIssuesCleared` when none is left. Issues are per sink (`issue.info.sinkId`), and
+   * go away by themselves after 1 minute (a notification) or 5 minutes (a warning). Returns the unregister function.
+   */
+  registerIssuesObserver(observer: IssuesObserver): () => void;
+  /** `MediaRouterUI::ClearIssue` (`IssueManager::ClearIssue`): the app's UI dismisses an issue. A gone id does nothing. */
+  clearIssue(issueId: number): void;
+  /** `MediaRouter::ClearTopIssueForSink`: clears the top issue when it is about this sink. */
+  clearTopIssueForSink(sinkId: string): void;
+  /**
+   * `LoggerImpl::GetLogsAsValue`, the log of `chrome://media-router-internals`: the last 1000 entries of discovery, route and
+   * mirroring events (and `UI` ones), oldest first. A debugging aid; Chrome gives pages no access to it and neither does this library.
+   */
+  getLogs(): LogEntry[];
+  /** `LoggerImpl::AddObserver`: told of each entry as it is written. Returns the remove function. */
+  registerLogObserver(observer: LogObserver): () => void;
+  /**
+   * `CastMediaRouteProvider::GetState`, the "Cast" tab of `chrome://media-router-internals`: the session each Cast sink runs.
+   * `null` when the media router is off (Chrome: no activity manager).
+   */
+  getCastProviderState(): CastProviderState | null;
   /** The current routes (what `MediaRoutesObserver` last got), parked ones included. */
   getRoutes(): MediaRoute[];
   /** `MediaRouter::TerminateRoute`: stops the receiver app; pages get `sessionEnded` as if the device had. */
@@ -531,6 +573,19 @@ function must(result: BridgeResult): void {
   if (!result.ok) throw new MediaRouteError(result.code, result.description);
 }
 
+/** What the API needs for issues and the log; main.ts makes them (a test may leave them out: no issues are raised then). */
+export interface ApiDiagnostics {
+  issues: RouterIssues;
+  logger: { getLogs(): LogEntry[]; addObserver(observer: LogObserver): () => void };
+  /** False when the media router is off (`--disable-features=MediaRouter`). */
+  enabled: boolean;
+  /**
+   * `MediaRouteStarter::GetScreenCapturePermission`: whether the OS lets the app capture the screen. Chrome asks on macOS
+   * only; `undefined` means it is not asked (every other platform).
+   */
+  screenCapturePermission?: () => boolean;
+}
+
 /** Wire the device source and the session host into the {@link CastManagerApi}. */
 export function createManagerApi(
   sinks: ReturnType<typeof createSinksObservers>,
@@ -539,6 +594,7 @@ export function createManagerApi(
     requests: DefaultPresentationRequests;
     start(webContentsId: number, sinkId: string): Promise<MediaRoute>;
   },
+  diagnostics?: ApiDiagnostics,
 ): CastManagerApi & { dispose(): void } {
   const routeObservers = new ObserverSet<MediaRoute>(() => host.mediaRoutes());
   const unobserve = host.observeSessions(() => routeObservers.notify());
@@ -557,6 +613,31 @@ export function createManagerApi(
   return {
     registerMediaSinksObserver: (observer, query) => sinks.register(observer, query),
     registerMediaRoutesObserver: (observer) => routeObservers.add((routes) => observer.onRoutesUpdated(routes)),
+    registerIssuesObserver(observer) {
+      if (observer === null || typeof observer !== "object") throw new TypeError("observer must be an object");
+      return diagnostics?.issues.manager.registerObserver(observer) ?? (() => {});
+    },
+    clearIssue(issueId) {
+      if (typeof issueId !== "number") throw new TypeError("issueId must be a number");
+      diagnostics?.issues.manager.clearIssue(issueId);
+    },
+    clearTopIssueForSink(sinkId) {
+      if (typeof sinkId !== "string") throw new TypeError("sinkId must be a string");
+      diagnostics?.issues.manager.clearTopIssueForSink(sinkId);
+    },
+    getLogs: () => diagnostics?.logger.getLogs() ?? [],
+    registerLogObserver(observer) {
+      if (typeof observer !== "function") throw new TypeError("observer must be a function");
+      return diagnostics?.logger.addObserver(observer) ?? (() => {});
+    },
+    getCastProviderState() {
+      if (diagnostics?.enabled === false) return null;
+      return {
+        sessionState: host.mediaRoutes()
+          .filter((r) => r.providerId === "cast" && r.appId !== "")
+          .map((r) => ({ sinkId: r.sinkId, appId: r.appId, sessionId: r.id, routeDescription: r.description })),
+      };
+    },
     getRoutes: () => host.mediaRoutes(),
     async terminateRoute(routeId) {
       need(routeId);
@@ -575,14 +656,29 @@ export function createManagerApi(
       const mode = (options as { castMode?: unknown } | null | undefined)?.castMode;
       if (mode === "tab_mirror" || mode === "desktop_mirror") {
         validateStartCasting(sinkId, options);
-        if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
-        return host.startCasting(sinkId, options as StartMirroringCastingOptions);
+        try {
+          if (host.startCasting === undefined) throw new MediaRouteError("unable_to_cast", "mirroring is not enabled: pass the mirroring option to createCastManager");
+          // MediaRouterUI::CreateRoute: after `CreateRouteParameters`, a desktop capture needs the OS permission (macOS)
+          if (mode === "desktop_mirror" && diagnostics?.screenCapturePermission?.() === false) {
+            diagnostics.issues.uiScreenPermission(sinkId);
+            throw new MediaRouteError("unable_to_cast", "the screen capture permission is not granted");
+          }
+          return await host.startCasting(sinkId, options as StartMirroringCastingOptions);
+        } catch (err) {
+          if (err instanceof MediaRouteError && err.code === "unable_to_cast") diagnostics?.issues.uiUnableToCast(mode, sinkId);
+          throw err;
+        }
       }
       const o = options as { webContentsId?: unknown } | null | undefined;
       if (typeof sinkId !== "string") throw new TypeError("sinkId must be a string");
       if (typeof o?.webContentsId !== "number") throw new TypeError("options.webContentsId must be a number");
       if (mode !== undefined && mode !== "presentation") throw new RangeError(`unsupported cast mode: ${String(mode)}`);
-      return presentation.start(o.webContentsId, sinkId);
+      try {
+        return await presentation.start(o.webContentsId, sinkId);
+      } catch (err) {
+        if (err instanceof MediaRouteError && err.code === "unable_to_cast") diagnostics?.issues.uiUnableToCast("presentation", sinkId);
+        throw err;
+      }
     },
     switchMirroringSourceTab(routeId, webContentsId) {
       if (typeof webContentsId !== "number") throw new TypeError("webContentsId must be a number");

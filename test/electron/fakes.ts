@@ -60,6 +60,8 @@ export class FakeClient extends EventEmitter<{
   connectDelayMs = 0;
   launchError: Error | null = null;
   launchDelayMs = 0;
+  /** `LAUNCH_STATUS` values the fake receiver sends before the launch resolves. */
+  launchStatuses: string[] = [];
   apps: ReceiverApplication[] = [];
   volume = { level: 0.5, muted: false, controlType: "attenuation", stepInterval: 0.05 };
   sent: { namespace: string; destinationId: string; payload: unknown }[] = [];
@@ -120,9 +122,10 @@ export class FakeClient extends EventEmitter<{
     return Object.fromEntries(appIds.map((id) => [id, this.availableApps === null || this.availableApps.includes(id)]));
   }
 
-  async launch(appId: string): Promise<ReceiverApplication> {
+  async launch(appId: string, options?: { onStatus?: (status: never) => void }): Promise<ReceiverApplication> {
     this.calls.push(`launch ${appId}`);
     if (!this.connected) throw new CastConnectionError("not connected");
+    for (const status of this.launchStatuses) options?.onStatus?.(status as never);
     if (this.launchDelayMs) await new Promise((r) => setTimeout(r, this.launchDelayMs));
     if (this.launchError) throw this.launchError;
     const k = ++this.n;

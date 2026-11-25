@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import type { CastDevice } from "../discovery/index.ts";
 import { MirroringActivity, type MirroringClient, type MirroringServiceFactory } from "./mirroring-activity.ts";
 import type { MirroringStats } from "./stats/statistics.ts";
+import { classifyLaunchFailure, type RouterIssues } from "../electron/issues.ts";
 import { desktopMediaSource, mirroringSourceFor, sinkSupportsSource, tabMediaSource, type MirroringType } from "./routing.ts";
 
 /** `MediaCastMode` values this library implements besides the Presentation API. */
@@ -74,6 +75,13 @@ export interface MirroringManagerOptions {
   /** The app's command line (`app.commandLine`), for Chrome's `--disable-cast-letterboxing`. */
   commandLine?: { hasSwitch(name: string): boolean };
   log?(level: "info" | "error", message: string): void;
+  /** Where Chrome raises its issues for a mirroring route (`CastActivityManager`, `MediaRouterUI`); none without it. */
+  issues?: RouterIssues;
+  /**
+   * `GetCastMirroringPlayoutDelay`: the `--cast-mirroring-target-playout-delay` switch, used for a route that does not
+   * ask for a delay of its own (`MirroringActivity::StartSession`).
+   */
+  defaultTargetPlayoutDelayMs?: number;
 }
 
 interface Entry {
@@ -133,15 +141,19 @@ export class MirroringManager {
    */
   async startMirroring(sinkId: string, options: StartMirroringOptions): Promise<MirroringRoute> {
     if (this.disposed) throw new MirroringRouteError("cancelled", "the manager is disposed");
+    const issues = this.options.issues;
     const device = this.options.findDevice(sinkId);
     if (device === undefined) throw new MirroringRouteError("sink_not_found", `no sink ${sinkId}`);
     const mediaSourceId = this.mediaSourceFor(options);
     const source = mirroringSourceFor(mediaSourceId)!;
     if (options.targetPlayoutDelayMs !== undefined) source.targetPlayoutDelayMs = options.targetPlayoutDelayMs;
+    else if (this.options.defaultTargetPlayoutDelayMs !== undefined) source.targetPlayoutDelayMs = this.options.defaultTargetPlayoutDelayMs;
     // A sink is offered for a source only when it can run one of its apps (the sinks query of `CastMediaSource`).
     if (!sinkSupportsSource(source, device.capabilities)) {
       throw new MirroringRouteError("unable_to_cast", `${device.name} cannot receive this mirroring source`);
     }
+    // `MediaRouterUI::CreateRoute`, once the route can be made: the dialog's earlier issues go.
+    issues?.routeRequested();
     for (const entry of [...this.entries.values()]) {
       if (entry.route.sinkId === sinkId) entry.activity.stopMirroring();
     }
@@ -149,6 +161,9 @@ export class MirroringManager {
     if (source.type === "tab") this.terminateRoutesOfTab(options.webContentsId!);
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
+    // `CastActivityManager::LaunchSession` -> `MaybeShowIssueAtLaunch`
+    issues?.desktopAudioNotSupportedAtLaunch(options.castMode, options.withAudio === true, sinkId);
+    const launched: { failure?: ReturnType<typeof classifyLaunchFailure> } = {};
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
     const entry = { stats: undefined } as unknown as Entry;
     const client = this.options.createClient(device);
@@ -160,6 +175,20 @@ export class MirroringManager {
       createService: this.options.createService,
       commandLine: this.options.commandLine,
       log,
+      ...(issues === undefined ? {} : {
+        onLaunchStatus: (status) => {
+          if (status === "user_pending_authorization") issues.pendingUserAuth({ id: sinkId, name: device.name });
+          else issues.userAllowed(sinkId);
+        },
+        onLaunchFailed: (err) => {
+          // the provider's issue first (HandleLaunchSessionResponseFailures), then the dialog's (OnRouteResponseReceived)
+          const launchFailure = (launched.failure = classifyLaunchFailure(err));
+          issues.launchFailed(launchFailure, sinkId, routeId, err instanceof Error ? err.message : String(err));
+          if (launchFailure === "timed_out") issues.uiRouteTimeout(options.castMode, sinkId, "");
+          else if (launchFailure === "user_not_allowed") issues.uiUserNotAllowed({ id: sinkId, name: device.name });
+          else if (launchFailure === "notification_disabled") issues.uiNotificationDisabled({ id: sinkId, name: device.name });
+        },
+      }),
       shouldFetchMirroringStats: () => this.fetchMirroringStats,
       onMirroringStats: (stats) => {
         if (this.entries.get(routeId) !== entry) return;
@@ -204,7 +233,11 @@ export class MirroringManager {
       await activity.start();
     } catch (err) {
       activity.stopMirroring();
-      throw err instanceof MirroringRouteError ? err : new MirroringRouteError("unknown_error", err instanceof Error ? err.message : String(err));
+      if (err instanceof MirroringRouteError) throw err;
+      // RouteRequestResultCode of a launch the receiver or the clock ended
+      const f = launched.failure;
+      const code = f === "timed_out" || f === "user_not_allowed" || f === "notification_disabled" ? f : "unknown_error";
+      throw new MirroringRouteError(code, err instanceof Error ? err.message : String(err));
     }
     if (activity.state === "stopped") throw new MirroringRouteError("unable_to_cast", "mirroring stopped while starting");
     return { ...entry.route };

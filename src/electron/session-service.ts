@@ -2,7 +2,8 @@ import type { BridgeEvent, BridgeResult, SessionSnapshot, VolumeSnapshot } from 
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
-import { CastTimeoutError } from "../client/index.ts";
+import { CastTimeoutError, type LaunchOptions } from "../client/index.ts";
+import { classifyLaunchFailure, originNameForDisplay, type RouterIssues } from "./issues.ts";
 import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
@@ -48,7 +49,7 @@ export interface CastClientLike {
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
-  launch(appId: string): Promise<ReceiverApplication>;
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication>;
   stop(sessionId: string): Promise<ReceiverStatus>;
   setVolume(volume: { level: number } | { muted: boolean }): Promise<ReceiverStatus>;
   getStatus(): Promise<ReceiverStatus>;
@@ -139,6 +140,8 @@ export interface CastSessionServiceOptions {
    * recorded in `routes_by_frame_`). Not called for a join, which Chrome does not record there.
    */
   onSessionLaunched?(senderId: number): void;
+  /** Where Chrome raises its issues (`CastActivityManager` and `MediaRouterUI`); none are raised without it. */
+  issues?: RouterIssues;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -458,6 +461,14 @@ export class CastSessionService {
    */
   addSinkByAddress(device: AccessCodeDevice): Promise<AddSinkResult> {
     return this.accessCode.addSinkByAddress(device);
+  }
+
+  /**
+   * `CastMediaSinkServiceImpl::Start`: `OpenChannels(GetFixedIPSinksFromCommandLine(), SinkSource::kMdns)`: a channel to each
+   * of `--cast-device-ips` at once (no randomized delay), retried as a discovered device's is.
+   */
+  openFixedSinks(devices: CastDevice[]): void {
+    for (const device of devices) void this.sinkService.openSink(device, { source: "discovery" });
   }
 
   /** Change `enabled` and `deviceDuration` while running, as Chrome applies its policies. */
@@ -1023,9 +1034,25 @@ export class CastSessionService {
     cancelled: { value: boolean },
   ): Promise<SessionSnapshot> {
     let app: ReceiverApplication;
+    const issues = this.options.issues;
     try {
-      app = await client.launch(appId);
+      // CastActivityManager::HandleLaunchSessionResponse: the receiver's "waiting for its user" and "user allowed" statuses
+      app = await client.launch(appId, issues === undefined ? undefined : {
+        onStatus: (status) => {
+          if (status === "user_pending_authorization") issues.pendingUserAuth({ id: device.id, name: device.name });
+          else issues.userAllowed(device.id);
+        },
+      });
     } catch (err) {
+      if (issues !== undefined && !discard.value && !cancelled.value) {
+        // The provider's issue first (HandleLaunchSessionResponseFailures), then the dialog's (OnRouteResponseReceived)
+        const failure = classifyLaunchFailure(err);
+        const sink = { id: device.id, name: device.name };
+        issues.launchFailed(failure, device.id, "", describe(err));
+        if (failure === "timed_out") issues.uiRouteTimeout("presentation", device.id, originNameForDisplay(sender.origin));
+        else if (failure === "user_not_allowed") issues.uiUserNotAllowed(sink);
+        else if (failure === "notification_disabled") issues.uiNotificationDisabled(sink);
+      }
       if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
       throw new MappedError("session_error", describe(err));
     }
