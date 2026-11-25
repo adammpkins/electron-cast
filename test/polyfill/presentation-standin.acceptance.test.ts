@@ -161,3 +161,27 @@ test("close() and terminate() tell the main process", async () => {
   await tick(5);
   assert.deepEqual(h.calls.filter((c) => c.method === "terminate").map((c) => c.params), [{ connectionId: id }]);
 });
+
+// presentation_connection.cc: DidClose(reason) enqueues a PresentationConnectionCloseEvent with the reason and a message
+test("a close event carries the reason (closed, error, wentaway) and a message, also for the page's own close()", async () => {
+  const h = setup();
+  h.handlers.start = () => ({ ok: true, value: { id: "p", url: URL1 } });
+  h.run(`window.__ev = []; window.__start = () => new PresentationRequest(${JSON.stringify(URL1)}).start().then((c) => {
+    c.onclose = (e) => __ev.push([e.reason, e.message]); c.onterminate = (e) => __ev.push(["terminate", e.reason === undefined]); return c; });`);
+  const startAndEnd = async (n: number, change: Record<string, unknown>): Promise<void> => {
+    h.run(`__start()`);
+    await tick(5);
+    const id = h.calls.filter((c) => c.method === "start")[n]!.params.connectionId;
+    h.emit({ type: "statechange", connectionId: id, ...change });
+    await tick(5);
+  };
+  await startAndEnd(0, { state: "closed", reason: "closed", message: "" });
+  await startAndEnd(1, { state: "closed", reason: "error", message: "" });
+  await startAndEnd(2, { state: "closed", reason: "wentaway", message: "" });
+  await startAndEnd(3, { state: "terminated" });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.run("__ev"))), [["closed", ""], ["error", ""], ["wentaway", ""], ["terminate", true]]);
+
+  h.run(`window.__ev = []; __start().then((c) => c.close());`);
+  await tick(5);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.run("__ev"))), [["closed", ""]]);
+});

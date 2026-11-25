@@ -25,6 +25,15 @@
 
 ### Added
 
+- **The channel says what Chrome's says, and waits as Chrome's does** (not yet tried on a real device). CONNECT carries
+  `userAgent`, `connType`, `origin` and `senderInfo`; LAUNCH carries `language`, `supportedAppTypes` and `appParams`
+  (from the presentation URL once it is parsed); the app's virtual connection is invisible only for `invisibleSender`.
+  `LAUNCH_STATUS` `USER_PENDING_AUTHORIZATION` and `USER_ALLOWED` keep a launch open (without extending its timeout), and
+  `USER_NOT_ALLOWED` and `USER_NOTIFICATIONS_DISABLED` fail it with Chrome's messages (`CastLaunchError`). Requests wait 5 s
+  and a launch 60 s (2 minutes at most), the keep-alive timers restart on every message received, the ping timer fires
+  once and a failed keep-alive write closes the channel. A page's close event carries blink's reason and message
+  ([docs/DESIGN.md](docs/DESIGN.md#what-the-channel-sends-and-waits-for)).
+
 - `npm run live:checks` ([examples/live-checks](examples/live-checks)): unattended live checks for DIAL dedup (read-only) and
   for casting to one named device from the top page, same-origin and cross-origin iframes, a sandboxed iframe, and the
   app's own UI. The live iframe harness (`npm run live:iframe`) and the read-only discovery probes are in too.

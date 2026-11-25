@@ -5,6 +5,7 @@
 import { randomBytes } from "node:crypto";
 import type { BridgeEvent, InitializeResult, SessionSnapshot } from "../polyfill/bridge-types.ts";
 import type { CastSessionService } from "./session-service.ts";
+import { launchFieldsOf } from "./launch-fields.ts";
 import type { DialService } from "../dial/index.ts";
 import { DialRouteError, DialRouteProvider } from "../dial/route-provider.ts";
 import type { CastDevice } from "../discovery/index.ts";
@@ -22,6 +23,14 @@ import {
 import type { ParsedEnvelope } from "./presentation-envelope.ts";
 import { chooseSource } from "./presentation-source.ts";
 
+/**
+ * Why a connection closed, as the page's close event reports it: blink's `PresentationConnectionCloseReason`
+ * (third_party/blink/public/mojom/presentation/presentation.mojom) as `PresentationConnectionCloseReason` names it in
+ * script (presentation_connection.cc `ConnectionCloseReasonToEnum`): CONNECTION_ERROR is `error`, CLOSED `closed`,
+ * WENT_AWAY `wentaway`.
+ */
+export type CloseReason = "error" | "closed" | "wentaway";
+
 export interface PresentationRequestInfo { urls: string[]; origin: string; senderId: number }
 
 export interface PresentationConnectionHandle {
@@ -35,8 +44,11 @@ export interface PresentationConnectionHandle {
   terminate(): void;
   /** Handler -> page. While null, messages are queued; assigning a function flushes the queue in order. */
   onmessage: ((message: string) => void) | null;
-  /** Called once, when the connection closes for any reason. */
-  onclose: ((reason: "closed" | "terminated") => void) | null;
+  /**
+   * Called once, when the connection closes for any reason. `closeReason` is the reason a "closed" connection reports
+   * (`closed` when absent); a terminated connection has none.
+   */
+  onclose: ((reason: "closed" | "terminated", closeReason?: CloseReason) => void) | null;
 }
 
 /** An error thrown by the handler; `name` is a DOMException name the page can map onto. */
@@ -84,7 +96,7 @@ class Conn implements PresentationConnectionHandle {
   dialRouteId: string | null = null;
   /** The latest session snapshot seen for this connection (namespaces, receiver). */
   snapshot: SessionSnapshot | null;
-  onclose: ((reason: "closed" | "terminated") => void) | null = null;
+  onclose: ((reason: "closed" | "terminated", closeReason?: CloseReason) => void) | null = null;
   private readonly owner: CastPresentationHandler;
   private queue: string[] = [];
   private msgHandler: ((message: string) => void) | null = null;
@@ -148,12 +160,12 @@ class Conn implements PresentationConnectionHandle {
   }
 
   /** Close once: no more sends or deliveries, the queue is dropped, onclose fires. */
-  end(reason: "closed" | "terminated"): void {
+  end(reason: "closed" | "terminated", closeReason?: CloseReason): void {
     if (this.isClosed) return;
     this.isClosed = true;
     this.queue.length = 0;
     const cb = this.onclose;
-    if (cb !== null) cb(reason);
+    if (cb !== null) cb(reason, reason === "closed" ? (closeReason ?? "closed") : undefined);
   }
 }
 
@@ -270,6 +282,8 @@ export class CastPresentationHandler {
       capabilities: parsed?.capabilities ?? [],
       appAvailability: true,
       timeoutMs: parsed?.launchTimeout ?? 60000,
+      // supportedAppTypes, appParams and invisibleSender of the URL, once the URL parser reports them (see LaunchFields)
+      ...launchFieldsOf(parsed),
       ...(req.deviceId === undefined ? {} : { deviceId: req.deviceId }),
     };
     const res = choice.dial !== undefined
@@ -448,7 +462,8 @@ export class CastPresentationHandler {
     const state = this.senders.get(senderId);
     if (state === undefined) return;
     this.senders.delete(senderId);
-    for (const conn of state.conns.values()) conn.end("closed");
+    // Blink closes the connection of a destroyed or frozen frame with WENT_AWAY (PresentationConnection::CloseConnection)
+    for (const conn of state.conns.values()) conn.end("closed", "wentaway");
     for (const watch of state.watches.values()) watch.close();
     state.watches.clear();
     this.dialRoutesChanged?.();
@@ -636,7 +651,8 @@ export class CastPresentationHandler {
     if (sessionId !== null) {
       await this.service.handle(this.senderOf(conn.senderId, conn.origin), "leaveSession", { sessionId });
     }
-    conn.end("closed");
+    // CastActivity::HandleLeaveSession closes the leaving clients' connections with CLOSED
+    conn.end("closed", "closed");
   }
 
   /** @internal Called by Conn. */

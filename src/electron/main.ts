@@ -563,9 +563,12 @@ export function createCastManager(options: CastManagerOptions): CastManager {
       if (typeof local.connecting === "boolean") {
         (conn as LocalConnectionHandle).onconnect = () => sendTo(sid, { type: "statechange", connectionId, state: "connected" });
       }
-      conn.onclose = (state) => {
+      conn.onclose = (state, closeReason) => {
         if (connections.get(connectionId) === slot) connections.delete(connectionId);
-        sendTo(sid, { type: "statechange", connectionId, state });
+        // A closed connection's close event carries blink's reason and an empty message (PresentationConnection::DidClose(reason))
+        sendTo(sid, state === "closed"
+          ? { type: "statechange", connectionId, state, reason: closeReason ?? "closed", message: "" }
+          : { type: "statechange", connectionId, state });
       };
       if (opened?.(conn) === false) {
         // Declined (OnPresentationResponse hands a connection only to the request it answers): the session stays, but the

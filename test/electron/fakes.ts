@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { CastDevice } from "../../src/discovery/index.ts";
-import type { ReceiverApplication, ReceiverStatus } from "../../src/client/index.ts";
+import type { LaunchOptions, ReceiverApplication, ReceiverStatus } from "../../src/client/index.ts";
 import { CastRequestError, CastConnectionError } from "../../src/client/index.ts";
 import type { BridgeEvent } from "../../src/polyfill/bridge-types.ts";
 
@@ -60,6 +60,11 @@ export class FakeClient extends EventEmitter<{
   connectDelayMs = 0;
   launchError: Error | null = null;
   launchDelayMs = 0;
+  /** What each launch was asked for, and the transport options of each connectTransport. */
+  launchOptions: (LaunchOptions | undefined)[] = [];
+  /** LAUNCH_STATUS values a launch reports (through its onStatus) before it settles. */
+  launchStatuses: ("pending_authorization" | "allowed")[] = [];
+  transportOptions: ({ invisible?: boolean } | undefined)[] = [];
   apps: ReceiverApplication[] = [];
   volume = { level: 0.5, muted: false, controlType: "attenuation", stepInterval: 0.05 };
   sent: { namespace: string; destinationId: string; payload: unknown }[] = [];
@@ -120,9 +125,11 @@ export class FakeClient extends EventEmitter<{
     return Object.fromEntries(appIds.map((id) => [id, this.availableApps === null || this.availableApps.includes(id)]));
   }
 
-  async launch(appId: string): Promise<ReceiverApplication> {
+  async launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication> {
     this.calls.push(`launch ${appId}`);
+    this.launchOptions.push(options);
     if (!this.connected) throw new CastConnectionError("not connected");
+    for (const status of this.launchStatuses) options?.onStatus?.(status);
     if (this.launchDelayMs) await new Promise((r) => setTimeout(r, this.launchDelayMs));
     if (this.launchError) throw this.launchError;
     const k = ++this.n;
@@ -159,8 +166,9 @@ export class FakeClient extends EventEmitter<{
     return this.status();
   }
 
-  connectTransport(id: string): void {
+  connectTransport(id: string, options?: { invisible?: boolean }): void {
     this.calls.push(`connectTransport ${id}`);
+    this.transportOptions.push(options);
     this.transports.add(id);
   }
 

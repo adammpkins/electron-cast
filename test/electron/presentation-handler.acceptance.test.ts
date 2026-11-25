@@ -332,3 +332,29 @@ test("senderGone closes the sender's connections and later events are ignored", 
   await tick();
   assert.equal(got.length, n);
 });
+
+// presentation_connection.cc ConnectionCloseReasonToEnum; CastActivity::HandleLeaveSession (CLOSED);
+// PresentationConnection::CloseConnection on a destroyed or frozen frame (WENT_AWAY)
+test("a connection closes with the reason Chrome gives: closed for leave_session, wentaway for a page that is gone, none for a terminated one", async () => {
+  const left = await started(setup());
+  const leftReasons: unknown[] = [];
+  left.conn.onclose = (state, closeReason) => leftReasons.push([state, closeReason]);
+  out(left.conn, { type: "leave_session", message: left.sid, sequenceNumber: 12 });
+  await tick();
+  assert.deepEqual(leftReasons, [["closed", "closed"]]);
+
+  const h = setup();
+  const gone = await started(h);
+  const goneReasons: unknown[] = [];
+  gone.conn.onclose = (state, closeReason) => goneReasons.push([state, closeReason]);
+  h.handler.senderGone(PAGE.id);
+  assert.deepEqual(goneReasons, [["closed", "wentaway"]]);
+
+  const stopped = await started(setup());
+  const stoppedReasons: unknown[] = [];
+  stopped.conn.onclose = (state, closeReason) => stoppedReasons.push([state, closeReason]);
+  stopped.client.apps = [];
+  stopped.client.pushStatus();
+  await tick();
+  assert.deepEqual(stoppedReasons, [["terminated", undefined]]);
+});

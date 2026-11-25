@@ -214,7 +214,7 @@ top-level await form of the same hang). A CommonJS main is not affected.
 ## Sessions that drop
 
 A session is the app running on the device plus a TLS connection from your main process. The connection is kept alive by
-heartbeat: the client pings every 5 s and fails the connection after 10 s with no traffic from the device. When it fails, the
+heartbeat: the client pings after 5 s of silence and fails the connection when 10 s pass with no message from the device (a completed ping restarts that count, as in Chrome). When it fails, the
 session ends for the page: in the default mode the page's `PresentationConnection` closes after a `disconnect_session`
 message; with `mode: "chromecast"` it gets `sessionEnded` with status `disconnected`.
 

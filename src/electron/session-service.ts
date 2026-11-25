@@ -2,7 +2,10 @@ import type { BridgeEvent, BridgeResult, SessionSnapshot, VolumeSnapshot } from 
 import type { WiredDisplaySink } from "./wired-display/displays.ts";
 import type { CastDevice } from "../discovery/index.ts";
 import type { ReceiverApplication, ReceiverStatus, ReceiverVolume } from "../client/index.ts";
-import { CastTimeoutError } from "../client/index.ts";
+import { CastLaunchError, CastTimeoutError } from "../client/index.ts";
+import type { LaunchOptions } from "../client/index.ts";
+import { launchFieldsOf } from "./launch-fields.ts";
+import type { LaunchFields } from "./launch-fields.ts";
 import {
   ObservedMap, combineSources, createPickerContext, createSinksObservers, type DevicePickerContext, type MediaRoute,
 } from "./manager-api.ts";
@@ -48,13 +51,13 @@ export interface CastClientLike {
   connect(): Promise<void>;
   close(): void;
   send(namespace: string, destinationId: string, payload: string): void;
-  launch(appId: string): Promise<ReceiverApplication>;
+  launch(appId: string, options?: LaunchOptions): Promise<ReceiverApplication>;
   stop(sessionId: string): Promise<ReceiverStatus>;
   setVolume(volume: { level: number } | { muted: boolean }): Promise<ReceiverStatus>;
   getStatus(): Promise<ReceiverStatus>;
   /** `GET_APP_AVAILABILITY`; a client without it is taken to have every app. */
   getAppAvailability?(appIds: string[]): Promise<Record<string, boolean>>;
-  connectTransport(transportId: string): void;
+  connectTransport(transportId: string, options?: { invisible?: boolean }): void;
   closeTransport(transportId: string): void;
   on(event: "message", listener: (msg: ClientMessage) => void): unknown;
   on(event: "receiverStatus", listener: (status: ReceiverStatus) => void): unknown;
@@ -139,6 +142,13 @@ export interface CastSessionServiceOptions {
    * recorded in `routes_by_frame_`). Not called for a join, which Chrome does not record there.
    */
   onSessionLaunched?(senderId: number): void;
+  /**
+   * The receiver asks the user to approve a launch (`pending_authorization`, LAUNCH_STATUS USER_PENDING_AUTHORIZATION)
+   * or reports that they did (`allowed`, USER_ALLOWED). Chrome shows a notification issue for the first and clears the
+   * sink's issue on the second (`CastActivityManager::SendPendingUserAuthNotification`, `ClearTopIssueForSink`); the
+   * launch timeout keeps running meanwhile.
+   */
+  onLaunchStatus?(device: CastDevice, status: "pending_authorization" | "allowed"): void;
 }
 
 /** How long a request that finds no DIAL sink yet waits for the devices' app info (the dialog of Chrome waits for as long as it is open). */
@@ -245,13 +255,13 @@ function parseInitialize(params: unknown): { appId: string; capabilities: string
   return { appId, capabilities, autoJoinPolicy };
 }
 
-function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean } | null {
+function parseRequestSession(params: unknown): { appId: string; capabilities: string[]; timeoutMs: number; appAvailability: boolean; launch: LaunchFields } | null {
   if (!isRecord(params)) return null;
   const { appId, capabilities, timeoutMs } = params;
   if (typeof appId !== "string" || !isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  return { appId, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, launch: launchFieldsOf(params) };
 }
 
 /** `requestSession`'s parameters as a picker request with no DIAL app. */
@@ -268,6 +278,8 @@ interface RequestParams {
   timeoutMs: number;
   /** Offer only the sinks that said they have the Cast app (a page's presentation request). */
   appAvailability: boolean;
+  /** What the LAUNCH carries beyond the app id, from the Cast presentation URL. */
+  launch: LaunchFields;
 }
 
 /** `requestSink` parameters: like `requestSession`'s, with the Cast app id optional and a DIAL app name. */
@@ -280,7 +292,7 @@ function parseRequestSink(params: unknown): RequestParams | null {
   if (!isStringArray(capabilities)) return null;
   const timeout = timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : timeoutMs;
   if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
-  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true };
+  return { appId, dialApp, capabilities, timeoutMs: timeout, appAvailability: params.appAvailability === true, launch: launchFieldsOf(params) };
 }
 
 function parseSessionId(params: unknown): { sessionId: string } | null {
@@ -823,10 +835,10 @@ export class CastSessionService {
         }, p.timeoutMs);
       });
       try {
-        const snapshot = await Promise.race([this.openSession(choice, appId, sender, discard, cancelled), bound]);
+        const snapshot = await Promise.race([this.openSession(choice, appId, sender, discard, cancelled, p), bound]);
         return good(snapshot);
       } catch (err) {
-        if (err instanceof Discarded) return bad("timeout", "timed out");
+        if (err instanceof Discarded) return bad("timeout", "Failed to launch session due to timeout.");
         if (err instanceof MappedError) return bad(err.code, err.message);
         throw err;
       } finally {
@@ -994,6 +1006,7 @@ export class CastSessionService {
     sender: SenderInfo,
     discard: { value: boolean },
     cancelled: { value: boolean },
+    request: Pick<RequestParams, "launch" | "timeoutMs">,
   ): Promise<SessionSnapshot> {
     // A DIAL sink has no Cast port: it is launched by the presentation handler's DIAL route, never as a Cast session.
     if (device.dial !== undefined) throw new MappedError("session_error", "A DIAL device cannot host a Cast session");
@@ -1004,7 +1017,7 @@ export class CastSessionService {
     if (cancelled.value) throw new MappedError("cancel", "cancelled");
     this.launching.set(device.id, (this.launching.get(device.id) ?? 0) + 1);
     try {
-      return await this.launchOn(device, client, appId, sender, discard, cancelled);
+      return await this.launchOn(device, client, appId, sender, discard, cancelled, request);
     } finally {
       const left = (this.launching.get(device.id) ?? 1) - 1;
       if (left > 0) this.launching.set(device.id, left);
@@ -1021,12 +1034,33 @@ export class CastSessionService {
     sender: SenderInfo,
     discard: { value: boolean },
     cancelled: { value: boolean },
+    request: Pick<RequestParams, "launch" | "timeoutMs">,
   ): Promise<SessionSnapshot> {
+    // CastActivityManager::LaunchSession: appParams that are not JSON fail the route before anything is sent
+    // (NO_SUPPORTED_PROVIDER, "Invalid JSON Format of appParams")
+    let appParams: unknown;
+    if (request.launch.appParams !== undefined && request.launch.appParams !== "") {
+      try {
+        appParams = JSON.parse(request.launch.appParams);
+      } catch {
+        throw new MappedError("session_error", "Invalid JSON Format of appParams");
+      }
+      // base::JSONReader gives a none value for null, which LaunchSession leaves out
+      if (appParams === null) appParams = undefined;
+    }
     let app: ReceiverApplication;
     try {
-      app = await client.launch(appId);
+      app = await client.launch(appId, {
+        ...(request.launch.supportedAppTypes === undefined ? {} : { supportedAppTypes: request.launch.supportedAppTypes }),
+        ...(appParams === undefined ? {} : { appParams }),
+        // The request bound is the page's launch timeout; the channel's wait is the same, capped at two minutes
+        timeoutMs: request.timeoutMs,
+        onStatus: (status) => this.options.onLaunchStatus?.(device, status),
+      });
     } catch (err) {
-      if (err instanceof CastTimeoutError) throw new MappedError("timeout", err.message);
+      // HandleLaunchSessionResponse: the messages of the failures, and TIMED_OUT for a launch that never answered
+      if (err instanceof CastTimeoutError) throw new MappedError("timeout", "Failed to launch session due to timeout.");
+      if (err instanceof CastLaunchError) throw new MappedError("session_error", err.description);
       throw new MappedError("session_error", describe(err));
     }
     if (discard.value) {
@@ -1037,7 +1071,7 @@ export class CastSessionService {
       client.closeTransport(app.transportId);
       throw new MappedError("cancel", "cancelled");
     }
-    client.connectTransport(app.transportId);
+    client.connectTransport(app.transportId, request.launch.invisibleSender === true ? { invisible: true } : undefined);
     let status: ReceiverStatus;
     try {
       status = await client.getStatus();
