@@ -1,4 +1,4 @@
-import { test, afterEach } from "node:test";
+import { test, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import { once } from "node:events";
@@ -21,6 +21,18 @@ async function setup(opts: Partial<ConstructorParameters<typeof CastClient>[0]> 
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Lets real I/O run until `cond` holds, without the timers a test may have mocked (setImmediate is not mocked, and
+ * performance.now() bounds the wait in real time).
+ */
+async function until(cond: () => boolean, what: string): Promise<void> {
+  const start = performance.now();
+  while (!cond()) {
+    if (performance.now() - start > 5000) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setImmediate(r));
+  }
+}
 
 test("namespace constants", () => {
   assert.equal(NS.CONNECTION, NS_CONNECTION);
@@ -288,15 +300,26 @@ test("emits receiverStatus for unsolicited status updates", async () => {
 });
 
 test("pings on the heartbeat interval and answers the device's PING with PONG", async () => {
-  const { fake, client } = await setup({ heartbeatIntervalMs: 30 });
-  await client.connect();
-  await fake.ready();
-  await delay(120);
-  const pings = fake.received.filter((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PING");
-  assert.ok(pings.length >= 2, `expected >= 2 pings, got ${pings.length}`);
-  assert.ok(pings.every((p) => p.destinationId === "receiver-0" && p.sourceId === client.senderId));
-  fake.sendJson(NS_HEARTBEAT, "receiver-0", client.senderId, { type: "PING" });
-  await fake.waitFor((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PONG");
+  // Mock timers: the interval is the client's, so the test does not depend on how busy the machine is
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    const { fake, client } = await setup({ heartbeatIntervalMs: 30 });
+    await client.connect();
+    await until(() => fake.received.some((m) => m.namespace === NS_CONNECTION && m.json?.type === "CONNECT"), "CONNECT");
+    const pings = () => fake.received.filter((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PING");
+    mock.timers.tick(29);
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(pings().length, 0, "no PING before the interval");
+    mock.timers.tick(1);
+    await until(() => pings().length === 1, "the first PING");
+    mock.timers.tick(30);
+    await until(() => pings().length === 2, "the second PING");
+    assert.ok(pings().every((p) => p.destinationId === "receiver-0" && p.sourceId === client.senderId));
+    fake.sendJson(NS_HEARTBEAT, "receiver-0", client.senderId, { type: "PING" });
+    await until(() => fake.received.some((m) => m.namespace === NS_HEARTBEAT && m.json?.type === "PONG"), "PONG");
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("closes with an error when the device goes silent, rejecting pending requests", async () => {
@@ -314,14 +337,29 @@ test("closes with an error when the device goes silent, rejecting pending reques
 });
 
 test("inbound traffic of any kind keeps the connection alive", async () => {
-  const { fake, client } = await setup({ heartbeatIntervalMs: 20, heartbeatTimeoutMs: 80 });
-  fake.autoPong = false;
-  await client.connect();
-  await fake.ready();
-  const keepAlive = setInterval(() => fake.sendJson(APP_NS, "transport-1", client.senderId, { type: "tick" }), 20);
-  cleanups.push(() => clearInterval(keepAlive));
-  await delay(250);
-  assert.equal(client.connected, true);
+  mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  try {
+    const { fake, client } = await setup({ heartbeatIntervalMs: 20, heartbeatTimeoutMs: 80 });
+    fake.autoPong = false;
+    await client.connect();
+    await until(() => fake.received.some((m) => m.namespace === NS_CONNECTION && m.json?.type === "CONNECT"), "CONNECT");
+    let ticks = 0;
+    client.on("message", () => ticks++);
+    // 250 ms of app traffic every 20 ms, three times the 80 ms liveness timeout, with no PONG
+    for (let i = 1; i <= 12; i++) {
+      fake.sendJson(APP_NS, "transport-1", client.senderId, { type: "tick" });
+      await until(() => ticks === i, `tick ${i}`);
+      mock.timers.tick(20);
+    }
+    assert.equal(client.connected, true);
+    // and with the traffic stopped, the liveness timeout closes it
+    const closed = once(client, "close");
+    mock.timers.tick(80);
+    const [err] = (await closed) as [Error | undefined];
+    assert.ok(err instanceof CastConnectionError);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("CLOSE from receiver-0 closes the client; CLOSE from a transport emits transportClosed", async () => {
