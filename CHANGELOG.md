@@ -9,6 +9,11 @@ is frozen and behaves as before for pages; it shares the device list.
 
 ### Added
 
+- **`electron-cast dial-test`, a one-command test for DIAL TVs** (`npx electron-cast@next dial-test`; Node 20 or later, no
+  Electron). It runs the library's own DIAL discovery, device description, app info, launch and stop against a real
+  device, asks before it opens YouTube on it, and writes a Markdown report with names, serial numbers, UUIDs, MAC addresses,
+  IP addresses and URL hosts removed, plus a prefilled GitHub issue link. The package gains a `bin` entry
+  (`electron-cast` -> `dist/cli.js`). See the README's "Test a DIAL TV".
 - **A session tracker follows what every device runs**, from the receiver status and media status on the device's
   channel, whoever started it (Chrome's `CastSessionTracker`). Sessions started elsewhere, or by this app before it
   restarted, are reported through the routes observers and `getRoutes()` as non-local routes, as Chrome does;

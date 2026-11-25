@@ -111,6 +111,13 @@ authenticate, and read the receiver status. Do not launch an app, change the vol
 is not yours to disturb, and never to someone else's. Discovery only asks: it never advertises or answers. Do not put a device's
 address, serial number or certificate in a commit, an issue or a test fixture.
 
+DIAL TVs are probed with `electron-cast dial-test` (`src/dial-test/`, built to `dist/cli.js`; [how a volunteer runs
+it](README.md#test-a-dial-tv)). It uses the library's own SSDP discovery, description fetch, app info, launch and stop, so what
+it reports is what the library does. Everything it does is read-only except opening and closing YouTube, which it does only
+after asking. It scrubs its report once, at the end, in `src/dial-test/scrub.ts`; anything new that goes into the report is
+scrubbed there, and the tests in `test/dial-test/` fail if a name, serial number, UDN, MAC, address or app-info value from
+the fake device appears in it. Do not run it against devices that are not yours.
+
 What the project has tested on real devices, and what it has not, is stated in the
 [README](README.md#platforms-and-what-was-tested). New claims of support need a run on the platform or device, and the docs
 say what the run covered and what it did not.
