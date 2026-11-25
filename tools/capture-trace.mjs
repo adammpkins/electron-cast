@@ -7,8 +7,12 @@
 //
 // Usage:
 //   node tools/capture-trace.mjs --host <ip> [--port 8009] --out <file.json> [--app CC1AD845] [--media <url>]
-//        [--content-type video/mp4] [--seconds 20] [--model "Chromecast Ultra"] [--allow-unscrubbed]
-//   node tools/capture-trace.mjs --dry-run --out <file.json>     (in-process fake receiver, no network)
+//        [--content-type video/webm] [--seconds 20] [--model "Chromecast Ultra"] [--allow-unscrubbed] [--keep-failed]
+//   node tools/capture-trace.mjs --dry-run --out <file.json> [--fake-load ok|load-failed|invalid-request|idle-error|never-plays]
+//        (in-process fake receiver, no network; --fake-load makes the fake misbehave on LOAD, for self-tests)
+//   The default media is Big Buck Bunny (c) Blender Foundation, CC BY 3.0, served by Wikimedia Commons.
+//   A failed LOAD (LOAD_FAILED, LOAD_CANCELLED, INVALID_REQUEST, an IDLE status with an idleReason, or no PLAYING
+//   within 15 s) stops the app and exits 1 without writing the trace, unless --keep-failed.
 //   --seconds   playback budget: the time between LOAD being accepted and the final STOP (default 20; 4 in dry run).
 //   --model     the device model recorded in the trace (the Cast protocol does not report it; take it from discovery).
 //
@@ -41,7 +45,7 @@ import { CastClient, NS } from "../src/client/index.ts";
 import { decodeCastMessage, FrameDecoder, PayloadType } from "../src/protocol/index.ts";
 
 const MEDIA_NS = "urn:x-cast:com.google.cast.media";
-const DEFAULT_MEDIA = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+const DEFAULT_MEDIA = "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.720p.vp9.webm";
 const DEVICE_NAME = "Living Room TV";
 
 const args = process.argv.slice(2);
@@ -59,7 +63,8 @@ if (!outFile || (!host && !dryRun)) {
 }
 const appId = opt("app", "CC1AD845");
 const mediaUrl = opt("media", DEFAULT_MEDIA);
-const contentType = opt("content-type", "video/mp4");
+const contentType = opt("content-type", "video/webm");
+const fakeLoad = opt("fake-load", "ok");
 const seconds = Number(opt("seconds", dryRun ? "4" : "20"));
 if (!(seconds > 0)) {
   console.error("--seconds must be a positive number");
@@ -354,7 +359,22 @@ async function startFake() {
     if (msg.namespace === MEDIA_NS) {
       const app = fake.apps[0];
       const reply = (payload) => fake.sendJson(MEDIA_NS, app.transportId, msg.sourceId, payload);
-      if (type === "LOAD") {
+      if (type === "LOAD" && fakeLoad === "load-failed") {
+        reply({ type: "LOAD_FAILED", requestId, itemId: 1, reason: "INVALID_COMMAND" });
+      } else if (type === "LOAD" && fakeLoad === "invalid-request") {
+        reply({ type: "INVALID_REQUEST", requestId, reason: "INVALID_COMMAND" });
+      } else if (type === "LOAD" && fakeLoad === "idle-error") {
+        // What a device does when it cannot fetch the media: a normal-looking reply that is already IDLE.
+        media.contentId = msg.json.media.contentId;
+        media.contentType = msg.json.media.contentType;
+        setState("IDLE");
+        reply({ ...mediaStatus(requestId), status: [{ ...mediaStatus(requestId).status[0], idleReason: "ERROR" }] });
+      } else if (type === "LOAD" && fakeLoad === "never-plays") {
+        media.contentId = msg.json.media.contentId;
+        media.contentType = msg.json.media.contentType;
+        setState("BUFFERING");
+        reply(mediaStatus(requestId));
+      } else if (type === "LOAD") {
         media.contentId = msg.json.media.contentId;
         media.contentType = msg.json.media.contentType;
         media.base = 0;
@@ -385,13 +405,38 @@ async function startFake() {
 
 function sessionRunner(client) {
   let mediaSessionId;
+  let playerState;
+  let loadProblem; // set by a status or error that means the media will not play
+  const watchers = new Set();
   client.on("message", (m) => {
     if (m.namespace !== MEDIA_NS || typeof m.data !== "string") return;
     try {
-      const id = JSON.parse(m.data).status?.[0]?.mediaSessionId;
-      if (typeof id === "number") mediaSessionId = id;
+      const msg = JSON.parse(m.data);
+      const entry = msg.status?.[0];
+      if (typeof entry?.mediaSessionId === "number") mediaSessionId = entry.mediaSessionId;
+      if (typeof entry?.playerState === "string") playerState = entry.playerState;
+      if (["LOAD_FAILED", "LOAD_CANCELLED", "INVALID_REQUEST"].includes(msg.type)) loadProblem = `${msg.type}${msg.reason ? ` (${msg.reason})` : ""}`;
+      else if (entry?.playerState === "IDLE" && entry.idleReason) loadProblem = `media went IDLE (${entry.idleReason})`;
     } catch {}
+    for (const w of [...watchers]) w();
   });
+  // Resolves when the player reports PLAYING; rejects on a load problem or after timeoutMs.
+  const waitPlaying = (timeoutMs) =>
+    new Promise((res, rej) => {
+      const check = () => {
+        if (loadProblem) return finish(new Error(`LOAD failed: ${loadProblem}`));
+        if (playerState === "PLAYING") return finish();
+      };
+      const timer = setTimeout(() => finish(new Error(`LOAD did not reach PLAYING within ${timeoutMs} ms (last state ${playerState ?? "none"})`)), timeoutMs);
+      function finish(err) {
+        clearTimeout(timer);
+        watchers.delete(check);
+        if (err) rej(err);
+        else res();
+      }
+      watchers.add(check);
+      check();
+    });
   const state = { session: undefined, mediaStarted: false };
   const mediaRequest = (payload) =>
     client.request(MEDIA_NS, state.session.transportId, { ...payload, sessionId: state.session.sessionId }, { timeoutMs: 20000 });
@@ -408,14 +453,21 @@ function sessionRunner(client) {
       client.connectTransport(state.session.transportId);
       checkAbort();
       state.mediaStarted = true;
-      const loaded = await mediaRequest({
-        type: "LOAD",
-        autoplay: true,
-        currentTime: 0,
-        media: { contentId: mediaUrl, streamType: "BUFFERED", contentType },
-      });
+      let loaded;
+      try {
+        loaded = await mediaRequest({
+          type: "LOAD",
+          autoplay: true,
+          currentTime: 0,
+          media: { contentId: mediaUrl, streamType: "BUFFERED", contentType },
+        });
+      } catch (err) {
+        const reply = err?.reply ?? err?.response;
+        throw new Error(`LOAD failed: ${reply?.type ?? err?.message ?? err}${reply?.reason ? ` (${reply.reason})` : ""}`);
+      }
       mediaSessionId ??= loaded.status?.[0]?.mediaSessionId;
-      console.log("media loaded");
+      await waitPlaying(15000);
+      console.log("media loaded and playing");
       const slice = budgetMs / 20;
       await sleep(slice * 2); // buffering, then the PLAYING update
       checkAbort();
@@ -506,6 +558,10 @@ async function main() {
     library: `electron-cast@${pkg.version}`,
     frames,
   };
+  if (failure && !flag("keep-failed")) {
+    console.error("the session failed; not writing the trace (pass --keep-failed to keep it)");
+    return aborted ? 130 : 1;
+  }
   if (leaks.length > 0) {
     console.error(`WARNING: ${leaks.length} value(s) still look unscrubbed:`);
     for (const l of leaks.slice(0, 30)) console.error(`  ${l}`);
