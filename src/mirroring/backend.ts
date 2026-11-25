@@ -83,5 +83,18 @@ export interface MirroringBackend {
   /** True when the existing capture can be reused with the same parameters. */
   resumeVideoCapture(params: VideoCaptureParams, sink: VideoCaptureSink): boolean;
   requestRefreshFrame(): void;
+  /**
+   * `VideoCaptureClient::SwitchVideoCaptureHost` (`OpenscreenSessionHost::SwitchSourceTab`): the capture continues
+   * from the source the host now names, with the same parameters, callback and timeline.
+   */
+  switchVideoCaptureHost(): void;
+  /** `AudioInputDevice::Stop` then `Start` (`SwitchSourceTab`): the audio stream is created again for the new source. */
+  restartAudioCapture(): void;
+  /**
+   * `VideoCaptureHost::Pause` / `Resume` as `CastMirroringServiceHost::Pause` / `Resume` call them (the browser side,
+   * not the client's own pause): the device stops delivering frames, then delivers again.
+   */
+  suspendVideoDevice(): void;
+  resumeVideoDevice(): void;
   processFeedback(resourceUtilization: number): void;
 }

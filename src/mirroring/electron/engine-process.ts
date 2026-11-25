@@ -18,6 +18,11 @@ import { PortBackend } from "./port-backend.ts";
 export type ToEngine =
   | { type: "start"; params: SessionParameters; source: CaptureSource; softwareCodecs: VideoCodec[]; env?: Record<string, string | undefined> }
   | { type: "message"; namespace: string; json: string }
+  /** `SwitchMirroringSourceTab`: `source` is the new tab's capture id. */
+  | { type: "switch-source"; webContentsId: number; source: CaptureSource }
+  /** `CastMirroringServiceHost::Pause` / `Resume`. */
+  | { type: "pause" }
+  | { type: "resume" }
   | { type: "stop" };
 
 /** Engine to main. */
@@ -53,13 +58,14 @@ function agentPortFrom(port: MessagePortLike): AgentPort {
 
 export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = () => process.exit(0)): void {
   let service: MirroringService | undefined;
+  let backend: PortBackend | undefined;
   parentPort.on("message", ({ data, ports }) => {
     if (data.type === "start") {
       const agent = ports[0];
       if (agent === undefined || service !== undefined) return;
       const source = data.source;
       const factory = createMirroringServiceFactory({
-        createBackend: () => new PortBackend(agentPortFrom(agent), source),
+        createBackend: () => (backend = new PortBackend(agentPortFrom(agent), source)),
         encodingSupport: createEncodingSupport({ hardware: new Set(), software: new Set(data.softwareCodecs) }),
         env: data.env,
       });
@@ -75,6 +81,13 @@ export function runEngineProcess(parentPort: ParentPortLike, exit: () => void = 
       );
     } else if (data.type === "message") {
       service?.onMessage(data.namespace, data.json);
+    } else if (data.type === "switch-source") {
+      backend?.setSource(data.source);
+      service?.switchMirroringSourceTab?.(data.webContentsId);
+    } else if (data.type === "pause") {
+      service?.pause?.(() => {});
+    } else if (data.type === "resume") {
+      service?.resume?.(() => {});
     } else if (data.type === "stop") {
       service?.stop();
       service = undefined;

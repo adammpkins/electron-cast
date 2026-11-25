@@ -140,7 +140,7 @@ export class FakeBackend implements MirroringBackend {
     this.paused = false;
     let last = 0;
     this.videoTimer = setInterval(() => {
-      if (this.paused) return;
+      if (this.paused || this.suspended) return;
       const ref = this.now();
       let rtp = Math.round((ref - this.t0) * 90) + 3000;
       if (rtp <= last) rtp = last + 1;
@@ -161,6 +161,31 @@ export class FakeBackend implements MirroringBackend {
   }
 
   requestRefreshFrame(): void {}
+
+  /** What the session asked of the capture, in order, for tests. */
+  readonly events: string[] = [];
+  /** The video device is suspended by the browser side (`CastMirroringServiceHost::Pause`), apart from the client's pause. */
+  suspended = false;
+
+  switchVideoCaptureHost(): void {
+    this.events.push("switch-video");
+    // A new capture device is not suspended.
+    this.suspended = false;
+  }
+
+  restartAudioCapture(): void {
+    this.events.push("restart-audio");
+  }
+
+  suspendVideoDevice(): void {
+    this.events.push("suspend");
+    this.suspended = true;
+  }
+
+  resumeVideoDevice(): void {
+    this.events.push("resume");
+    this.suspended = false;
+  }
 
   processFeedback(resourceUtilization: number): void {
     this.feedback.push(resourceUtilization);

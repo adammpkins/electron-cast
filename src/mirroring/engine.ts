@@ -65,6 +65,19 @@ export function createMirroringServiceFactory(options: EngineOptions): (params: 
     );
     return {
       onMessage: (namespace, json) => host?.onMessage(params.destinationId, namespace, json),
+      // The browser-side half of `MirroringServiceHost` that does not go through the Mirroring Service in Chrome
+      // (`CastMirroringServiceHost::Pause` / `Resume` act on the video capture host directly) is relayed here because the
+      // capture agent's port belongs to the engine.
+      pause: (onPaused) => {
+        backend.suspendVideoDevice();
+        onPaused();
+      },
+      resume: (onResumed) => {
+        backend.resumeVideoDevice();
+        onResumed();
+      },
+      // `MirroringService::SwitchMirroringSourceTab`; the new source has already been handed to the backend.
+      switchMirroringSourceTab: () => host?.switchSourceTab(),
       stop: () => {
         host?.stopSession();
         backend.stopAll?.();

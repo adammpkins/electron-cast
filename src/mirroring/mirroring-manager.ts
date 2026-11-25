@@ -44,6 +44,11 @@ export interface MirroringRoute {
   /** True while the launch is in flight (`MediaRoute::is_connecting`). */
   isConnecting: boolean;
   webContentsId?: number;
+  /**
+   * `MirroringMediaControllerHost::CanFreeze` / `IsFrozen` (`UIMediaSink::freeze_info`): whether the route can be
+   * frozen on its last frame, and whether it is.
+   */
+  freezeInfo: { canFreeze: boolean; isFrozen: boolean };
 }
 
 export class MirroringRouteError extends Error {
@@ -119,6 +124,8 @@ export class MirroringManager {
     for (const entry of [...this.entries.values()]) {
       if (entry.route.sinkId === sinkId) entry.activity.stopMirroring();
     }
+    // `CastActivityManager::DoLaunchSession`: "If there is a route from this frame already, stop it."
+    if (source.type === "tab") this.stopRoutesOfTab(options.webContentsId!);
     const presentationId = `mr_${randomUUID()}`;
     const routeId = `${ROUTE_ID_PREFIX}${presentationId}/${sinkId}/${mediaSourceId}`;
     const log = (level: "info" | "error", message: string): void => this.options.log?.(level, `[${sinkId}] ${message}`);
@@ -127,6 +134,7 @@ export class MirroringManager {
     const activity = new MirroringActivity({
       sink: device,
       source,
+      webContentsId: source.type === "tab" ? options.webContentsId : undefined,
       client,
       createService: this.options.createService,
       log,
@@ -138,12 +146,19 @@ export class MirroringManager {
       },
       onChange: () => {
         if (this.entries.get(routeId) !== entry) return;
-        entry.route = this.routeOf(routeId, source.type, options, activity);
+        entry.route = this.routeOf(routeId, source.type, activity);
         this.notify();
+      },
+      onSourceChanged: (_old, tab) => {
+        // `CastActivityManager::OnSourceChanged`: no two routes may have the same source tab, so the one already
+        // casting the new tab is terminated.
+        for (const other of [...this.entries.values()]) {
+          if (other !== entry && other.activity.webContentsId === tab) other.activity.stopMirroring();
+        }
       },
     });
     entry.activity = activity;
-    entry.route = this.routeOf(routeId, source.type, options, activity);
+    entry.route = this.routeOf(routeId, source.type, activity);
     this.entries.set(routeId, entry);
     this.notify();
     try {
@@ -162,6 +177,50 @@ export class MirroringManager {
     if (entry === undefined) return false;
     entry.activity.stopMirroring();
     return true;
+  }
+
+  /**
+   * `CastMirroringServiceHost::SwitchMirroringSourceTab` as the Share-this-tab-instead control of Chrome's tab-sharing
+   * UI calls it: the route carries on with `webContentsId` as its source, in the same session and with the same route
+   * id (the receiver sees no new session and no renegotiation). Only tab routes switch: Chrome shows the control for
+   * tab capture only, and its host checks the new source is a tab.
+   */
+  switchMirroringSourceTab(routeId: string, webContentsId: number): void {
+    if (!Number.isInteger(webContentsId) || webContentsId < 0) throw new TypeError("webContentsId must be a non-negative integer");
+    const entry = this.entries.get(routeId);
+    if (entry === undefined) throw new MirroringRouteError("route_not_found", `no mirroring route ${routeId}`);
+    if (entry.activity.source.type !== "tab") throw new MirroringRouteError("unable_to_cast", "only a tab route can switch its source tab");
+    if (entry.activity.state !== "mirroring") throw new MirroringRouteError("unable_to_cast", "the route is not mirroring yet");
+    try {
+      entry.activity.switchMirroringSourceTab(webContentsId);
+    } catch (err) {
+      throw err instanceof MirroringRouteError ? err : new MirroringRouteError("unable_to_cast", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * `MediaRouterUI::FreezeRoute`: pause the route's video on its last frame (audio goes on). Nothing happens for a route
+   * that cannot freeze, as in Chrome. Returns false when the route is not a mirroring route.
+   */
+  freezeRoute(routeId: string): boolean {
+    const entry = this.entries.get(routeId);
+    if (entry === undefined) return false;
+    entry.activity.freeze();
+    return true;
+  }
+
+  /** `MediaRouterUI::UnfreezeRoute`. Returns false when the route is not a mirroring route. */
+  unfreezeRoute(routeId: string): boolean {
+    const entry = this.entries.get(routeId);
+    if (entry === undefined) return false;
+    entry.activity.unfreeze();
+    return true;
+  }
+
+  private stopRoutesOfTab(webContentsId: number): void {
+    for (const entry of [...this.entries.values()]) {
+      if (entry.activity.webContentsId === webContentsId) entry.activity.stopMirroring();
+    }
   }
 
   dispose(): void {
@@ -183,7 +242,7 @@ export class MirroringManager {
     throw new TypeError(`unknown castMode ${String(options.castMode)}`);
   }
 
-  private routeOf(routeId: string, type: MirroringType, options: StartMirroringOptions, activity: MirroringActivity): MirroringRoute {
+  private routeOf(routeId: string, type: MirroringType, activity: MirroringActivity): MirroringRoute {
     return {
       id: routeId,
       mediaSource: activity.source.id,
@@ -194,7 +253,8 @@ export class MirroringManager {
       displayName: activity.app?.displayName ?? "",
       sessionId: activity.app?.sessionId ?? "",
       isConnecting: activity.state === "launching",
-      ...(options.webContentsId !== undefined && type === "tab" ? { webContentsId: options.webContentsId } : {}),
+      ...(activity.webContentsId !== undefined ? { webContentsId: activity.webContentsId } : {}),
+      freezeInfo: { canFreeze: activity.canFreeze, isFrozen: activity.isFrozen },
     };
   }
 }

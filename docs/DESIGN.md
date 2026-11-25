@@ -406,6 +406,70 @@ Chrome decides whether the sender's own speakers stay on, and we match it (`Cast
   with and without the mute), so the receiver keeps hearing it. An app that wants local audio from the mirrored tab during a session can call
   `setAudioMuted(false)` on its own `webContents`; the library only restores the state it changed.
 
+### Switching the source tab, and freezing
+
+**Switching** (`CastMirroringServiceHost::SwitchMirroringSourceTab`, `MirroringService::SwitchMirroringSourceTab`,
+`OpenscreenSessionHost::SwitchSourceTab`, `MirroringActivity::DidGetTabSourceId`, `CastActivityManager::OnSourceChanged`).
+The session is **not renegotiated**: the OFFER, the senders, the encoders, the target bitrate, frame ids and RTP timelines
+are untouched, and the receiver sees one uninterrupted stream. What changes, in Chrome's order:
+
+1. The host starts observing the new page, drops its video capture host (`video_capture_host_ = nullptr`) and its
+   `web_contents_audio_muter_` (so the old tab is audible locally again), and calls the service. Here:
+   `host.ts` `switchMirroringSourceTab` unmutes the old page if the library muted it, mutes the new one the same way
+   (never touching a page someone else muted), and sends the new page's capture id to the engine.
+2. `SwitchSourceTab` gives the `VideoCaptureClient` a new `VideoCaptureHost` (`SwitchVideoCaptureHost`): the client
+   stops the old device and restarts with the same parameters and frame callback, with `accumulated_time_ =
+   last_timestamp_ + 1 ms` so the timeline continues. It also does `audio_input_device_->Stop(); Start()`, which asks the
+   host for a new audio stream for the new tab (and binds the new tab's Muter). Here: `session-host.ts` `switchSourceTab`
+   calls `backend.switchVideoCaptureHost()` and `restartAudioCapture()`; the capture agent opens the new page's
+   `getUserMedia` stream, stops the old tracks, starts new pumps, rebases its RTP clock to last RTP + 90 ticks (1 ms), and
+   keeps the video and audio encoders. A new capture is not frozen (below). The audio encoder keeps its timeline; the gap
+   in capture is resolved by the existing underrun rule.
+3. `DidGetTabSourceId` updates the activity's `frame_tree_node_id_` and `routes_by_frame_`, terminates any other route of
+   the new tab, and sets the play state to PLAYING. Here: `MirroringActivity.webContentsId`, the manager's one-route-per-tab
+   rule, and `freezeInfo.isFrozen` back to false. **The route's id and `media_source` do not change in Chrome and do not
+   here**; the page it is bound to is `route.webContentsId` (and `members`).
+
+Public entry point: Chrome has none in the Media Router; the "Share this tab instead" control of the tab-sharing UI
+(`TabSharingUI`, its `SourceCallback`) calls the host. `CastManager.switchMirroringSourceTab(routeId, webContentsId)` takes
+that place, named after the host method. Deviations: a route that is still launching refuses (Chrome has no host yet); a
+page that is already the source is a no-op (Chrome restarts capture and then ignores the unchanged id).
+
+Only **tab** routes switch. Chrome's host `CHECK`s that the new source is a web contents, `ShowTabSharingUI` is for tab
+capture only, and the control is behind `AccessCodeCastTabSwitchingUi` (an internal UI flag, not mirrored here). A desktop
+route refuses with `unable_to_cast`; Chrome has no desktop-source switch to port.
+
+Not ported: the remoting branch of `SwitchSourceTab` (remoting is not offered), and `routes_by_frame_` also holding
+Presentation API routes: Chrome ends a Cast SDK route of the new page when it becomes a mirroring source, here only
+other mirroring routes of that page end. The same one-route-per-page rule at launch (`DoLaunchSession`: "If there is a
+route from this frame already, stop it") is applied to mirroring routes too. Not observed: the mirrored page being
+destroyed (`WebContentsDestroyed` stops the session in Chrome), which was already the case before switching existed.
+
+**Freezing** (`MediaRouterUI::FreezeRoute` / `UnfreezeRoute` -> `MirroringMediaControllerHostImpl::Freeze` / `Unfreeze` ->
+`MirroringActivity::Pause` / `Play` -> `CastMirroringServiceHost::Pause` / `Resume`). Freezing pauses the *video capture
+host* only (`VideoCaptureHost::Pause`, `SingleClientVideoCaptureHost::Pause` -> `MaybeSuspendDevice`): the mirroring
+service, its client, senders, refresh timer and the **audio stream are not told**, no frames are produced and the receiver
+keeps the last frame it was given. `RequestRefreshFrame` does nothing while the device is suspended
+(`FrameSinkVideoCaptureDevice::RequestRefreshFrame`), so the refresh timer cannot unfreeze it; `Resume` restarts the
+capturer, which delivers a frame at once. Here: `route.freezeInfo = { canFreeze, isFrozen }` (Chrome's
+`UIMediaSink::freeze_info`), `freezeRoute` / `unfreezeRoute` on the manager, `MirroringService.pause` / `resume`, and in
+the agent a `frozen` flag that drops capture frames and refresh requests and, on unfreeze, sends the last frame again
+(stamped with the time that passed) as the restarted capturer would. The flag is separate from the session's own
+`pause`/`resume` (the capture client's pause during encoder reconfiguration), because Chrome's browser-side pause is below
+the client.
+
+- `Freeze()` starts a 500 ms one-shot timer (`kPauseDelay`) and ignores requests while it runs; `Unfreeze()` acts at once.
+- `can_play_pause` becomes true at the end of `NegotiateMirroring` (`OnRemotingStateChanged(false)`) and false while
+  remoting; here `canFreeze` becomes true when the session reports `didStart` (the ANSWER is in and capture has begun),
+  since a pause before that finds no capture host in Chrome and does nothing. When remoting is ported this should follow
+  `OnRemotingStateChanged` too. `is_frozen` is `can_freeze && play_state == PAUSED`, set when the pause request has been
+  made (the callback of `CastMirroringServiceHost::Pause` runs after posting to the IO thread), not when the device
+  confirmed.
+- The pause request goes main -> engine -> agent because the agent's port belongs to the engine (Chrome's host talks to the
+  video capture host directly).
+- The receiver's behaviour while frozen (how long it holds the last frame, whether it shows a spinner) is the receiver's;
+  that needs a real device.
+
 ### Codecs
 
 Opus (48 kHz stereo, 10 ms frames, 128 kbps; `audio_encoder.cc` `OpusImpl`) and VP8 are always offered. VP9 is offered
@@ -421,7 +485,7 @@ H264, VP8) with the hardware-first rule, in `session-host.ts`. No encoder is bun
   to (ANSWER, RTCP reports, ACKs, NACKs), not Chrome's receiver app. **No real device has been used.** Whether a real
   Chromecast accepts this OFFER, and what it does with the VP8 we produce, is unverified; the live harness in
   `examples/live-mirroring/` is how to find out.
-- Not ported: Remoting (RPC playback), tab switching (`DidGetTabSourceId`), pause and resume, the stats analyzer and
+- Not ported: Remoting (RPC playback), the stats analyzer and
   UMA, the GPU/hardware encoder denylist and re-offer after an encoder failure (an encoder failure stops the session),
   letterboxing, `GET_CAPABILITIES` (Chrome sends it only for remoting).
 - Chrome's `OnAppMessage` compares a message's `source_id` with the sender's id and its `destination_id` with the

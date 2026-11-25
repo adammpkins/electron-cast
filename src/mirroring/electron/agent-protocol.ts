@@ -37,6 +37,11 @@ export type EngineToAgent =
   | { t: "key-frame" }
   | { t: "pause" }
   | { t: "resume" }
+  /** `SwitchSourceTab`: capture continues from `source`; `video` and `audio` say which streams to move. */
+  | { t: "switch"; source: CaptureSource; video: boolean; audio: boolean }
+  /** `VideoCaptureHost::Pause` / `Resume` from `CastMirroringServiceHost`: the device stops delivering, then delivers again. */
+  | { t: "freeze" }
+  | { t: "unfreeze" }
   | { t: "refresh" }
   | { t: "encode-audio"; seq: number }
   | { t: "drop-audio"; seq: number }

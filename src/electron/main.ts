@@ -467,6 +467,7 @@ export function createCastManager(options: CastManagerOptions): CastManager {
     members: r.webContentsId === undefined ? [] : [r.webContentsId],
     parkedSenders: [],
     parked: false,
+    freezeInfo: r.freezeInfo,
   });
   const api = createManagerApi(createSinksObservers(discovery), {
     mediaRoutes: () => [
@@ -496,6 +497,19 @@ export function createCastManager(options: CastManagerOptions): CastManager {
               throw err;
             }
           },
+    switchMirroringSourceTab:
+      mirroring === undefined
+        ? undefined
+        : (id, webContentsId) => {
+            try {
+              mirroring!.switchMirroringSourceTab(id, webContentsId);
+            } catch (err) {
+              if (err instanceof MirroringRouteError) throw new MediaRouteError(err.code, err.message);
+              throw err;
+            }
+          },
+    freezeRoute: (id) => mirroring?.freezeRoute(id) ?? false,
+    unfreezeRoute: (id) => mirroring?.unfreezeRoute(id) ?? false,
     setSessionVolume: (id, v) => service.setSessionVolume(id, v),
     detachSession: (id) => service.detachSession(id),
   });

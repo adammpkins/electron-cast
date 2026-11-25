@@ -25,7 +25,7 @@ interface AudioMeta {
 
 export class PortBackend implements MirroringBackend {
   private readonly port: AgentPort;
-  private readonly source: CaptureSource;
+  private source: CaptureSource;
   private videoSink: VideoCaptureSink | undefined;
   private audioSink: AudioCaptureSink | undefined;
   private videoCallbacks: VideoEncoderCallbacks | undefined;
@@ -248,6 +248,46 @@ export class PortBackend implements MirroringBackend {
     this.videoSink = sink;
     this.port.postMessage({ t: "resume" });
     return true;
+  }
+
+  /** The capture source the next start or switch uses: what `CastMirroringServiceHost::source_media_id_` is in Chrome. */
+  setSource(source: CaptureSource): void {
+    this.source = source;
+  }
+
+  private switchPending: { video: boolean; audio: boolean } | undefined;
+
+  /**
+   * One `switch` for both streams, since one `getUserMedia` call serves both tracks. Before capture has started there is
+   * nothing to move: the start message carries the new source already.
+   */
+  private requestSwitch(kind: "video" | "audio"): void {
+    if (!this.started || this.stopped) return;
+    if (this.switchPending === undefined) {
+      const pending = { video: false, audio: false };
+      this.switchPending = pending;
+      queueMicrotask(() => {
+        this.switchPending = undefined;
+        if (!this.stopped) this.port.postMessage({ t: "switch", source: this.source, video: pending.video, audio: pending.audio });
+      });
+    }
+    this.switchPending[kind] = true;
+  }
+
+  switchVideoCaptureHost(): void {
+    this.requestSwitch("video");
+  }
+
+  restartAudioCapture(): void {
+    this.requestSwitch("audio");
+  }
+
+  suspendVideoDevice(): void {
+    this.port.postMessage({ t: "freeze" });
+  }
+
+  resumeVideoDevice(): void {
+    this.port.postMessage({ t: "unfreeze" });
   }
 
   requestRefreshFrame(): void {

@@ -438,6 +438,19 @@ export class OpenscreenSessionHost implements SenderSessionClient {
     }
   }
 
+  /**
+   * `SwitchSourceTab` for mirroring: the session is not renegotiated. The video capture client moves to the capture
+   * host of the new tab and restarts with the same parameters and callback, and the audio input device is stopped
+   * and started so its stream is created for the new tab. Senders, encoders, the target bitrate and the RTP
+   * timelines carry on. (Not ported: the remoting branch.)
+   */
+  switchSourceTab(): void {
+    if (this.state !== "mirroring") return;
+    this.deps.observer.logInfo?.("Switching the mirroring source tab");
+    if (this.videoCaptureStarted && this.videoSender !== undefined) this.deps.backend.switchVideoCaptureHost();
+    if (this.audioEncoder !== undefined) this.deps.backend.restartAudioCapture();
+  }
+
   /** `SetTargetPlayoutDelay`. */
   private setTargetPlayoutDelay(delayMs: number): void {
     let updated = false;

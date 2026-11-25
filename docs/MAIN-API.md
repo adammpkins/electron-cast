@@ -157,6 +157,24 @@ It rejects with a `MediaRouteError` (`code`: `sink_not_found`, `unable_to_cast`,
 route on a device ends the one already running there, as in Chrome. Mirroring routes show up in
 `registerMediaRoutesObserver` and end on `terminateRoute`, when the receiver's app closes, or on a stream error.
 
+While a tab route runs, the source can change and the video can be frozen, as in Chrome:
+
+```ts
+// "Share this tab instead": same route, same Cast session, no renegotiation; the new page is muted locally and the
+// old one is unmuted (if the library muted it). A page has one route: a mirroring route already on it ends.
+manager.switchMirroringSourceTab(route.id, otherWin.webContents.id);
+
+// Pause the picture on its last frame (the audio goes on). It takes effect after 500 ms; unfreezing is immediate.
+manager.registerMediaRoutesObserver({ onRoutesUpdated: (routes) => routes.forEach((r) => console.log(r.id, r.freezeInfo)) });
+manager.freezeRoute(route.id); // ignored unless freezeInfo.canFreeze is true
+manager.unfreezeRoute(route.id);
+```
+
+`route.id` and `route.mediaSource` keep their values across a switch (Chrome's route does not change either); the page the
+route is bound to is in `route.members`. Switching is for `tab_mirror` routes only (`unable_to_cast` for a desktop route,
+a route still launching, or a page that cannot be captured). `freezeInfo` is `{ canFreeze, isFrozen }` on mirroring
+routes. A frozen route unfreezes when its tab is switched.
+
 `mirroring` options: `electron` (the Electron objects to use), `extraVideoCodecs` (`["vp9"]` to offer VP9 besides VP8),
 `engineModulePath` (only if a bundler moved the library's files) and `log`. Opus audio and VP8 video are always offered.
 Capture happens in a hidden window and encoding in WebCodecs; the network sender runs in a utility process, one per

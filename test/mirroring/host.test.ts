@@ -151,3 +151,77 @@ test("host: desktop audio follows Chrome's GetDesktopAudioLoopbackDeviceId: keep
     host.dispose();
   }
 });
+
+/** Another page to switch to: the same stand-in with its own id, mute state and capture id. */
+function otherPage(base: ReturnType<typeof fakeElectron>["page"], id: number, muted = false) {
+  return { ...base, id, muted, muteCalls: [] as boolean[], isAudioMuted() { return this.muted; }, setAudioMuted(m: boolean) { this.muted = m; this.muteCalls.push(m); }, getMediaSourceId: () => `tab-${id}` };
+}
+
+test("host: switching the source tab moves the local mute, mints the new tab's capture id and tells the engine; the old tab is unmuted only if the host muted it", async () => {
+  const { electron, state, page } = fakeElectron();
+  const next = otherPage(page, 8);
+  const pages: Record<number, unknown> = { 7: page, 8: next };
+  (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const service = host.factory(
+    { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
+    {},
+    { send() {} },
+    { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never,
+  );
+  for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
+  await sleep(20);
+  assert.equal(page.muted, true);
+  service.switchMirroringSourceTab!(8);
+  assert.equal(page.muted, false, "the old tab is unmuted (the Muter is dropped)");
+  assert.equal(next.muted, true, "the new tab is muted");
+  assert.deepEqual(state.procs[0]!.posted.at(-1), { type: "switch-source", webContentsId: 8, source: { kind: "tab", mediaSourceId: "tab-8" } });
+  // Switching to a page that is gone changes nothing.
+  assert.throws(() => service.switchMirroringSourceTab!(99), /no page with webContents id 99/);
+  assert.equal(next.muted, true);
+  service.stop();
+  assert.equal(next.muted, false, "the tab being mirrored when the session ends is unmuted");
+  assert.deepEqual(next.muteCalls, [true, false]);
+  assert.deepEqual(page.muteCalls, [true, false]);
+  assert.throws(() => service.switchMirroringSourceTab!(7), /ended/);
+  host.dispose();
+});
+
+test("host: a tab that was already muted stays muted through a switch, and a muted new tab is left alone", async () => {
+  const { electron, state, page } = fakeElectron();
+  page.muted = true;
+  const next = otherPage(page, 8, true);
+  const third = otherPage(page, 9);
+  const pages: Record<number, unknown> = { 7: page, 8: next, 9: third };
+  (electron as unknown as { webContents: { fromId(id: number): unknown } }).webContents = { fromId: (id) => pages[id] };
+  const host = createElectronMirroringServiceFactory({ electron, engineModulePath: "engine.js" });
+  const service = host.factory(
+    { type: "av", receiverAddress: "127.0.0.1", sourceId: "s", destinationId: "d" } as never,
+    {},
+    { send() {} },
+    { type: "tab", id: "urn:x-org.chromium.media:source:tab:7" } as never,
+  );
+  for (let i = 0; i < 100 && state.procs.length === 0; i++) await sleep(5);
+  await sleep(20);
+  service.switchMirroringSourceTab!(8);
+  assert.deepEqual([page.muteCalls, next.muteCalls], [[], []], "nobody else's mute is touched");
+  service.switchMirroringSourceTab!(9);
+  assert.equal(third.muted, true);
+  service.stop();
+  assert.equal(third.muted, false);
+  assert.equal(next.muted, true);
+  host.dispose();
+});
+
+test("host: pause and resume go to the capture and report once requested; after the end they do nothing", async () => {
+  const { state, service, host } = await start();
+  const done: string[] = [];
+  service.pause!(() => done.push("paused"));
+  service.resume!(() => done.push("resumed"));
+  assert.deepEqual(done, ["paused", "resumed"]);
+  assert.deepEqual(state.procs[0]!.posted.slice(-2), [{ type: "pause" }, { type: "resume" }]);
+  service.stop();
+  service.pause!(() => done.push("late"));
+  assert.deepEqual(done, ["paused", "resumed"]);
+  host.dispose();
+});

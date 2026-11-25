@@ -9,8 +9,14 @@
   routing): OFFER/ANSWER, VP8 (VP9 opt-in) and Opus, AES encryption, RTCP, NACK retransmission and bitrate adaptation.
   Capture and WebCodecs encoding run in a hidden window; the sender runs in a utility process per route. No new
   dependencies. Tested end to end against a fake receiver (unit, integration and an Electron smoke test); not yet
-  tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, tab switching,
-  pause and resume, hardware codecs.
+  tried on a real device. `examples/live-mirroring/` is the harness for that. Not ported: remoting, hardware codecs.
+- **Switch the mirrored tab, freeze the picture.** `switchMirroringSourceTab(routeId, webContentsId)` moves a
+  `tab_mirror` route to another page without ending or renegotiating the session (Chrome's "share this tab instead":
+  capture and the audio stream restart on the new page, encoders and timelines carry on, local muting moves to the new
+  page, and a second route on the same page ends). `freezeRoute` / `unfreezeRoute` pause and resume the video on its last
+  frame as Chrome's freeze does (audio goes on, 500 ms delay), and mirroring routes report `freezeInfo` (`canFreeze`,
+  `isFrozen`). Tested against the fake receiver and the capture agent's stand-ins; the receiver's behaviour while frozen
+  and a real tab switch are for a live test (`examples/live-mirroring`).
 
 ## 0.4.0
 

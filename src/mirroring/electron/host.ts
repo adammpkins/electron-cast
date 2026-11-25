@@ -107,6 +107,22 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
     let ready = false;
 
     let unmuteTab: (() => void) | undefined;
+    // The page being mirrored (`CastMirroringServiceHost::web_contents()`), the agent's own page, and whether the
+    // start message has been given its capture id yet.
+    let tabTarget: WebContentsMirrorLike | undefined;
+    let agentContents: WebContentsMirrorLike | undefined;
+    let minted = false;
+    // CastMirroringServiceHost::CreateAudioStream binds a Muter for the tab's audio group (crbug.com/40708932): the
+    // tab is silent locally for the whole session and unmuted when the host goes away. Another feature may have
+    // muted the tab first, so only a mute made here is undone.
+    const muteTab = (target: WebContentsMirrorLike): void => {
+      if (target.setAudioMuted !== undefined && target.isAudioMuted?.() === false) {
+        target.setAudioMuted(true);
+        unmuteTab = () => {
+          if (!target.isDestroyed()) target.setAudioMuted?.(false);
+        };
+      }
+    };
     const teardown = (): void => {
       if (ended) return;
       ended = true;
@@ -149,6 +165,7 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           },
         });
         const wc = win.webContents;
+        agentContents = wc;
         wc.setWindowOpenHandler(() => ({ action: "deny" }));
         wc.on("will-navigate", (ev) => ev.preventDefault());
         wc.session.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === "media" || permission === "display-capture"));
@@ -160,17 +177,11 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
           const tabId = Number(source.id.slice(source.id.lastIndexOf(":") + 1));
           const target = e.webContents.fromId(tabId);
           if (target === undefined || target.isDestroyed()) throw new Error(`no page with webContents id ${tabId}`);
-          // The id is bound to the requesting frame, so it can only be minted once the agent page has loaded.
-          mintTabSource = () => ({ kind: "tab", mediaSourceId: target.getMediaSourceId(wc) });
-          // CastMirroringServiceHost::CreateAudioStream binds a Muter for the tab's audio group (crbug.com/40708932): the
-          // tab is silent locally for the whole session and unmuted when the host goes away. Another feature may have
-          // muted the tab first, so only a mute made here is undone.
-          if (target.setAudioMuted !== undefined && target.isAudioMuted?.() === false) {
-            target.setAudioMuted(true);
-            unmuteTab = () => {
-              if (!target.isDestroyed()) target.setAudioMuted?.(false);
-            };
-          }
+          tabTarget = target;
+          // The id is bound to the requesting frame, so it can only be minted once the agent page has loaded. A switch
+          // that came in before then has replaced `tabTarget`, so the start carries the newest tab.
+          mintTabSource = () => ({ kind: "tab", mediaSourceId: tabTarget!.getMediaSourceId(wc) });
+          muteTab(target);
           capture = { kind: "tab", mediaSourceId: "" };
         } else {
           const id = desktopStreamId(source.id) ?? "";
@@ -187,7 +198,10 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
         }
 
         await win.loadFile(join(dir, "agent.html"));
-        if (mintTabSource !== undefined) capture = mintTabSource();
+        if (mintTabSource !== undefined) {
+          capture = mintTabSource();
+          minted = true;
+        }
         // Feature-detect what WebCodecs can encode here; VP8 first, anything else only when asked for.
         const supported = (await wc.executeJavaScript(
           `(async () => { const out = []; for (const [name, codec] of Object.entries(${JSON.stringify(PROBE)})) {` +
@@ -236,6 +250,33 @@ export function createElectronMirroringServiceFactory(options: ElectronMirroring
 
     return {
       onMessage: (namespace, json) => post({ type: "message", namespace, json }),
+      // CastMirroringServiceHost::SwitchMirroringSourceTab: the host starts observing the new tab, drops the old tab's
+      // Muter (the audio stream, created again, binds one for the new tab), and tells the Mirroring Service, which
+      // moves its video capture client and audio input device to the new source without renegotiating.
+      switchMirroringSourceTab: (webContentsId) => {
+        if (ended) throw new Error("the mirroring session has ended");
+        if (source.type !== "tab" || tabTarget === undefined) throw new Error("only a tab can be switched");
+        const next = e.webContents.fromId(webContentsId);
+        if (next === undefined || next.isDestroyed()) throw new Error(`no page with webContents id ${webContentsId}`);
+        // Minted first, so a page that cannot be captured leaves the session as it was.
+        const capture: CaptureSource | undefined = minted ? { kind: "tab", mediaSourceId: next.getMediaSourceId(agentContents) } : undefined;
+        unmuteTab?.();
+        unmuteTab = undefined;
+        muteTab(next);
+        tabTarget = next;
+        if (capture !== undefined) post({ type: "switch-source", webContentsId, source: capture });
+      },
+      // CastMirroringServiceHost::Pause / Resume: straight to the video capture host, so audio goes on.
+      pause: (onPaused) => {
+        if (ended) return;
+        post({ type: "pause" });
+        onPaused();
+      },
+      resume: (onResumed) => {
+        if (ended) return;
+        post({ type: "resume" });
+        onResumed();
+      },
       stop: teardown,
     };
   };
