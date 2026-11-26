@@ -885,3 +885,22 @@ test("agent: the overlay leaves frames it cannot draw on as they are", async () 
   await a.command({ t: "encode", rtp: a.rtps()[0]!, overlay: { targetPlayoutDelayMs: 200, lowLatencyMode: true, targetBitrate: 1000, framesAgo: 1, encoderUtilization: 0.5, lossiness: 0 } });
   assert.equal((a.encoders[0]!.encodes[0]!.frame as { data?: unknown }).data, undefined);
 });
+
+test("agent: a capture that starts at the view's size and then grows costs one encoder rebuild, with the overlay on as without it", async () => {
+  // Chromium's tab capture device can deliver its first frame or two at the view's own size (944x530) before it applies
+  // the 1920x1080 constraint and goes on at 2x (1888x1062). MediaVideoEncoderWrapper makes the encoder for the first frame
+  // at once and rebuilds it for the new size once that has lasted 250 ms; the overlay changes neither size.
+  const overlay = { targetPlayoutDelayMs: 200, lowLatencyMode: false, targetBitrate: 5_000_000, framesAgo: 1, encoderUtilization: -1, lossiness: -1 };
+  const a = startAgent();
+  await a.command({ t: "start", source: { kind: "tab", mediaSourceId: "x" }, video: { width: 1920, height: 1080, frameRate: 60, resolutionChangePolicy: "fixed_aspect_ratio" as const } });
+  const sizes: [number, number][] = [[944, 530], [944, 530], [1888, 1062], [1888, 1062], [1888, 1062]];
+  for (const [i, [width, height]] of sizes.entries()) {
+    await a.capture(i * 16_000, { width, height });
+    await a.command({ t: "encode", rtp: a.rtps()[i]!, overlay });
+  }
+  const configured = () => a.encoders.flatMap((e) => e.configures.map((c) => `${c.width}x${c.height}`));
+  assert.deepEqual(configured(), ["944x530"], "the first frame makes the encoder at its own size");
+  assert.deepEqual(a.encoders[0]!.encodes.map((e) => [e.frame.displayWidth, e.frame.displayHeight]), sizes);
+  await a.debounce.elapse();
+  assert.deepEqual(configured(), ["944x530", "1888x1062"], "and one rebuild follows the 250 ms");
+});
