@@ -9,7 +9,7 @@ import { installPresentationReceiver } from "../../polyfill/presentation-receive
 import { MAX_MESSAGE_SIZE, asBytes, messageFields, type ReceiverEnd } from "./local-presentation.ts";
 import type { ReceiverWindow, ReceiverWindowFactory, ReceiverWindowRequest } from "./provider.ts";
 import type { PresentationInfo, ReceiverConnectionCallback } from "./local-presentation.ts";
-import { watchCapture, type OffscreenTabHandle, type Size } from "../../mirroring/offscreen-tab.ts";
+import { watchCapture, type OffscreenTabHandle } from "../../mirroring/offscreen-tab.ts";
 
 /** The part of an Electron `Session` used here. */
 export interface ReceiverSessionLike {
@@ -197,7 +197,7 @@ export interface OffscreenReceiverRequest {
   url: string;
   presentationId: string;
   /** `initial_size`. */
-  size: Size;
+  size: { width: number; height: number };
   /** The tab is gone, for whatever reason. Runs once. */
   onDestroyed(): void;
   /** As {@link ReceiverWindowRequest}'s. */

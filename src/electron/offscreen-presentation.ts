@@ -17,7 +17,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MirroringManager, MirroringRoute } from "../mirroring/mirroring-manager.ts";
-import { captureResolutionConstraint, type OffscreenTabHandle, type OffscreenTabOpener, type PrimaryDisplaySource } from "../mirroring/offscreen-tab.ts";
+import type { OffscreenTabHandle, OffscreenTabOpener } from "../mirroring/offscreen-tab.ts";
+import { getCaptureResolutionConstraint, type PrimaryScreenLike } from "../mirroring/mirror-settings.ts";
 import { LocalControllers, type LocalConnectionHandle } from "./wired-display/controller.ts";
 import { LocalPresentationManager } from "./wired-display/local-presentation.ts";
 import { createReceiverHost, type OffscreenReceiverRequest, type ReceiverHost, type ReceiverIpcMainLike, type ReceiverWindowsOptions } from "./wired-display/electron-windows.ts";
@@ -29,7 +30,7 @@ export interface OffscreenTabElectron {
   /** IPC channel prefix of the tab's receiver bridge; it must differ from a wired display's on the same `ipcMain`. */
   channel: string;
   /** Sizes the tab (`GetCaptureResolutionConstraint`); 1920x1080 without it. */
-  screen?: PrimaryDisplaySource;
+  screen?: PrimaryScreenLike;
   /** Where the generated receiver preload is written; default a new private folder under the system's temporary one. */
   preloadDir?: string;
 }
@@ -82,7 +83,7 @@ export class OffscreenPresentations {
       const tab = openTab({
         url: request.url,
         presentationId: request.presentationId,
-        size: captureResolutionConstraint(screen),
+        size: getCaptureResolutionConstraint(screen),
         onDestroyed: () => {
           if (this.tabs.get(request.presentationId) === tab) this.tabs.delete(request.presentationId);
           request.onDestroyed();

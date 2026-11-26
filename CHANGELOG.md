@@ -48,8 +48,9 @@
   size (16:9, at most 1920x1080), and connects the page to it; the route is `Presenting (<host>)`. It was
   `NotSupportedError`. There is no option to set; pass `screen` in `mirroring.electron` for Chrome's capture size. The
   hidden window's session has no permissions: the presented page cannot capture the screen, the camera or the
-  microphone. Checked against the fake receiver on Windows (`npm run smoke:one-ua`); a real device is checked with
-  `npm run live:checks -- parity --test one-ua`. See
+  microphone. Tested on a Chromecast Ultra from Windows: the page showed on the TV with its sound, messages went both
+  ways, and the page's terminate ended the route and closed the hidden window (`npm run live:checks -- parity --test
+  one-ua`; `npm run smoke:one-ua` runs it against the fake receiver). See
   [DESIGN.md](docs/DESIGN.md#presentation-urls-on-a-cast-device).
 
 ### Fixed
