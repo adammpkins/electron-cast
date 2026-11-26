@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Opt-in, needs the network: checks the Chromium citations in docs/CHROMIUM-MAP.md against the Chromium tree.
 //
-// For each table row it fetches the linked file from raw.githubusercontent.com (chromium/chromium or chromium/openscreen,
-// branch main) and looks for every backticked symbol of the "Symbols" column in it. It also checks that every
+// For each table row it fetches the files its "Chromium file" column links from raw.githubusercontent.com
+// (chromium/chromium or chromium/openscreen, branch main) and looks for every backticked symbol of the "Symbols" column
+// in one of them. It also checks that every
 // Chromium-style path written in backticks anywhere in docs/ exists. The files are only searched as text.
 //
 // Usage: node tools/docs-check-chromium.mjs
@@ -59,25 +60,31 @@ let symbols = 0;
 let paths = 0;
 
 try {
-  // 1. The map: every row names a linked file and the symbols found in it.
+  // 1. The map: every row links one or more files in its "Chromium file" column and names the symbols found in them.
   const mapFile = join(root, "docs/CHROMIUM-MAP.md");
   for (const [index, line] of readFileSync(mapFile, "utf8").split(/\r?\n/).entries()) {
-    const link = /\]\(https:\/\/github\.com\/chromium\/(chromium|openscreen)\/blob\/main\/([^)\s]+)\)/.exec(line);
-    if (link === null || !line.startsWith("|")) continue;
-    const where = `docs/CHROMIUM-MAP.md:${index + 1}`;
+    if (!line.startsWith("|")) continue;
     const cells = line.split("|").map((c) => c.trim());
     // | electron-cast | Chromium file | Symbols | Mirrored | Differs |
+    const links = [...(cells[2] ?? "").matchAll(/\]\(https:\/\/github\.com\/chromium\/(chromium|openscreen)\/blob\/main\/([^)\s]+)\)/g)];
+    if (links.length === 0) continue;
+    const where = `docs/CHROMIUM-MAP.md:${index + 1}`;
     const symbolCell = cells[3] ?? "";
-    const text = await fetchText(RAW[link[1]] + link[2]);
-    rows += 1;
-    if (text === null) {
-      fail(where, `${link[1]}/${link[2]} does not exist on main`);
-      continue;
+    const texts = [];
+    for (const link of links) {
+      const text = await fetchText(RAW[link[1]] + link[2]);
+      if (text === null) fail(where, `${link[1]}/${link[2]} does not exist on main`);
+      else texts.push(text);
     }
+    rows += 1;
+    if (texts.length < links.length) continue;
+    // A row that links several files: each symbol has to be in one of them.
+    const names = links.map((link) => link[2]).join(", ");
     for (const m of symbolCell.matchAll(/`([^`]+)`/g)) {
       const id = identifier(m[1]);
       symbols += 1;
-      if (!new RegExp(`(?<![\\w])${id.replace(/[$]/g, "\\$")}(?![\\w])`).test(text)) fail(where, `"${m[1]}" is not in ${link[2]}`);
+      const pattern = new RegExp(`(?<![\\w])${id.replace(/[$]/g, "\\$")}(?![\\w])`);
+      if (!texts.some((text) => pattern.test(text))) fail(where, `"${m[1]}" is not in ${names}`);
     }
   }
 
