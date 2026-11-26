@@ -23,7 +23,7 @@ const canCopyDial = ref(false);
 onMounted(() => { canCopyDial.value = typeof navigator !== "undefined" && !!navigator.clipboard?.writeText; });
 async function copyDial() {
   try {
-    await navigator.clipboard.writeText("npx electron-cast@next dial-test");
+    await navigator.clipboard.writeText("npx electron-cast dial-test");
     dialCopied.value = true;
     setTimeout(() => (dialCopied.value = false), 1600);
   } catch {
@@ -150,8 +150,7 @@ const tabs = [
           Windows and macOS, with a fake device.
         </p>
         <p class="side wide">
-          Mirroring, presenting to a second display, DIAL and casting from the app's own UI are new in 0.5. Until 0.5.0 they are
-          in the <code>next</code> prerelease: <code>npm i electron-cast@next</code>.
+          Mirroring, presenting to a second display, DIAL and casting from the app's own UI are new in 0.5.0.
         </p>
         <div class="tablewrap">
           <table>
@@ -263,7 +262,7 @@ const tabs = [
                 </button>
                 <span class="sr" role="status" aria-live="polite">{{ dialCopied ? "Copied" : "" }}</span>
               </div>
-              <code class="term-cmd"><span aria-hidden="true">$</span> npx electron-cast@next dial-test</code>
+              <code class="term-cmd"><span aria-hidden="true">$</span> npx electron-cast dial-test</code>
               <p class="term-note">
                 It finds your TV and checks it without changing anything. It asks before opening YouTube on the TV for a few seconds,
                 then prints a report with no names or addresses.

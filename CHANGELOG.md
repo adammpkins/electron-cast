@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+The first stable release of 0.5: `npm i electron-cast` now installs it. It holds everything in the two prereleases
+below (0.5.0-next.1 and 0.5.0-next.2) and the changes in this section. electron-cast's main process now works as Chrome's
+Media Router does: devices are kept open and authenticated, pages get app availability, sessions started by other
+senders are listed, routes can be controlled from the app, and DIAL, wired displays, the Presentation Receiver API and
+tab and desktop mirroring (a port of Chrome's Cast Streaming sender) are in. This section adds an ordinary web page
+presented on a Cast device (Chrome's 1-UA mode), the capture capped at the primary screen as Chrome caps it, more of
+Chrome's mirroring flags, the media router's sink service status and logs, and VP8, VP9 and HEVC quantizer reading.
+
+Upgrading from 0.4.0: read **Changed** under 0.5.0-next.1. `createClient` is called once per device with a new
+signature, and devices at public or loopback addresses are refused unless `sinks.allowAllIps` is set.
 
 ### Chrome parity
 
