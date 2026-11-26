@@ -2,64 +2,13 @@
  * The parts of Chrome's offscreen tab that need no Electron, ported from Chromium:
  *  - `chrome/browser/media/offscreen_tab.cc` (`OffscreenTab::DieIfContentCaptureEnded`, `kMaxWaitForCapture`,
  *    `kPollInterval`),
- *  - `chrome/browser/media/cast_mirroring_service_host.cc` (`GetCaptureResolutionConstraint`, `GetClampedResolution`,
- *    `kMaxResolution`), the size `CastMirroringServiceHost::OpenOffscreenTab` starts the tab with.
+ *  The size `CastMirroringServiceHost::OpenOffscreenTab` starts the tab with is `getCaptureResolutionConstraint` in
+ *  `mirror-settings.ts`, the same cap a tab or desktop capture gets.
  *
  * An offscreen tab is how Chrome's Cast provider serves an ordinary https presentation URL ("1-UA mode"): the URL is
  * loaded in a tab that is in no window, and that tab is mirrored. See docs/DESIGN.md ("Presentation URLs on a Cast
  * device").
  */
-
-export interface Size { width: number; height: number }
-
-/** `kMaxResolution`: "Default resolution constraint." */
-export const MAX_RESOLUTION: Size = { width: 1920, height: 1080 };
-
-/**
- * `CastMirroringServiceHost::GetClampedResolution`: the screen in landscape, fitted into {@link MAX_RESOLUTION} at 16:9
- * in steps of 160x90, and never less than one step.
- */
-export function clampedResolution(screenResolution: Size): Size {
-  let { width, height } = screenResolution;
-  // "Use landscape mode dimensions for screens in portrait mode."
-  if (height > width) [width, height] = [height, width];
-  const widthStep = 160;
-  const heightStep = 90;
-  let clampedWidth: number;
-  let clampedHeight: number;
-  if (MAX_RESOLUTION.height * width < MAX_RESOLUTION.width * height) {
-    clampedWidth = Math.min(MAX_RESOLUTION.width, width);
-    clampedWidth -= clampedWidth % widthStep;
-    clampedHeight = Math.trunc((clampedWidth * heightStep) / widthStep);
-  } else {
-    clampedHeight = Math.min(MAX_RESOLUTION.height, height);
-    clampedHeight -= clampedHeight % heightStep;
-    clampedWidth = Math.trunc((clampedHeight * widthStep) / heightStep);
-  }
-  return { width: Math.max(clampedWidth, widthStep), height: Math.max(clampedHeight, heightStep) };
-}
-
-/** The part of Electron's `screen` that gives `display::Screen::GetPrimaryDisplay().GetSizeInPixel()`. */
-export interface PrimaryDisplaySource {
-  getPrimaryDisplay(): { size: Size; scaleFactor?: number };
-}
-
-/**
- * `CastMirroringServiceHost::GetCaptureResolutionConstraint`: the primary display's size in pixels, clamped; without a
- * screen (Chrome: `display::Screen::Get()` is null), {@link MAX_RESOLUTION}.
- */
-export function captureResolutionConstraint(screen?: PrimaryDisplaySource): Size {
-  if (screen === undefined) return { ...MAX_RESOLUTION };
-  let display: { size: Size; scaleFactor?: number };
-  try {
-    display = screen.getPrimaryDisplay();
-  } catch {
-    return { ...MAX_RESOLUTION };
-  }
-  // `Display::GetSizeInPixel`: the DIP size scaled by the device scale factor, rounded down
-  const scale = display.scaleFactor ?? 1;
-  return clampedResolution({ width: Math.floor(display.size.width * scale), height: Math.floor(display.size.height * scale) });
-}
 
 /** `kMaxWaitForCapture`: how long an offscreen tab waits for its capture to start before it gives up. */
 export const MAX_WAIT_FOR_CAPTURE_MS = 60_000;

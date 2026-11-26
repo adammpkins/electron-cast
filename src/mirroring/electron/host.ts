@@ -77,8 +77,9 @@ export interface ElectronMirroringApi {
   app?: { commandLine: CommandLineLike };
   /**
    * `screen`: its primary display caps the capture resolution (`CastMirroringServiceHost::GetCaptureResolutionConstraint`,
-   * which asks `display::Screen::GetPrimaryDisplay()` for tab and desktop mirroring alike). Without it the capture is
-   * limited to 1920x1080, as in Chrome when it cannot get the screen.
+   * which asks `display::Screen::GetPrimaryDisplay()` for tab and desktop mirroring alike), and gives the size of the
+   * offscreen tab a presentation URL is rendered in (`CastMirroringServiceHost::OpenOffscreenTab`). Without it the
+   * capture is limited to 1920x1080 and the tab is 1920x1080, as in Chrome when it cannot get the screen.
    */
   screen?: PrimaryScreenLike;
   /**
@@ -87,12 +88,6 @@ export interface ElectronMirroringApi {
    * permission is not checked.
    */
   systemPreferences?: { getMediaAccessStatus(mediaType: "screen"): string };
-  /**
-   * `screen`: its primary display gives the size of the offscreen tab a presentation URL is rendered in
-   * (`CastMirroringServiceHost::GetCaptureResolutionConstraint`). Without it the tab is 1920x1080, Chrome's size when it
-   * has no screen.
-   */
-  screen?: { getPrimaryDisplay(): { size: { width: number; height: number }; scaleFactor?: number } };
 }
 
 export interface ElectronMirroringOptions {

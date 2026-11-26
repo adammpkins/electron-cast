@@ -1,35 +1,13 @@
-// The offscreen tab of Chrome's 1-UA mode, the parts that need no Electron: the size it is opened with
-// (`CastMirroringServiceHost::GetCaptureResolutionConstraint`, `GetClampedResolution`), when it destroys itself
+// The offscreen tab of Chrome's 1-UA mode, the parts that need no Electron (its size, `GetCaptureResolutionConstraint`,
+// is tested with the other mirroring settings in clamp-flags.test.ts): when it destroys itself
 // (`OffscreenTab::DieIfContentCaptureEnded`), and what a presentation URL is as a mirroring source
 // (`CastMediaSource::FromMediaSource`, `MirroringActivity::GetMirroringType`, `GetRouteDescription`).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CAPTURE_POLL_INTERVAL_MS, MAX_WAIT_FOR_CAPTURE_MS, captureResolutionConstraint, clampedResolution, watchCapture,
+  CAPTURE_POLL_INTERVAL_MS, MAX_WAIT_FOR_CAPTURE_MS, watchCapture,
 } from "../../src/mirroring/offscreen-tab.ts";
 import { isOffscreenTabSource, offscreenTabSourceFor, routeDescription, sessionTypeFor, sinkSupportsSource } from "../../src/mirroring/routing.ts";
-
-test("GetClampedResolution: 16:9 in steps of 160x90, at most 1920x1080, landscape, never under one step", () => {
-  assert.deepEqual(clampedResolution({ width: 1920, height: 1080 }), { width: 1920, height: 1080 });
-  assert.deepEqual(clampedResolution({ width: 3840, height: 2160 }), { width: 1920, height: 1080 });
-  assert.deepEqual(clampedResolution({ width: 2560, height: 1440 }), { width: 1920, height: 1080 });
-  assert.deepEqual(clampedResolution({ width: 1366, height: 768 }), { width: 1280, height: 720 }, "the height is rounded down to a step");
-  assert.deepEqual(clampedResolution({ width: 1280, height: 1024 }), { width: 1280, height: 720 }, "a narrow screen is fitted by its width");
-  assert.deepEqual(clampedResolution({ width: 1080, height: 1920 }), { width: 1920, height: 1080 }, "portrait is used as landscape");
-  assert.deepEqual(clampedResolution({ width: 3440, height: 1440 }), { width: 1920, height: 1080 }, "a wide screen is fitted by its height");
-  assert.deepEqual(clampedResolution({ width: 100, height: 50 }), { width: 160, height: 90 });
-});
-
-test("GetCaptureResolutionConstraint: the primary display in pixels, or 1920x1080 without a screen", () => {
-  assert.deepEqual(captureResolutionConstraint(), { width: 1920, height: 1080 });
-  assert.deepEqual(captureResolutionConstraint({ getPrimaryDisplay: () => ({ size: { width: 1366, height: 768 } }) }), { width: 1280, height: 720 });
-  assert.deepEqual(
-    captureResolutionConstraint({ getPrimaryDisplay: () => ({ size: { width: 1280, height: 720 }, scaleFactor: 1.5 }) }),
-    { width: 1920, height: 1080 },
-    "GetSizeInPixel: the size in DIPs times the scale factor",
-  );
-  assert.deepEqual(captureResolutionConstraint({ getPrimaryDisplay: () => { throw new Error("no screen yet"); } }), { width: 1920, height: 1080 });
-});
 
 /** Timers the test runs by hand. */
 function clock() {
