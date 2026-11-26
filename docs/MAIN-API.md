@@ -8,7 +8,7 @@ This API does not touch the preload's `mode: "chromecast"`; it works for both mo
 session service.
 
 Media control, casting from the app's own UI, wired displays, adding a device by address and tab and desktop mirroring
-are new in 0.5. Until 0.5.0 is released they are in the `next` prerelease: `npm i electron-cast@next`.
+are new in 0.5.0.
 
 ## Mapping to Chrome
 
